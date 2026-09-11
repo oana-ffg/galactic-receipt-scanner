@@ -1,4 +1,4 @@
-# Receipt Scanner
+# Galactic receipt scanner
 
 A local, hands-free receipt scanning station. Mount a phone above a dark, matte surface,
 open the desktop dashboard, and feed receipts one by one. Original images stay on your

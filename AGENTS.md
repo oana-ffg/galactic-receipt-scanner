@@ -1,4 +1,4 @@
-# Receipt Scanner
+# Galactic receipt scanner
 
 ## Purpose and ownership of the work
 
