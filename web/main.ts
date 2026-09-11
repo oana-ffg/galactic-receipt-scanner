@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import { api } from "./api";
-import { messageOf, PhoneCamera } from "./camera";
+import { PhoneCamera } from "./camera";
+import { messageOf } from "./errors";
 import type { Capture, ScanState } from "./types";
 import "./style.css";
 
@@ -13,7 +14,8 @@ let lastState: ScanState | undefined;
 {
   app.innerHTML = `
     <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter"><strong id="count">0</strong><span>saved receipts</span></div><a href="/signout-with-chatgpt">Sign out</a></header>
-    <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">CONNECT</strong><p id="status">Connecting…</p></div></section>
+    <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
+    <p id="connection-warning" class="connection-warning" role="status"></p>
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}><span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
     <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="recover">Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retry this receipt</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}</div>
@@ -38,14 +40,22 @@ function error(message: string): void {
 function renderState(state: ScanState): void {
   lastState = state;
   element("signal").className = `signal ${state.phase}`;
-  element("phase").textContent =
-    state.phase === "green"
-      ? "SAVED · NEXT"
-      : state.phase === "amber"
-        ? "HOLD STILL"
-        : state.paused
-          ? "PAUSED"
-          : "WAIT";
+  element("connection-warning").textContent = state.previewWarning ?? "";
+  element("phase").textContent = !state.cameraConnected
+    ? state.detectorReady
+      ? "RECONNECTING"
+      : "CAMERA STOPPED"
+    : state.needsAttention
+      ? "NEEDS ATTENTION"
+      : state.phase === "green"
+        ? "SAVED · NEXT"
+        : state.phase === "amber"
+          ? state.activeId
+            ? "SAVING"
+            : "HOLD STILL"
+          : state.paused
+            ? "PAUSED"
+            : "WAIT";
   element("status").textContent = state.message;
   element("count").textContent = String(state.count);
   if (!isCamera) {
@@ -63,6 +73,9 @@ function renderState(state: ScanState): void {
 
 function disconnected(reason = "Connection lost. Waiting to reconnect…"): void {
   element("signal").className = "signal red";
+  element("connection-warning").textContent = "";
+  element("feed").hidden = true;
+  element("empty-preview").hidden = false;
   element("phase").textContent = "DISCONNECTED";
   element("status").textContent = reason;
 }
@@ -76,18 +89,24 @@ function mountCamera(): void {
     renderState,
     () => {
       element<HTMLButtonElement>("enable").disabled = false;
+      element<HTMLButtonElement>("enable").textContent = "Enable camera";
+      element("empty-preview").hidden = false;
     },
   );
   element("enable").onclick = async () => {
     element<HTMLButtonElement>("enable").disabled = true;
+    element<HTMLButtonElement>("enable").textContent = "Starting camera…";
+    element("phase").textContent = "STARTING CAMERA";
+    element("status").textContent =
+      "Loading image checks, then requesting camera access…";
     error("");
     try {
       await camera.start();
       element("empty-preview").hidden = true;
       element<HTMLButtonElement>("enable").disabled = true;
+      element<HTMLButtonElement>("enable").textContent = "Camera enabled";
     } catch (problem) {
-      camera.stop();
-      error(messageOf(problem));
+      camera.stop(messageOf(problem));
     }
   };
   element("recover").onclick = () => void camera.recover();
@@ -146,14 +165,26 @@ function mountDashboard(): void {
         lastSaved = message.lastSaved;
         lastError = message.message;
         renderState(message);
-        if (!previewBusy) {
+        if (!message.streamFresh) {
+          element("feed").hidden = true;
+          element("empty-preview").hidden = false;
+        }
+        if (!previewBusy && message.streamFresh) {
           previewBusy = true;
           try {
             const response = await fetch("/api/station/preview", {
               cache: "no-store",
               redirect: "error",
+              signal: AbortSignal.timeout(4000),
             });
-            if (response.ok) await drawPreview(await response.blob());
+            if (!response.ok)
+              throw new Error("The latest preview is not available yet.");
+            await drawPreview(await response.blob());
+          } catch (problem) {
+            element("feed").hidden = true;
+            element("empty-preview").hidden = false;
+            element("connection-warning").textContent =
+              `Desktop preview is delayed. ${messageOf(problem)} Retrying automatically.`;
           } finally {
             previewBusy = false;
           }
@@ -186,6 +217,7 @@ function mountDashboard(): void {
 async function drawPreview(blob: Blob): Promise<void> {
   const bitmap = await createImageBitmap(blob);
   const canvas = element<HTMLCanvasElement>("feed");
+  canvas.hidden = false;
   canvas.width = bitmap.width;
   canvas.height = bitmap.height;
   const ctx = canvas.getContext("2d")!;

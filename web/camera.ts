@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { messageOf, RequestError } from "./errors";
 import {
   acknowledge,
   pendingCaptures,
@@ -19,8 +20,6 @@ interface PhotoCapture {
   }>;
 }
 type PhotoConstructor = new (track: MediaStreamTrack) => PhotoCapture;
-export const messageOf = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
 export class PhoneCamera {
   private stream: MediaStream | null = null;
   private machine = new CaptureState();
@@ -30,6 +29,8 @@ export class PhoneCamera {
   private connected = false;
   private camera = crypto.randomUUID();
   private sequence = 0;
+  private generation = 0;
+  private connectionIssue = "";
   private canvas = document.createElement("canvas");
   private wakeLock: WakeLockSentinel | null = null;
   constructor(
@@ -50,6 +51,7 @@ export class PhoneCamera {
         "Camera access requires HTTPS. Open the private Site in Safari.",
       );
     this.machine = new CaptureState();
+    const generation = ++this.generation;
     this.status("Loading receipt and hand checks…");
     this.vision = new Vision();
     await this.vision.request();
@@ -84,9 +86,11 @@ export class PhoneCamera {
     this.status(
       `Camera ready: ${this.video.videoWidth} × ${this.video.videoHeight}. Use the desktop controls.`,
     );
-    void this.heartbeat();
-    void this.preview();
+    this.emitState();
+    void this.heartbeat(generation);
+    void this.preview(generation);
     await this.recover();
+    if (!this.running) throw new Error(this.machine.value.message);
   }
   private async keepAwake() {
     try {
@@ -95,19 +99,47 @@ export class PhoneCamera {
       this.status("Keep the phone awake and this page visible.");
     }
   }
-  stop() {
+  stop(message = "Camera stopped. Tap Enable camera to reconnect.") {
+    this.generation++;
     this.running = false;
     this.connected = false;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.vision?.close();
     this.vision = null;
     void this.wakeLock?.release();
-    this.machine.failed("Camera stopped. Enable the camera again.");
-    this.state(this.machine.value);
+    this.machine.value.cameraConnected = false;
+    this.machine.value.detectorReady = false;
+    this.machine.failed(message);
+    this.emitState();
     this.onStopped();
   }
-  private async heartbeat() {
-    while (this.running) {
+  private emitState() {
+    this.state(
+      this.running && !this.connected
+        ? {
+            ...this.machine.value,
+            phase: "red",
+            cameraConnected: false,
+            message: `${this.connectionIssue} Reconnecting automatically; new captures are waiting.`,
+          }
+        : this.machine.value,
+    );
+  }
+  private sessionEnded(error: unknown): boolean {
+    if (
+      !(error instanceof RequestError) ||
+      ![401, 403, 409].includes(error.status)
+    )
+      return false;
+    this.stop(
+      error.status === 409
+        ? "The camera connection expired or another camera took over. Tap Enable camera to reconnect."
+        : error.message,
+    );
+    return true;
+  }
+  private async heartbeat(generation: number) {
+    while (this.running && this.generation === generation) {
       try {
         const result = await api<{ sequence: number; command: string }>(
           "/api/station/heartbeat",
@@ -120,10 +152,7 @@ export class PhoneCamera {
             signal: AbortSignal.timeout(4000),
           },
         );
-        if (!this.connected)
-          this.machine.failed(
-            "Connection recovered. Use Retry upload or Retry this receipt.",
-          );
+        if (!this.running || this.generation !== generation) return;
         this.connected = true;
         if (result.sequence !== this.sequence && !this.busy) {
           this.sequence = result.sequence;
@@ -131,19 +160,18 @@ export class PhoneCamera {
           else this.machine.control(result.command);
         }
       } catch (error) {
+        if (!this.running || this.generation !== generation) return;
+        if (this.sessionEnded(error)) return;
         this.connected = false;
-        this.state({
-          ...this.machine.value,
-          phase: "red",
-          message: `Connection lost: ${messageOf(error)}. Keep the receipt in place.`,
-        });
+        this.connectionIssue = messageOf(error);
+        this.machine.interrupt();
       }
-      if (this.connected) this.state(this.machine.value);
+      this.emitState();
       await delay(700);
     }
   }
-  private async preview() {
-    while (this.running) {
+  private async preview(generation: number) {
+    while (this.running && this.generation === generation) {
       try {
         if (
           this.connected &&
@@ -163,24 +191,40 @@ export class PhoneCamera {
           const analysis = await this.vision!.request(
             await createImageBitmap(this.canvas),
           );
-          if (!this.running || !this.connected) continue;
+          if (!this.running || this.generation !== generation) return;
+          if (!this.connected) continue;
           const id = this.machine.observe(analysis.quality, performance.now());
-          this.state(this.machine.value);
+          this.emitState();
           if (id) await this.capture(id);
-          else
-            await api("/api/station/preview", {
-              method: "POST",
-              headers: {
-                "Content-Type": "image/jpeg",
-                "X-Camera-Id": this.camera,
-              },
-              body: await encode(this.canvas, 0.75),
-              signal: AbortSignal.timeout(4000),
-            });
+          else {
+            const body = await encode(this.canvas, 0.75);
+            try {
+              await api("/api/station/preview", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "image/jpeg",
+                  "X-Camera-Id": this.camera,
+                },
+                body,
+                signal: AbortSignal.timeout(4000),
+              });
+              if (!this.running || this.generation !== generation) return;
+              this.machine.value.previewWarning = undefined;
+              this.machine.value.streamFresh = true;
+            } catch (error) {
+              if (!this.running || this.generation !== generation) return;
+              if (this.sessionEnded(error)) return;
+              this.machine.value.streamFresh = false;
+              this.machine.value.previewWarning = `Desktop preview is delayed. ${messageOf(error)} Retrying automatically.`;
+            }
+            this.emitState();
+          }
         }
       } catch (error) {
-        this.machine.failed(messageOf(error));
-        this.state(this.machine.value);
+        if (!this.running || this.generation !== generation) return;
+        this.stop(
+          `Image checks stopped. ${messageOf(error)} Tap Enable camera to restart the checks.`,
+        );
       }
       await delay(220);
     }
@@ -255,7 +299,7 @@ export class PhoneCamera {
       this.status(messageOf(error));
     } finally {
       this.busy = false;
-      this.state(this.machine.value);
+      this.emitState();
     }
   }
   async recover() {
@@ -269,15 +313,16 @@ export class PhoneCamera {
       );
     } finally {
       this.busy = false;
-      this.state(this.machine.value);
+      this.emitState();
     }
   }
   private async upload(capture: PendingCapture) {
+    this.machine.value.needsAttention = false;
     this.machine.value.phase = "amber";
     this.machine.value.message =
       "Saving original and outputs—do not move the receipt.";
     this.machine.value.activeId = capture.id;
-    this.state(this.machine.value);
+    this.emitState();
     const result = await api<Capture>(`/api/captures/${capture.id}`, {
       method: "POST",
       body: capture.blob,

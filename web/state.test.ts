@@ -39,3 +39,29 @@ it("failure stays red until explicit retry", () => {
   s.control("retry");
   expect(s.value.armed).toBe(true);
 });
+
+it("connection gaps require fresh stability without clearing capture failures", () => {
+  const s = new CaptureState();
+  s.control("start");
+  for (const t of [100, 400, 700]) s.observe(clear, t);
+  s.interrupt();
+  expect(s.observe(clear, 4000)).toBeNull();
+  s.failed("An original still needs uploading.");
+  s.interrupt();
+  for (const t of [5000, 5400, 5800, 6200])
+    expect(s.observe(clear, t)).toBeNull();
+  expect(s.value.needsAttention).toBe(true);
+});
+
+it("a connection gap cannot count as continuously observed receipt removal", () => {
+  const s = new CaptureState();
+  s.control("start");
+  s.saved("saved-id");
+  const empty = { ...clear, ok: false, empty: true };
+  s.observe(empty, 100);
+  s.interrupt();
+  s.observe(empty, 4000);
+  expect(s.value.armed).toBe(false);
+  s.observe(empty, 4500);
+  expect(s.value.armed).toBe(true);
+});

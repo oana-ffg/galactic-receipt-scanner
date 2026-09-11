@@ -111,6 +111,16 @@ header p {
   position: relative;
   overflow: hidden;
 }
+#feed[hidden] {
+  display: none;
+}
+.connection-warning {
+  color: #ffc568;
+  line-height: 1.5;
+}
+.connection-warning:empty {
+  display: none;
+}
 #feed {
   max-width: 100%;
   max-height: 100%;
@@ -263,27 +273,6 @@ h2 {
   min-height: 34px;
   font-size: 12px;
   padding: 6px 10px;
-}
-.pair {
-  max-width: 460px;
-  margin: 12vh auto;
-}
-.pair p {
-  line-height: 1.6;
-  color: #aab8c5;
-}
-.pair label {
-  display: block;
-  margin: 24px 0 14px;
-}
-.pair input {
-  display: block;
-  width: 100%;
-  padding: 12px;
-  margin-top: 8px;
-  border: 1px solid #506273;
-  border-radius: 5px;
-  font-size: 16px;
 }
 @media (max-width: 760px) {
   main {

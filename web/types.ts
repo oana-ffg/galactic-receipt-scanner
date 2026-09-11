@@ -21,6 +21,8 @@ export interface ScanState {
   cameraConnected: boolean;
   streamFresh: boolean;
   detectorReady: boolean;
+  needsAttention?: boolean;
+  previewWarning?: string;
   count: number;
   quality: Quality;
 }

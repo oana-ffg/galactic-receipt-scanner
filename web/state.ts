@@ -3,7 +3,7 @@ export class CaptureState {
   value: ScanState = {
     type: "state",
     phase: "red",
-    message: "Connect the phone, then start scanning.",
+    message: "Camera ready. Choose Start scanning on your computer.",
     paused: true,
     activeId: null,
     lastSaved: null,
@@ -38,6 +38,7 @@ export class CaptureState {
       this.value.message = "Paused.";
     }
     if (action === "start" || action === "retry") {
+      this.value.needsAttention = false;
       this.value.paused = false;
       this.latched = false;
       if (action === "retry") this.value.armed = true;
@@ -87,6 +88,7 @@ export class CaptureState {
     return null;
   }
   saved(id: string) {
+    this.value.needsAttention = false;
     this.value.activeId = null;
     this.value.lastSaved = id;
     this.value.armed = false;
@@ -97,10 +99,18 @@ export class CaptureState {
     this.reset();
   }
   failed(message: string) {
+    this.value.needsAttention = true;
     this.value.activeId = null;
     this.latched = true;
     this.value.phase = "red";
     this.value.message = message;
+    this.reset();
+  }
+
+  interrupt() {
+    // Re-establish stability and continuous paper removal after a connection gap.
+    // Keep saved/failed captures and the removal latch intact.
+    this.absent = 0;
     this.reset();
   }
 }
