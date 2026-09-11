@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-const pairing = "#key=synthetic-browser-test-key";
-const headers = { Authorization: "Bearer synthetic-browser-test-key" };
+const pairing = "";
+const headers = {};
 
-test("hands-free browser capture produces one durable original, crop and searchable PDF", async ({
+test("hands-free browser capture produces one durable original, crop and PDF", async ({
   browser,
   page,
   request,
@@ -23,7 +23,7 @@ test("hands-free browser capture produces one durable original, crop and searcha
   });
   phone.on("pageerror", (error) => errors.push(error.message));
   // Exercise the actual phone page and upload buffer with a synthetic camera stream.
-  // Only the camera device is substituted; detector, state, disk, OCR and PDF are real.
+  // Only the camera device is substituted; detector, state, D1/R2 and PDF are real.
   await phone.addInitScript(() => {
     const canvas = document.createElement("canvas");
     canvas.width = 2000;
@@ -60,9 +60,9 @@ test("hands-free browser capture produces one durable original, crop and searcha
   await phone.getByRole("button", { name: "Enable camera" }).click();
   await expect
     .poll(async () =>
-      (await request.get("/api/state", { headers }))
+      (await request.get("/api/station", { headers }))
         .json()
-        .then((state) => state.streamFresh),
+        .then((station) => station.fresh),
     )
     .toBe(true);
   await page
@@ -77,19 +77,20 @@ test("hands-free browser capture produces one durable original, crop and searcha
     timeout: 25000,
   });
   await expect(page.locator("#count")).toHaveText("1");
-  await expect(page.locator(".capture-row")).toContainText("OCR done", {
-    timeout: 25000,
-  });
+  await expect(page.locator(".capture-row")).toContainText(
+    "OCR awaiting Work",
+    {
+      timeout: 25000,
+    },
+  );
   const response = await request.get("/api/captures", { headers });
-  const { captures, count } = await response.json();
-  expect(count).toBe(1);
+  const { captures } = await response.json();
+  expect(captures).toHaveLength(1);
   const capture = captures[0];
   expect(capture.metadata.captureMethod).toBe("full-resolution-video-frame");
   expect(capture.metadata.quality.ok).toBe(true);
   const raw = await request.get(`/api/files/${capture.id}/raw`, { headers });
   expect((await raw.body()).length).toBeGreaterThan(20000);
-  const text = await request.get(`/api/files/${capture.id}/text`, { headers });
-  expect(await text.text()).toContain("200.00");
   const pdf = await request.get(`/api/files/${capture.id}/pdf`, { headers });
   expect((await pdf.body()).subarray(0, 4).toString()).toBe("%PDF");
   await page.screenshot({
@@ -100,13 +101,14 @@ test("hands-free browser capture produces one durable original, crop and searcha
   // The unchanged paper is still in view; it must not repeatedly trigger captures.
   await expect
     .poll(async () =>
-      (await request.get("/api/state", { headers }))
+      (await request.get("/api/station", { headers }))
         .json()
-        .then((state) => state.armed),
+        .then((station) => station.state?.armed),
     )
     .toBe(false);
   expect(
-    (await (await request.get("/api/captures", { headers })).json()).count,
+    (await (await request.get("/api/captures", { headers })).json()).captures
+      .length,
   ).toBe(1);
   await phone.evaluate(() => {
     (
@@ -115,12 +117,14 @@ test("hands-free browser capture produces one durable original, crop and searcha
   });
   await expect
     .poll(async () =>
-      (await request.get("/api/state", { headers }))
+      (await request.get("/api/station", { headers }))
         .json()
-        .then((state) => state.armed),
+        .then((station) => station.state?.armed),
     )
     .toBe(true);
   await phone.close();
-  await expect(page.locator("#signal")).toHaveClass("signal red");
+  await expect(page.locator("#signal")).toHaveClass("signal red", {
+    timeout: 15000,
+  });
   expect(errors).toEqual([]);
 });

@@ -3,6 +3,8 @@ export interface Quality {
   quad: number[][] | null;
   hands: number[][][];
   reason: string;
+  empty?: boolean;
+  motion?: number;
   focus?: number;
   contrast?: number;
   receiptPixels?: number[];
@@ -26,15 +28,9 @@ export interface ScanState {
 export interface Capture {
   id: string;
   created_at: string;
+  sha256: string;
   status: "checking" | "accepted" | "rejected";
   ocr_status: string;
   ocr_error: string | null;
   metadata: { quality?: Quality; sourcePixels?: number[] };
 }
-
-export type ServerMessage =
-  | ScanState
-  | { type: "frameAck" }
-  | { type: "capture"; id: string }
-  | { type: "libraryChanged" }
-  | { type: "retryUpload" };

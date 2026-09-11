@@ -337,3 +337,16 @@ h2 {
     flex-grow: 1;
   }
 }
+
+@media (max-width: 600px) {
+  header {
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+  header > div:first-child {
+    flex-basis: 100%;
+  }
+  h1 {
+    font-size: 1.3rem;
+  }
+}

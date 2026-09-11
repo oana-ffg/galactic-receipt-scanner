@@ -4,21 +4,41 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && vite build",
+    "assets": "node scripts/assets.mjs",
+    "build": "node scripts/assets.mjs && node scripts/build.mjs",
+    "dev": "node scripts/test-server.mjs",
+    "db:generate": "drizzle-kit generate",
     "test": "vitest run",
-    "format:check": "prettier --check web e2e playwright.config.ts vitest.config.ts package.json tsconfig.json index.html README.md AGENTS.md",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "format:check": "prettier --check web worker db scripts/*.mjs *.ts *.json *.md"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
+    "@techstark/opencv-js": "^5.0.0-release.1",
+    "pdf-lib": "^1.17.1",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260911.1",
     "@playwright/test": "^1.63.0",
     "@types/qrcode": "^1.5.5",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2",
+    "esbuild": "^0.28.2",
     "fake-indexeddb": "^6.2.2",
+    "miniflare": "^4.20260730.0",
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",
     "vite": "^7.1.5",
     "vitest": "^5.0.0"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.0"
+    },
+    "miniflare": {
+      "sharp": "^0.35.4",
+      "undici": "^7.29.0"
+    }
   }
 }

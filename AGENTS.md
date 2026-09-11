@@ -42,22 +42,27 @@ tests, screenshots, commits, or documentation. Only synthetic documents belong i
    audio. Avoid decorative features that compete with the receipt preview.
 
 Test persistence failures, retry conflicts, disconnections, stale frames, hand obstruction,
-capture/removal transitions and clipping. Run Python tests/lint and frontend typecheck,
-build and tests before considering changes complete. Browser-test the actual UI; distinguish
-synthetic verification from physical phone/receipt calibration.
+capture/removal transitions and clipping. Run typechecks, build, unit/integration tests,
+browser tests and dependency audit. Distinguish synthetic checks from physical calibration.
 
 ## Architecture and scope
 
 - Browser-first phone camera plus desktop dashboard; a native iOS capture client is an
   acceptable later fallback if browser camera output is insufficient. Keep capture uploads
   and acknowledgements independent of the client technology.
-- Python/FastAPI backend, OpenCV image checks, MediaPipe hand detection, SQLite metadata.
-- All runtime data belongs under ignored `captures/` or `.local/`. In particular:
-  `captures/raw/`, `captures/processed/`, `captures/pdfs/`, `captures/ocr/`.
-- Serve locally with HTTPS and authenticated pairing. No cloud receipt uploads, telemetry,
-  hosted inference, or public deployment is part of the initial workflow.
-- Report layout, financial classification and a native app are later decisions. The first
-  draft must capture safely and supply readable, traceable derivatives for testing.
+- Deploy one private ChatGPT Sites instance per owner; follow [HOW_TO_SET_UP.md](HOW_TO_SET_UP.md)
+  for the complete installation, storage, access-verification and update procedure.
+- Browser worker: OpenCV/MediaPipe image checks, full-resolution crop and PDF creation.
+  Hosted Cloudflare Worker: owner-authorized routes, D1 metadata and private R2 storage.
+- Public source is generic. Ignore `.openai/hosting.json`, environment files, `captures/`,
+  `.local/`, test output and downloaded model assets. Preserve any existing local captures.
+- Owner-only access is mandatory at both Sites policy and application layers. No public
+  signup, shared SaaS, public bucket/download URLs, bypass credentials, or client-only auth.
+  Verify the saved access policy and deployed unauthenticated denial before handoff.
+- The hosting gateway supplies identity; never expose the Worker directly with unverified
+  identity headers. Missing configuration must fail closed. See SECURITY.md.
+- OCR/extraction and reporting run in the owner's Work/Codex task after scanning. Preserve
+  uncertainty and original source references. Initial PDFs are image PDFs.
 
-Do not publish to GitHub or choose a public licence without the owner's direction.
-Do not use worktrees. Preserve unrelated changes and any existing capture data.
+Publish only authorized source changes to the configured public repository. Never choose
+a licence without the owner's direction. Do not use worktrees or delete original data.

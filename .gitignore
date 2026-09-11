@@ -17,3 +17,10 @@ __pycache__/
 .DS_Store
 test-results/
 playwright-report/
+
+.openai/hosting.json
+.wrangler/
+public/vendor/
+
+.dev.vars
+.dev.vars.*

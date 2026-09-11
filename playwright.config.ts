@@ -11,8 +11,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   webServer: {
-    command: "uv run python -m scripts.e2e_server",
-    url: "http://127.0.0.1:8766/health",
+    command: "node scripts/test-server.mjs",
+    url: "http://127.0.0.1:8766/api/me",
     reuseExistingServer: false,
     timeout: 90000,
   },
