@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import { api } from "./api";
 import { PhoneCamera } from "./camera";
+import { DirectPreview, type PreviewSession } from "./direct-preview";
 import { messageOf } from "./errors";
 import type { Capture, ScanState } from "./types";
 import "./style.css";
@@ -16,7 +17,7 @@ let lastState: ScanState | undefined;
     <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter"><strong id="count">0</strong><span>saved receipts</span></div><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
     <p id="connection-warning" class="connection-warning" role="status"></p>
-    <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}><span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
+    <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
     <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="recover">Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retry this receipt</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}</div>
     <p id="error" class="error" role="alert"></p></section>
@@ -50,14 +51,25 @@ function renderState(state: ScanState): void {
       : state.phase === "green"
         ? "SAVED · NEXT"
         : state.phase === "amber"
-          ? state.activeId
-            ? "SAVING"
-            : "HOLD STILL"
+          ? state.stage === "uploading"
+            ? "SAVING ORIGINAL"
+            : state.stage === "photo"
+              ? "TAKING PHOTO"
+              : state.stage === "checking"
+                ? "CHECKING PHOTO"
+                : "CHECKING STABILITY"
           : state.paused
             ? "PAUSED"
             : "WAIT";
   element("status").textContent = state.message;
   element("count").textContent = String(state.count);
+  if (state.phase === "green" && state.timings) {
+    const seconds =
+      Object.values(state.timings).reduce((sum, ms) => sum + (ms ?? 0), 0) /
+      1000;
+    element("detail").textContent =
+      `Original checked and saved in ${seconds.toFixed(1)} s. PDFs and OCR are processed later.`;
+  }
   if (!isCamera) {
     for (const id of ["start", "pause", "retry"]) {
       element<HTMLButtonElement>(id).disabled =
@@ -65,7 +77,7 @@ function renderState(state: ScanState): void {
     }
     element<HTMLButtonElement>("start").disabled ||= !state.paused;
     element<HTMLButtonElement>("pause").disabled ||= state.paused;
-    if (state.quality.focus !== undefined)
+    if (state.phase !== "green" && state.quality.focus !== undefined)
       element("detail").textContent =
         `Focus score ${state.quality.focus.toFixed(0)} · ${state.quality.reason} · Remove each receipt completely before the next.`;
   }
@@ -122,7 +134,38 @@ function mountDashboard(): void {
   let lastSaved: string | null = null;
   let lastError = "";
   let audio: AudioContext | null = null;
-  let previewBusy = false;
+  const live = element<HTMLVideoElement>("live-feed");
+  let lastVideoFrame = 0;
+  let decodedFrames = 0;
+  const videoFresh = () => {
+    const frames = live.getVideoPlaybackQuality().totalVideoFrames;
+    if (frames !== decodedFrames) {
+      decodedFrames = frames;
+      lastVideoFrame = performance.now();
+    }
+    return (
+      direct.fresh &&
+      lastVideoFrame > 0 &&
+      performance.now() - lastVideoFrame < 2000
+    );
+  };
+  const direct = new DirectPreview(
+    (state) => acceptState(state),
+    () => {},
+    (stream) => {
+      live.srcObject = stream;
+      lastVideoFrame = stream ? performance.now() : 0;
+      decodedFrames = 0;
+      live.hidden = !stream;
+      if (stream) {
+        element("feed").hidden = true;
+        element("empty-preview").hidden = true;
+        void live.play().catch(() => {
+          live.hidden = true;
+        });
+      }
+    },
+  );
   const audioToggle = input("audio");
   audioToggle.onchange = () => {
     if (audioToggle.checked) {
@@ -143,67 +186,84 @@ function mountDashboard(): void {
     oscillator.start();
     oscillator.stop(audio.currentTime + 0.22);
   }
+  function acceptState(state: ScanState) {
+    if (state.lastSaved && state.lastSaved !== lastSaved) {
+      if (lastState) sound(true);
+      void refreshLibrary();
+    }
+    if (
+      state.phase === "red" &&
+      state.message !== lastError &&
+      lastState?.phase === "amber"
+    )
+      sound(false);
+    lastSaved = state.lastSaved;
+    lastError = state.message;
+    renderState(state);
+  }
   async function poll() {
     try {
       const result = await api<{
         state: ScanState | null;
+        camera: string | null;
+        previewSession: PreviewSession | null;
         count: number;
         fresh: boolean;
       }>("/api/station");
+      void direct.sync(result.camera, result.previewSession);
       if (result.state && result.fresh) {
         const message = { ...result.state, count: result.count };
-        if (message.lastSaved && message.lastSaved !== lastSaved) {
-          if (lastState) sound(true);
-          void refreshLibrary();
-        }
-        if (
-          message.phase === "red" &&
-          message.message !== lastError &&
-          lastState?.phase === "amber"
-        )
-          sound(false);
-        lastSaved = message.lastSaved;
-        lastError = message.message;
-        renderState(message);
-        if (!message.streamFresh) {
-          element("feed").hidden = true;
-          element("empty-preview").hidden = false;
-        }
-        if (!previewBusy && message.streamFresh) {
-          previewBusy = true;
-          try {
-            const response = await fetch("/api/station/preview", {
-              cache: "no-store",
-              redirect: "error",
-              signal: AbortSignal.timeout(4000),
-            });
-            if (!response.ok)
-              throw new Error("The latest preview is not available yet.");
-            await drawPreview(await response.blob());
-          } catch (problem) {
-            element("feed").hidden = true;
-            element("empty-preview").hidden = false;
-            element("connection-warning").textContent =
-              `Desktop preview is delayed. ${messageOf(problem)} Retrying automatically.`;
-          } finally {
-            previewBusy = false;
-          }
-        }
+        if (!direct.fresh) acceptState(message);
       } else {
-        disconnected("Waiting for the phone. Sign in and enable its camera.");
+        if (!direct.fresh)
+          disconnected("Waiting for the phone. Sign in and enable its camera.");
         element("count").textContent = String(result.count);
       }
     } catch (problem) {
-      disconnected(messageOf(problem));
+      if (!direct.fresh) disconnected(messageOf(problem));
     }
     setTimeout(() => void poll(), 700);
   }
   void poll();
+  async function preview() {
+    const started = performance.now();
+    if (!videoFresh()) {
+      live.hidden = true;
+      try {
+        const response = await fetch("/api/station/preview", {
+          cache: "no-store",
+          redirect: "error",
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!response.ok) throw new Error("Waiting for a fresh phone preview.");
+        const blob = await response.blob();
+        if (!videoFresh()) await drawPreview(blob);
+      } catch (problem) {
+        if (!videoFresh()) {
+          element("feed").hidden = true;
+          element("empty-preview").hidden = false;
+          element("connection-warning").textContent =
+            `Preview unavailable. ${messageOf(problem)}`;
+        }
+      }
+    } else {
+      live.hidden = false;
+      element("feed").hidden = true;
+      element("empty-preview").hidden = true;
+    }
+    setTimeout(
+      () => void preview(),
+      Math.max(50, 250 - (performance.now() - started)),
+    );
+  }
+  void preview();
   for (const id of ["start", "pause", "retry", "recover"]) {
     element(id).onclick = async () => {
       error("");
       try {
-        await api(`/api/control/${id === "recover" ? "retry-upload" : id}`, {
+        const command = id === "recover" ? "retry-upload" : id;
+        if (direct.command(command)) return;
+        await api(`/api/control/${command}`, {
           method: "POST",
         });
       } catch (problem) {
@@ -266,7 +326,7 @@ async function refreshLibrary(): Promise<void> {
       const detail = document.createElement("p");
       detail.textContent =
         capture.status === "accepted"
-          ? `${capture.metadata.sourcePixels?.join(" × ") ?? ""} source · OCR ${capture.ocr_status}${capture.ocr_error ? ": " + capture.ocr_error : ""}`
+          ? `${capture.metadata.sourcePixels?.join(" × ") ?? ""} source · ${capture.outputs.pdf ? "PDF ready" : "PDF later"} · OCR ${capture.ocr_status}${capture.ocr_error ? ": " + capture.ocr_error : ""}`
           : (capture.metadata.quality?.reason ??
             "Original retained. Retry this receipt.");
       info.append(title, detail);
@@ -276,12 +336,8 @@ async function refreshLibrary(): Promise<void> {
       for (const [kind, label] of [
         ["raw", "Original"],
         ...(capture.ocr_status === "unverified" ? [["ocr", "Extraction"]] : []),
-        ...(capture.status === "accepted"
-          ? [
-              ["image", "Crop"],
-              ["pdf", "PDF"],
-            ]
-          : []),
+        ...(capture.outputs.image ? [["image", "Crop"]] : []),
+        ...(capture.outputs.pdf ? [["pdf", "PDF"]] : []),
       ]) {
         const button = document.createElement("button");
         button.className = "secondary";

@@ -116,16 +116,6 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       smooth = use(new cv.Mat());
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, smooth, new cv.Size(5, 5), 0);
-    const mini = use(new cv.Mat());
-    cv.resize(smooth, mini, new cv.Size(160, 120));
-    if (!full) {
-      if (previous) {
-        let change = 0;
-        mini.data.forEach((v, i) => (change += Math.abs(v - previous![i])));
-        q.motion = change / mini.data.length;
-      }
-      previous = mini.data.slice();
-    }
     const mask = use(new cv.Mat());
     const threshold = cv.threshold(
       smooth,
@@ -181,7 +171,7 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       if (handPoints.length) q.reason = "Move your hands clear.";
       else if (large)
         q.reason =
-          "Cannot see all four paper edges. Flatten it on a dark background.";
+          "Paper outline is unclear. Reduce glare and leave space around the paper.";
       return q;
     }
     candidates.sort((a, b) => b.area - a.area);
@@ -229,6 +219,22 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     cv.Laplacian(interior, lap, cv.CV_64F);
     cv.meanStdDev(lap, mean, std);
     q.focus = std.data64F[0] ** 2;
+    if (!full) {
+      // Compare aligned paper interiors, not the desk or automatic exposure.
+      const mini = use(new cv.Mat());
+      cv.resize(interior, mini, new cv.Size(160, 160));
+      if (previous) {
+        let offset = 0;
+        for (let i = 0; i < mini.data.length; i++)
+          offset += mini.data[i] - previous[i];
+        offset /= mini.data.length;
+        let change = 0;
+        for (let i = 0; i < mini.data.length; i++)
+          change += Math.abs(mini.data[i] - previous[i] - offset);
+        q.motion = change / mini.data.length;
+      }
+      previous = mini.data.slice();
+    }
     const histogram = new Uint32Array(256);
     for (let y = 0; y < interior.rows; y++)
       for (let x = 0; x < interior.cols; x++)
@@ -282,7 +288,7 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       }
     }
     if ((q.motion ?? 0) > 3.5) {
-      q.reason = "Movement detected. Let the receipt settle.";
+      q.reason = "The paper image is changing. Hold the camera steady briefly.";
       return q;
     }
     q.ok = true;
@@ -292,9 +298,9 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     allocated.reverse().forEach((m) => m.delete());
   }
 }
-async function process(bitmap: ImageBitmap, full: boolean) {
+async function process(bitmap: ImageBitmap, full: boolean, outputs: boolean) {
   const quality = analyze(bitmap, full);
-  if (!full || !quality.ok) return { quality };
+  if (!outputs || !quality.ok) return { quality };
   const frame = new OffscreenCanvas(bitmap.width, bitmap.height);
   const context = frame.getContext("2d")!;
   context.drawImage(bitmap, 0, 0);
@@ -344,13 +350,18 @@ async function process(bitmap: ImageBitmap, full: boolean) {
 }
 let ready: Promise<void> | undefined;
 self.onmessage = async (
-  event: MessageEvent<{ id: number; bitmap?: ImageBitmap; full?: boolean }>,
+  event: MessageEvent<{
+    id: number;
+    bitmap?: ImageBitmap;
+    full?: boolean;
+    outputs?: boolean;
+  }>,
 ) => {
-  const { id, bitmap, full } = event.data;
+  const { id, bitmap, full, outputs } = event.data;
   try {
     ready ??= initialize();
     await ready;
-    const result = bitmap ? await process(bitmap, !!full) : {};
+    const result = bitmap ? await process(bitmap, !!full, !!outputs) : {};
     self.postMessage({ id, ...result });
   } catch (error) {
     self.postMessage({

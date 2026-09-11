@@ -23,6 +23,8 @@ export interface ScanState {
   detectorReady: boolean;
   needsAttention?: boolean;
   previewWarning?: string;
+  stage?: "photo" | "checking" | "uploading";
+  timings?: { photoMs?: number; checksMs?: number; saveMs?: number };
   count: number;
   quality: Quality;
 }
@@ -34,5 +36,7 @@ export interface Capture {
   status: "checking" | "accepted" | "rejected";
   ocr_status: string;
   ocr_error: string | null;
+  outputs: { image: boolean; pdf: boolean };
+  acceptedCount?: number;
   metadata: { quality?: Quality; sourcePixels?: number[] };
 }

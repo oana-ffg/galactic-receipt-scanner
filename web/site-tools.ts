@@ -1,4 +1,6 @@
 import { api } from "./api";
+import { Vision } from "./vision";
+import type { Capture } from "./types";
 interface Tool {
   name: string;
   description: string;
@@ -59,6 +61,69 @@ export function registerSiteTools(refresh: () => Promise<void>) {
           ]),
         ),
       };
+    },
+  });
+  context.registerTool({
+    name: "prepare_receipt_outputs",
+    description:
+      "After scanning, create a crop and image PDF from one saved original. Verifies the original checksum, preserves it unchanged, and stores separate derivatives. Never part of the capture loop.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: true },
+    async execute(input) {
+      const captureId = id(input.id);
+      const capture = await api<Capture>(`/api/captures/${captureId}`);
+      if (capture.status !== "accepted")
+        throw new Error(
+          "This original needs review before making a crop or PDF.",
+        );
+      const response = await fetch(`/api/files/${captureId}/raw`, {
+        cache: "no-store",
+        redirect: "error",
+      });
+      if (!response.ok) throw new Error("Could not retrieve the original.");
+      const bytes = await response.arrayBuffer();
+      const hash = Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+      )
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      if (hash !== capture.sha256)
+        throw new Error("Original checksum mismatch. No outputs were created.");
+      const vision = new Vision();
+      try {
+        const result = await vision.request(
+          await createImageBitmap(new Blob([bytes])),
+          true,
+          true,
+        );
+        if (!result.quality.ok || !result.image || !result.pdf)
+          throw new Error(`Review this original: ${result.quality.reason}`);
+        const uploads = await Promise.allSettled(
+          (
+            [
+              ["image", result.image],
+              ["pdf", result.pdf],
+            ] as const
+          ).map(([kind, blob]) =>
+            api(`/api/captures/${captureId}/artifacts/${kind}`, {
+              method: "POST",
+              headers: { "Content-Type": blob.type },
+              body: blob,
+            }),
+          ),
+        );
+        const failed = uploads.find((r) => r.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+        await refresh();
+        return api(`/api/captures/${captureId}`);
+      } finally {
+        vision.close();
+      }
     },
   });
   context.registerTool({

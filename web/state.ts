@@ -82,12 +82,15 @@ export class CaptureState {
     this.value.message = "Hold still—checking the receipt.";
     if (now - this.stable >= 900 && this.frames >= 4) {
       this.value.activeId = crypto.randomUUID();
-      this.value.message = "Capturing and saving—do not move the receipt.";
+      this.value.message = "Taking the photo…";
       return this.value.activeId;
     }
     return null;
   }
-  saved(id: string) {
+  saved(id: string, count?: number) {
+    if (count !== undefined) this.value.count = count;
+    else if (this.value.lastSaved !== id) this.value.count++;
+    this.value.stage = undefined;
     this.value.needsAttention = false;
     this.value.activeId = null;
     this.value.lastSaved = id;
@@ -99,6 +102,7 @@ export class CaptureState {
     this.reset();
   }
   failed(message: string) {
+    this.value.stage = undefined;
     this.value.needsAttention = true;
     this.value.activeId = null;
     this.latched = true;

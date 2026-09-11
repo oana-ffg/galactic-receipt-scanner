@@ -5,7 +5,7 @@ above a dark desk mat, watch the preview on your computer, and feed receipts one
 Red explains a blocking condition; amber means hold still; green confirms saved files.
 
 **Accuracy comes first.** Originals stay immutable, with SHA-256 hashes. Crops and PDFs
-are separate derivatives. Image checks cannot certify every character, OCR result or
+are generated afterward as separate derivatives. Image checks cannot certify every character, OCR result or
 financial value. The operator scans; their Work/Codex session handles downstream processing.
 
 ## Your own instance
@@ -22,18 +22,20 @@ public signup, shared receipt database, pairing secret or public file bucket.
 
 - Browser camera with rear-camera preference, high-resolution stills and a video-frame fallback.
 - OpenCV paper edges, focus/print/motion checks and MediaPipe hand detection in a phone worker.
-- Desktop preview, start/pause/retry controls and optional audio cues over the Internet.
-- Full-resolution crop and image PDF, preserving the original uploaded bytes.
+- Direct live video and controls between owner-authenticated devices when the network allows it, with an Internet preview fallback.
+- Full-resolution original capture; crops and image PDFs are prepared by Work/Codex after scanning.
 - Durable D1 metadata and private R2 objects; retry-safe capture IDs and versioned derivatives.
-- Pending-upload recovery on the phone; green only after the original, crop and PDF are saved.
+- Pending-upload recovery on the phone; green only after the original and quality metadata are durably saved and the returned checksum is verified.
 - Authenticated downloads and WebMCP tools for the owner's downstream Work/Codex task.
+
+For the smoothest preview, put the phone and desktop on the same network and keep one dashboard open. Direct video uses no external relay service; networks that block it use the slower authenticated image preview.
 
 Use light paper on a dark background. Keep all four edges visible and hands out of view.
 Completely remove each receipt before adding the next. Calibrate the first few scans on
 the actual phone: partial fingertips, curled paper, glare and faint print can defeat checks.
 The minimum 900 pixels across a receipt is a quality gate, not a physical-DPI claim.
 
-OCR, categorisation and reporting belong to the downstream AI workflow. Initial PDFs are
+OCR, categorisation and reporting belong to the downstream AI workflow. Downstream PDFs start as
 image PDFs. Preserve exact values, uncertainties and source evidence when processing them.
 
 ## Development

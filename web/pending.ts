@@ -4,8 +4,6 @@ export interface PendingCapture {
   method: string;
   quality: import("./types").Quality;
   sourcePixels: number[];
-  image?: Blob;
-  pdf?: Blob;
 }
 
 async function database(): Promise<IDBDatabase> {

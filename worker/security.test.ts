@@ -33,6 +33,7 @@ it("rejects anonymous, other-user and cross-origin requests on all sensitive rou
     "/api/captures",
     "/api/station",
     "/api/station/preview",
+    "/api/station/direct-preview",
     "/vendor/opencv.js",
     "/api/files/00000000-0000-4000-8000-000000000001/raw",
   ]) {
@@ -78,7 +79,7 @@ it("rejects anonymous, other-user and cross-origin requests on all sensitive rou
     ).status,
   ).toBe(403);
 });
-it("preserves source bytes through retries and conflicts; requires derivatives before green", async () => {
+it("preserves source bytes through retries and conflicts; accepts originals without waiting for derivatives", async () => {
   const id = crypto.randomUUID();
   const data = new Uint8Array([255, 216, 255, 1, 2, 3]);
   const metadata = {
@@ -108,7 +109,8 @@ it("preserves source bytes through retries and conflicts; requires derivatives b
       "POST",
       JSON.stringify({ status: "accepted" }),
     );
-  expect((await final()).status).toBe(409);
+  expect((await final()).status).toBe(200);
+  expect((await request(`/api/files/${id}/pdf`)).status).toBe(404);
   expect(
     (await request(`/api/captures/${id}/artifacts/image`, "POST", data)).status,
   ).toBe(200);
@@ -185,4 +187,70 @@ it("fails closed without owner configuration and never acknowledges a failed obj
   } as never);
   expect(response.status).toBe(503);
   expect(await response.text()).not.toContain("accepted");
+});
+
+it("cannot accept an original with missing quality or a failed original write", async () => {
+  for (const quality of [
+    undefined,
+    { ok: true, receiptPixels: [] },
+    { ok: true, receiptPixels: [899, 1500] },
+    { ok: false, receiptPixels: [1200, 1500] },
+  ]) {
+    const id = crypto.randomUUID();
+    const response = await request(
+      `/api/captures/${id}`,
+      "POST",
+      new Uint8Array([255, 216, 255, 1]),
+      {
+        "x-capture-status": "accepted",
+        "x-capture-metadata": JSON.stringify({ quality }),
+      },
+    );
+    expect(response.status).toBe(409);
+    expect((await request(`/api/captures/${id}`)).status).toBe(404);
+  }
+});
+
+it("binds direct preview signalling to the active camera and one viewer session", async () => {
+  const db = await mf.getD1Database("DB");
+  const row = await db
+    .prepare("SELECT camera FROM station WHERE id=1")
+    .first<{ camera: string }>();
+  const camera = row!.camera;
+  await request(
+    "/api/station/heartbeat",
+    "POST",
+    JSON.stringify({ camera, state: {} }),
+  );
+  const id = crypto.randomUUID();
+  const signal = (body: object, extra: Record<string, string> = {}) =>
+    request("/api/station/direct-preview", "POST", JSON.stringify(body), extra);
+  const offer = { type: "offer", sdp: "synthetic-offer" };
+  const answer = { type: "answer", sdp: "synthetic-answer" };
+  expect(
+    (await signal({ camera: crypto.randomUUID(), id, offer })).status,
+  ).toBe(409);
+  expect(
+    (
+      await signal(
+        { camera, id, offer },
+        { "oai-authenticated-user-email": "intruder@example.test" },
+      )
+    ).status,
+  ).toBe(403);
+  expect((await signal({ camera, id, offer })).status).toBe(200);
+  expect(
+    (await signal({ camera, id: crypto.randomUUID(), offer })).status,
+  ).toBe(409);
+  expect(
+    (await signal({ camera, id: crypto.randomUUID(), answer })).status,
+  ).toBe(409);
+  expect((await signal({ camera, id, answer })).status).toBe(200);
+  expect((await signal({ camera, id, renew: true })).status).toBe(200);
+  const station = await (await request("/api/station")).json();
+  expect(station.previewSession).toMatchObject({ id, offer, answer });
+  expect(
+    (await signal({ camera, id, answer: { type: "offer", sdp: "wrong" } }))
+      .status,
+  ).toBe(400);
 });

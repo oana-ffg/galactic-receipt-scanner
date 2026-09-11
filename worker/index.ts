@@ -180,38 +180,69 @@ interface CaptureRow {
   metadata: string;
   content_type: string;
   ocr_available?: number;
+  image_available?: number;
+  pdf_available?: number;
+  accepted_count?: number;
 }
 function publicCapture(row: CaptureRow) {
   return {
     id: row.id,
+    acceptedCount: row.accepted_count,
     created_at: row.created_at,
     status: row.status,
     sha256: row.sha256,
     metadata: JSON.parse(row.metadata),
     ocr_status: row.ocr_available ? "unverified" : "awaiting Work",
     ocr_error: null,
+    outputs: {
+      image: Boolean(row.image_available),
+      pdf: Boolean(row.pdf_available),
+    },
   };
 }
 async function captureRow(env: Env, id: string): Promise<CaptureRow> {
   const row = await env.DB.prepare(
-    "SELECT *, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available FROM captures WHERE id = ?",
+    "SELECT *, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available, (SELECT COUNT(*) FROM captures WHERE status='accepted') AS accepted_count FROM captures WHERE id = ?",
   )
     .bind(id)
     .first<CaptureRow>();
   requireThat(row, 404, "Capture not found.");
   return row;
 }
-async function stationRow(env: Env) {
+interface StationRow {
+  camera: string | null;
+  expires: number;
+  sequence: number;
+  command: string;
+  state: string | null;
+  updated: number;
+  preview_key: string | null;
+  preview_session: string | null;
+}
+async function stationRow(env: Env): Promise<StationRow> {
+  const row = await env.DB.prepare(
+    "SELECT * FROM station WHERE id=1",
+  ).first<StationRow>();
+  if (row) return row;
   await env.DB.prepare("INSERT OR IGNORE INTO station(id) VALUES (1)").run();
-  return (await env.DB.prepare("SELECT * FROM station WHERE id = 1").first<{
-    camera: string | null;
-    expires: number;
-    sequence: number;
-    command: string;
-    state: string | null;
-    updated: number;
-    preview_key: string | null;
-  }>())!;
+  return (await env.DB.prepare(
+    "SELECT * FROM station WHERE id=1",
+  ).first<StationRow>())!;
+}
+
+function requireQuality(metadata: Record<string, unknown>) {
+  const q = metadata.quality as
+    { ok?: unknown; receiptPixels?: unknown } | undefined;
+  requireThat(
+    q?.ok === true &&
+      Array.isArray(q.receiptPixels) &&
+      q.receiptPixels.length === 2 &&
+      q.receiptPixels.every(
+        (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 900,
+      ),
+    409,
+    "Image quality checks did not pass.",
+  );
 }
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -223,7 +254,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     const cursor = (url.searchParams.get("before") ?? "9999|").split("|");
     requireThat(cursor.length === 2, 400, "Invalid cursor.");
     const rows = await env.DB.prepare(
-      "SELECT *, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available FROM captures WHERE (created_at,id) < (?,?) ORDER BY created_at DESC,id DESC LIMIT 100",
+      "SELECT *, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available FROM captures WHERE (created_at,id) < (?,?) ORDER BY created_at DESC,id DESC LIMIT 100",
     )
       .bind(cursor[0], cursor[1])
       .all<CaptureRow>();
@@ -257,7 +288,16 @@ async function route(request: Request, env: Env): Promise<Response> {
         400,
         "Invalid metadata.",
       );
-      // Capture status is assigned only by the finalize route after derivatives exist.
+      const completed = request.headers.get("x-capture-status");
+      requireThat(
+        completed === null ||
+          completed === "accepted" ||
+          completed === "rejected",
+        400,
+        "Invalid capture result.",
+      );
+      if (completed === "accepted") requireQuality(metadata);
+      // A completed original needs no crop or PDF; those are downstream derivatives.
       const key = `raw/${id}/${sha}`;
       // Conditional object creation + insert-first-wins make retries non-destructive, including races.
       const object = await env.BUCKET.put(key, data, {
@@ -281,7 +321,7 @@ async function route(request: Request, env: Env): Promise<Response> {
           key,
           type,
           data.length,
-          "checking",
+          completed ?? "checking",
           JSON.stringify(metadata),
         )
         .run();
@@ -371,25 +411,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return json(publicCapture(row));
     }
     if (info.status === "accepted") {
-      const found = await env.DB.prepare(
-        "SELECT DISTINCT kind FROM artifacts WHERE capture_id = ? AND kind IN ('image','pdf')",
-      )
-        .bind(id)
-        .all();
-      requireThat(
-        found.results.length === 2,
-        409,
-        "Save the crop and PDF before accepting.",
-      );
       const metadata = JSON.parse(row.metadata);
-      const q = metadata.quality;
-      requireThat(
-        q?.ok === true &&
-          Array.isArray(q.receiptPixels) &&
-          Math.min(...q.receiptPixels) >= 900,
-        409,
-        "Image quality checks did not pass.",
-      );
+      requireQuality(metadata);
     }
     requireThat(
       await env.BUCKET.head(row.raw_key),
@@ -435,6 +458,9 @@ async function route(request: Request, env: Env): Promise<Response> {
       "SELECT count(*) AS n FROM captures WHERE status='accepted'",
     ).first<{ n: number }>();
     return json({
+      camera: fresh ? row.camera : null,
+      previewSession:
+        fresh && row.preview_session ? JSON.parse(row.preview_session) : null,
       state: fresh && row.state ? JSON.parse(row.state) : null,
       sequence: row.sequence,
       command: row.command,
@@ -451,7 +477,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     );
     await stationRow(env);
     await env.DB.prepare(
-      "UPDATE station SET camera=?, expires=?, state=NULL, command='pause', sequence=sequence+1, updated=0 WHERE id=1 AND (expires<? OR camera=?)",
+      "UPDATE station SET camera=?, expires=?, state=NULL, preview_session=NULL, command='pause', sequence=sequence+1, updated=0 WHERE id=1 AND (expires<? OR camera=?)",
     )
       .bind(camera, Date.now() + 10000, Date.now(), camera)
       .run();
@@ -461,30 +487,106 @@ async function route(request: Request, env: Env): Promise<Response> {
       409,
       "Another camera is active. Close it and wait ten seconds.",
     );
-    return json({ sequence: row.sequence, command: row.command });
+    const count = await env.DB.prepare(
+      "SELECT count(*) AS n FROM captures WHERE status='accepted'",
+    ).first<{ n: number }>();
+    return json({
+      count: count?.n ?? 0,
+      sequence: row.sequence,
+      command: row.command,
+      previewSession: row.preview_session
+        ? JSON.parse(row.preview_session)
+        : null,
+    });
   }
   if (path === "/api/station/heartbeat" && method === "POST") {
     const info = await bodyJson(request);
-    const state = info.state;
-    requireThat(state && typeof state === "object", 400, "Missing state.");
-    const result = await env.DB.prepare(
-      "UPDATE station SET state=?,updated=?,expires=? WHERE id=1 AND camera=? AND expires>?",
+    requireThat(
+      info.state && typeof info.state === "object",
+      400,
+      "Missing state.",
+    );
+    const row = await env.DB.prepare(
+      "UPDATE station SET state=?,updated=?,expires=? WHERE id=1 AND camera=? AND expires>? RETURNING sequence,command,preview_session",
     )
       .bind(
-        JSON.stringify(state),
+        JSON.stringify(info.state),
         Date.now(),
         Date.now() + 10000,
         String(info.camera),
         Date.now(),
       )
-      .run();
+      .first<StationRow>();
+    requireThat(row, 409, "Camera lease expired. Enable camera again.");
+    return json({
+      sequence: row.sequence,
+      command: row.command,
+      previewSession: row.preview_session
+        ? JSON.parse(row.preview_session)
+        : null,
+    });
+  }
+  if (path === "/api/station/direct-preview" && method === "POST") {
+    const info = await bodyJson(request, 24000);
+    requireThat(
+      typeof info.id === "string" && UUID.test(info.id),
+      400,
+      "Invalid preview session.",
+    );
+    if (info.renew === true) {
+      const result = await env.DB.prepare(
+        "UPDATE station SET preview_session=json_set(preview_session, '$.expires', ?) WHERE id=1 AND camera=? AND expires>? AND json_extract(preview_session, '$.id')=?",
+      )
+        .bind(Date.now() + 30000, String(info.camera), Date.now(), info.id)
+        .run();
+      requireThat(result.meta.changes === 1, 409, "Preview session changed.");
+      return json({ ok: true });
+    }
+    const description = (info.offer ?? info.answer) as
+      { type?: unknown; sdp?: unknown } | undefined;
+    requireThat(
+      description &&
+        description.type === (info.offer ? "offer" : "answer") &&
+        typeof description.sdp === "string" &&
+        description.sdp.length < 20000,
+      400,
+      "Invalid preview description.",
+    );
+    let result;
+    if (info.offer) {
+      result = await env.DB.prepare(
+        "UPDATE station SET preview_session=? WHERE id=1 AND camera=? AND expires>? AND (preview_session IS NULL OR json_extract(preview_session, '$.expires')<? OR json_extract(preview_session, '$.id')=?)",
+      )
+        .bind(
+          JSON.stringify({
+            id: info.id,
+            offer: info.offer,
+            expires: Date.now() + 30000,
+          }),
+          String(info.camera),
+          Date.now(),
+          Date.now(),
+          info.id,
+        )
+        .run();
+    } else {
+      result = await env.DB.prepare(
+        "UPDATE station SET preview_session=json_set(preview_session, '$.answer', json(?)) WHERE id=1 AND camera=? AND expires>? AND json_extract(preview_session, '$.id')=?",
+      )
+        .bind(
+          JSON.stringify(info.answer),
+          String(info.camera),
+          Date.now(),
+          info.id,
+        )
+        .run();
+    }
     requireThat(
       result.meta.changes === 1,
       409,
-      "Camera lease expired. Enable camera again.",
+      "Preview session changed. Reconnecting.",
     );
-    const row = await stationRow(env);
-    return json({ sequence: row.sequence, command: row.command });
+    return json({ ok: true });
   }
   if (path === "/api/station/preview") {
     const row = await stationRow(env);
@@ -504,6 +606,10 @@ async function route(request: Request, env: Env): Promise<Response> {
       const key = "preview/latest";
       await env.BUCKET.put(key, data, {
         httpMetadata: { contentType: "image/jpeg" },
+        customMetadata: {
+          camera: String(row.camera),
+          capturedAt: String(Date.now()),
+        },
       });
       await env.DB.prepare(
         "UPDATE station SET preview_key=? WHERE id=1 AND camera=?",
@@ -521,7 +627,13 @@ async function route(request: Request, env: Env): Promise<Response> {
         "No live preview.",
       );
       const image = await env.BUCKET.get(row.preview_key);
-      requireThat(image, 404, "No live preview.");
+      requireThat(
+        image &&
+          image.customMetadata?.camera === row.camera &&
+          Number(image.customMetadata?.capturedAt) > Date.now() - 3000,
+        404,
+        "Waiting for a fresh preview.",
+      );
       return new Response(image.body, {
         headers: { "Content-Type": "image/jpeg" },
       });

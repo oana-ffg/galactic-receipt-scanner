@@ -71,29 +71,29 @@ Keep Safari visible. On the Mac choose **Start scanning**. No LAN or certificate
 is needed; both devices need Internet access.
 
 - Red: read the reason; move hands away, adjust focus, or retry.
-- Amber: hold still while the original, crop and PDF are saved.
-- Green: those files are saved; remove the receipt completely before inserting the next.
+- Amber: the label distinguishes stability checks, taking the photo, checking the captured image, and saving the original. Crops and PDFs do not run during capture.
+- Green: the original and quality metadata are durably saved and its checksum verified; remove the receipt completely before inserting the next.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
 - **Retry this receipt** creates another capture. It never replaces a previous original.
 
 Inspect the first few originals at full size to calibrate lighting, height, small print
 and glare. Browser quality checks are conservative heuristics, not proof of legibility.
-Phone IndexedDB holds pending originals and derivatives until server acknowledgement;
+Phone IndexedDB holds pending originals and checks until server acknowledgement;
 do not clear site data or use private browsing while anything is pending.
 
 ## Storage and processing
 
 D1 stores metadata, hashes, artifact revisions and the current capture-station state.
 R2 stores originals (`raw/`), crops (`image/`), PDFs (`pdf/`) and unverified extraction
-artifacts (`ocr/`). The `preview/latest` object is overwritten as frames arrive; a stale
+artifacts (`ocr/`). A direct WebRTC video/data connection is attempted between owner-authenticated devices, using only host ICE candidates and no external STUN/TURN service. Keep one dashboard open; network isolation can prevent a direct connection. The same-origin private preview remains the fallback over the Internet. The `preview/latest` object is overwritten as fallback frames arrive; a stale
 preview is inaccessible through the application. It is a private last-frame buffer, not
 an accumulating video recording. Receipts are never served through public object URLs.
 
-Raw bytes are immutable and checked against a SHA-256 returned to the phone. Derivative
+Raw bytes are immutable and checked against a SHA-256 returned to the phone. The accepted status means the original passed the implemented checks and is saved; it does not require derivative files. Metadata reports which outputs exist. Derivative
 versions have their own hashes. No deletion endpoint is exposed. Back up original images,
 metadata and final reports separately; a public Git repository is not a data backup.
 
-After scanning, ask your Work/Codex session to inspect and process the batch. The Site
+After scanning, ask your Work/Codex session to inspect and process the batch. Capture itself performs no PDF creation, OCR or organisation. The Site
 exposes authenticated paginated metadata at `GET /api/captures`, capture metadata at
 `GET /api/captures/{id}`, and files at `GET /api/files/{id}/{raw|image|pdf|ocr}`.
 Requests must use the owner's authenticated browser/session. A public URL is not a file
@@ -103,12 +103,13 @@ Where supported, the open dashboard exposes these WebMCP tools:
 
 - `list_receipts`: list captures, hashes and quality results; follow the returned cursor.
 - `read_receipt`: get one capture and authenticated file URLs for inspecting the sources.
+- `prepare_receipt_outputs`: after scanning, verify an original against its hash and create its crop and image PDF. Run one receipt at a time; failed derivative generation never changes the saved original.
 - `save_receipt_transcription`: save unverified text, provenance and explicit uncertainties.
 
 Image bytes must actually be retrieved and inspected; a file URL alone is not visual
 inspection. Extraction and reporting run in the user's Work/Codex task. The hosted Site
-does not run a persistent AI worker or charge an embedded model API account. Initial PDFs
-contain the preserved crop; searchable PDFs and reports are downstream derivatives.
+does not run a persistent AI worker or charge an embedded model API account. PDFs generated after scanning
+contain a crop derived from the preserved original; searchable PDFs and reports are downstream derivatives.
 Authenticated clients may upload versioned PDF, image or OCR artifacts with
 `POST /api/captures/{id}/artifacts/{pdf|image|ocr}`. Use `Origin` equal to the Site origin
 and `X-Scanner-Request: 1` on every mutation. Preserve uncertainties and source references.

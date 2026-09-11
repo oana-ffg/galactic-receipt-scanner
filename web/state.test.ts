@@ -65,3 +65,12 @@ it("a connection gap cannot count as continuously observed receipt removal", () 
   s.observe(empty, 4500);
   expect(s.value.armed).toBe(true);
 });
+
+it("uses the confirmed server count when recovering a save already counted at startup", () => {
+  const s = new CaptureState();
+  s.value.count = 8;
+  s.saved("recovered", 8);
+  expect(s.value.count).toBe(8);
+  s.saved("recovered", 8);
+  expect(s.value.count).toBe(8);
+});

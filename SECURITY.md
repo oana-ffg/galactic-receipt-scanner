@@ -36,3 +36,10 @@ exercise the actual Sites gateway; local tests cannot establish gateway header h
 Sites and its infrastructure operators retain administrative access. This application
 does not provide end-to-end encryption against the hosting provider. Keep a separate
 backup of receipts and reports. Never report security guarantees beyond the checked scope.
+
+Direct preview signalling is accepted only on owner-authorized same-origin routes and
+while the camera lease is valid. The authenticated handshake binds the WebRTC peer
+fingerprints; video and live state/control use that peer connection, never receipt
+original uploads. No external STUN/TURN servers or relay credentials are configured.
+The camera closes its peer connection if its authenticated session expires. HTTP
+preview remains the fallback where direct connectivity is unavailable.

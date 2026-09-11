@@ -8,6 +8,7 @@ import {
 } from "./pending";
 import { CaptureState } from "./state";
 import { Vision } from "./vision";
+import { DirectPreview, type PreviewSession } from "./direct-preview";
 import type { Capture, ScanState } from "./types";
 interface PhotoCapture {
   takePhoto(settings?: {
@@ -32,6 +33,17 @@ export class PhoneCamera {
   private generation = 0;
   private connectionIssue = "";
   private canvas = document.createElement("canvas");
+  private previewCanvas = document.createElement("canvas");
+  private direct = new DirectPreview(
+    () => {},
+    (command) => {
+      if (!this.running || !this.connected || this.busy) return;
+      if (command === "retry-upload") void this.recover();
+      else this.machine.control(command);
+      this.emitState();
+    },
+    () => {},
+  );
   private wakeLock: WakeLockSentinel | null = null;
   constructor(
     private video: HTMLVideoElement,
@@ -67,11 +79,15 @@ export class PhoneCamera {
     this.video.srcObject = this.stream;
     await this.video.play();
     try {
-      const claim = await api<{ sequence: number }>("/api/station/claim", {
-        method: "POST",
-        body: JSON.stringify({ camera: this.camera }),
-      });
+      const claim = await api<{ sequence: number; count: number }>(
+        "/api/station/claim",
+        {
+          method: "POST",
+          body: JSON.stringify({ camera: this.camera }),
+        },
+      );
       this.sequence = claim.sequence;
+      this.machine.value.count = claim.count;
     } catch (error) {
       this.stop();
       throw error;
@@ -88,6 +104,7 @@ export class PhoneCamera {
     );
     this.emitState();
     void this.heartbeat(generation);
+    void this.detect(generation);
     void this.preview(generation);
     await this.recover();
     if (!this.running) throw new Error(this.machine.value.message);
@@ -103,6 +120,7 @@ export class PhoneCamera {
     this.generation++;
     this.running = false;
     this.connected = false;
+    this.direct.close();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.vision?.close();
     this.vision = null;
@@ -114,7 +132,7 @@ export class PhoneCamera {
     this.onStopped();
   }
   private emitState() {
-    this.state(
+    const state: ScanState =
       this.running && !this.connected
         ? {
             ...this.machine.value,
@@ -122,8 +140,9 @@ export class PhoneCamera {
             cameraConnected: false,
             message: `${this.connectionIssue} Reconnecting automatically; new captures are waiting.`,
           }
-        : this.machine.value,
-    );
+        : this.machine.value;
+    this.state(state);
+    this.direct.sendState(state);
   }
   private sessionEnded(error: unknown): boolean {
     if (
@@ -141,19 +160,21 @@ export class PhoneCamera {
   private async heartbeat(generation: number) {
     while (this.running && this.generation === generation) {
       try {
-        const result = await api<{ sequence: number; command: string }>(
-          "/api/station/heartbeat",
-          {
-            method: "POST",
-            body: JSON.stringify({
-              camera: this.camera,
-              state: this.machine.value,
-            }),
-            signal: AbortSignal.timeout(4000),
-          },
-        );
+        const result = await api<{
+          sequence: number;
+          command: string;
+          previewSession: PreviewSession | null;
+        }>("/api/station/heartbeat", {
+          method: "POST",
+          body: JSON.stringify({
+            camera: this.camera,
+            state: this.machine.value,
+          }),
+          signal: AbortSignal.timeout(4000),
+        });
         if (!this.running || this.generation !== generation) return;
         this.connected = true;
+        void this.direct.sync(this.camera, result.previewSession, this.stream!);
         if (result.sequence !== this.sequence && !this.busy) {
           this.sequence = result.sequence;
           if (result.command === "retry-upload") void this.recover();
@@ -170,8 +191,9 @@ export class PhoneCamera {
       await delay(700);
     }
   }
-  private async preview(generation: number) {
+  private async detect(generation: number) {
     while (this.running && this.generation === generation) {
+      const started = performance.now();
       try {
         if (
           this.connected &&
@@ -179,15 +201,7 @@ export class PhoneCamera {
           this.video.readyState >= 2 &&
           document.visibilityState === "visible"
         ) {
-          const ratio = Math.min(
-            1,
-            800 / Math.max(this.video.videoWidth, this.video.videoHeight),
-          );
-          this.canvas.width = Math.round(this.video.videoWidth * ratio);
-          this.canvas.height = Math.round(this.video.videoHeight * ratio);
-          this.canvas
-            .getContext("2d")!
-            .drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+          drawFrame(this.video, this.canvas, 800);
           const analysis = await this.vision!.request(
             await createImageBitmap(this.canvas),
           );
@@ -196,29 +210,6 @@ export class PhoneCamera {
           const id = this.machine.observe(analysis.quality, performance.now());
           this.emitState();
           if (id) await this.capture(id);
-          else {
-            const body = await encode(this.canvas, 0.75);
-            try {
-              await api("/api/station/preview", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "image/jpeg",
-                  "X-Camera-Id": this.camera,
-                },
-                body,
-                signal: AbortSignal.timeout(4000),
-              });
-              if (!this.running || this.generation !== generation) return;
-              this.machine.value.previewWarning = undefined;
-              this.machine.value.streamFresh = true;
-            } catch (error) {
-              if (!this.running || this.generation !== generation) return;
-              if (this.sessionEnded(error)) return;
-              this.machine.value.streamFresh = false;
-              this.machine.value.previewWarning = `Desktop preview is delayed. ${messageOf(error)} Retrying automatically.`;
-            }
-            this.emitState();
-          }
         }
       } catch (error) {
         if (!this.running || this.generation !== generation) return;
@@ -226,7 +217,56 @@ export class PhoneCamera {
           `Image checks stopped. ${messageOf(error)} Tap Enable camera to restart the checks.`,
         );
       }
-      await delay(220);
+      await delay(Math.max(20, 150 - (performance.now() - started)));
+    }
+  }
+  private async preview(generation: number) {
+    while (this.running && this.generation === generation) {
+      const started = performance.now();
+      // Direct video continues during capture. HTTP preview yields upload bandwidth
+      // to the original and never holds up detection or creates a frame backlog.
+      if (
+        !this.direct.connected &&
+        this.connected &&
+        !this.busy &&
+        this.video.readyState >= 2 &&
+        document.visibilityState === "visible"
+      ) {
+        try {
+          drawFrame(this.video, this.previewCanvas, 640);
+          let body = await encode(this.previewCanvas, 0.55);
+          if (body.size > 150000) {
+            drawFrame(this.video, this.previewCanvas, 480);
+            body = await encode(this.previewCanvas, 0.4);
+          }
+          if (body.size > 150000)
+            throw new Error(
+              "Preview image is too large; direct video is still being attempted.",
+            );
+          await api("/api/station/preview", {
+            method: "POST",
+            headers: {
+              "Content-Type": "image/jpeg",
+              "X-Camera-Id": this.camera,
+            },
+            body,
+            signal: AbortSignal.timeout(4000),
+          });
+          if (!this.running || this.generation !== generation) return;
+          this.machine.value.previewWarning = undefined;
+          this.machine.value.streamFresh = true;
+        } catch (error) {
+          if (!this.running || this.generation !== generation) return;
+          if (this.sessionEnded(error)) return;
+          this.machine.value.streamFresh = false;
+          this.machine.value.previewWarning = `Desktop preview is delayed. ${messageOf(error)} Retrying automatically.`;
+        }
+      }
+      if (this.direct.connected) {
+        this.machine.value.previewWarning = undefined;
+        this.machine.value.streamFresh = true;
+      }
+      await delay(Math.max(50, 300 - (performance.now() - started)));
     }
   }
   private async still(): Promise<{ blob: Blob; method: string }> {
@@ -264,10 +304,15 @@ export class PhoneCamera {
   private async capture(id: string) {
     if (this.busy) return;
     this.busy = true;
+    const started = performance.now();
     try {
       if ((await pendingCaptures()).length)
         throw new Error("An image is pending. Use Retry upload first.");
+      this.machine.value.stage = "photo";
+      this.machine.value.message = "Taking the photo…";
+      this.emitState();
       const { blob, method } = await this.still();
+      const photoMs = performance.now() - started;
       const capture: PendingCapture = {
         id,
         blob,
@@ -288,10 +333,16 @@ export class PhoneCamera {
         bitmap.close();
         throw new Error("Image exceeds the supported 55 megapixels.");
       }
+      this.machine.value.stage = "checking";
+      this.machine.value.message = "Checking the captured image…";
+      this.emitState();
+      const checksStarted = performance.now();
       const result = await this.vision!.request(bitmap, true);
+      this.machine.value.timings = {
+        photoMs,
+        checksMs: performance.now() - checksStarted,
+      };
       capture.quality = result.quality;
-      capture.image = result.image;
-      capture.pdf = result.pdf;
       await savePending(capture);
       await this.upload(capture);
     } catch (error) {
@@ -317,10 +368,11 @@ export class PhoneCamera {
     }
   }
   private async upload(capture: PendingCapture) {
+    const started = performance.now();
+    this.machine.value.stage = "uploading";
     this.machine.value.needsAttention = false;
     this.machine.value.phase = "amber";
-    this.machine.value.message =
-      "Saving original and outputs—do not move the receipt.";
+    this.machine.value.message = `Saving original (${(capture.blob.size / 1048576).toFixed(1)} MB). Wait for green.`;
     this.machine.value.activeId = capture.id;
     this.emitState();
     const result = await api<Capture>(`/api/captures/${capture.id}`, {
@@ -328,11 +380,12 @@ export class PhoneCamera {
       body: capture.blob,
       headers: {
         "Content-Type": capture.blob.type,
+        "X-Capture-Status": capture.quality.ok ? "accepted" : "rejected",
         "X-Capture-Metadata": JSON.stringify({
           captureMethod: capture.method,
           sourcePixels: capture.sourcePixels,
           quality: capture.quality,
-          checks: "browser-opencv-mediapipe-v1",
+          checks: "browser-opencv-mediapipe-v2-paper-motion",
         }),
       },
     });
@@ -345,33 +398,25 @@ export class PhoneCamera {
       .join("");
     if (result.sha256 !== hash)
       throw new Error("Stored checksum did not match. Keep this receipt.");
-    if (result.status === "checking") {
-      if (capture.quality.ok) {
-        if (!capture.image || !capture.pdf)
-          throw new Error("Crop/PDF missing. Retake required.");
-        for (const [kind, blob] of [
-          ["image", capture.image],
-          ["pdf", capture.pdf],
-        ] as const)
-          await api(`/api/captures/${capture.id}/artifacts/${kind}`, {
+    const final =
+      result.status === "checking"
+        ? await api<Capture>(`/api/captures/${capture.id}/finalize`, {
             method: "POST",
-            body: blob,
-            headers: { "Content-Type": blob.type },
-          });
-      }
-      await api(`/api/captures/${capture.id}/finalize`, {
-        method: "POST",
-        body: JSON.stringify({
-          status: capture.quality.ok ? "accepted" : "rejected",
-        }),
-      });
-    }
-    const final = await api<Capture>(`/api/captures/${capture.id}`);
+            body: JSON.stringify({
+              status: capture.quality.ok ? "accepted" : "rejected",
+            }),
+          })
+        : result;
     if (!["accepted", "rejected"].includes(final.status))
       throw new Error("Storage acknowledgement incomplete.");
     await acknowledge(capture.id);
-    if (final.status === "accepted") this.machine.saved(capture.id);
-    else
+    if (final.status === "accepted") {
+      this.machine.value.timings = {
+        ...this.machine.value.timings,
+        saveMs: performance.now() - started,
+      };
+      this.machine.saved(capture.id, final.acceptedCount);
+    } else
       this.machine.failed(
         `Original saved; retake needed: ${capture.quality.reason}`,
       );
@@ -390,4 +435,18 @@ async function encode(
       quality,
     ),
   );
+}
+
+function drawFrame(
+  video: HTMLVideoElement,
+  canvas: HTMLCanvasElement,
+  edge: number,
+) {
+  const ratio = Math.min(
+    1,
+    edge / Math.max(video.videoWidth, video.videoHeight),
+  );
+  canvas.width = Math.round(video.videoWidth * ratio);
+  canvas.height = Math.round(video.videoHeight * ratio);
+  canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
 }

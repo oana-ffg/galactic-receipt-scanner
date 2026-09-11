@@ -111,7 +111,8 @@ header p {
   position: relative;
   overflow: hidden;
 }
-#feed[hidden] {
+#feed[hidden],
+#live-feed[hidden] {
   display: none;
 }
 .connection-warning {
@@ -121,7 +122,8 @@ header p {
 .connection-warning:empty {
   display: none;
 }
-#feed {
+#feed,
+#live-feed {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;

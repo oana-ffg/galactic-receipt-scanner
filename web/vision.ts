@@ -39,7 +39,11 @@ export class Vision {
     }
     this.pending.clear();
   }
-  request(bitmap?: ImageBitmap, full = false): Promise<Analysis> {
+  request(
+    bitmap?: ImageBitmap,
+    full = false,
+    outputs = false,
+  ): Promise<Analysis> {
     return new Promise((resolve, reject) => {
       const id = ++this.counter;
       const timer = setTimeout(() => {
@@ -47,7 +51,10 @@ export class Vision {
         reject(new Error("Image checks timed out. Reload the camera page."));
       }, 60000);
       this.pending.set(id, { resolve, reject, timer });
-      this.worker.postMessage({ id, bitmap, full }, bitmap ? [bitmap] : []);
+      this.worker.postMessage(
+        { id, bitmap, full, outputs },
+        bitmap ? [bitmap] : [],
+      );
     });
   }
   close() {

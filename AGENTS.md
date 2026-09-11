@@ -52,7 +52,7 @@ browser tests and dependency audit. Distinguish synthetic checks from physical c
   and acknowledgements independent of the client technology.
 - Deploy one private ChatGPT Sites instance per owner; follow [HOW_TO_SET_UP.md](HOW_TO_SET_UP.md)
   for the complete installation, storage, access-verification and update procedure.
-- Browser worker: OpenCV/MediaPipe image checks, full-resolution crop and PDF creation.
+- Browser worker: OpenCV/MediaPipe image checks during capture. Crop and PDF creation are downstream only; they must never delay green or the next receipt.
   Hosted Cloudflare Worker: owner-authorized routes, D1 metadata and private R2 storage.
 - Public source is generic. Ignore `.openai/hosting.json`, environment files, `captures/`,
   `.local/`, test output and downloaded model assets. Preserve any existing local captures.
@@ -61,6 +61,7 @@ browser tests and dependency audit. Distinguish synthetic checks from physical c
   Verify the saved access policy and deployed unauthenticated denial before handoff.
 - The hosting gateway supplies identity; never expose the Worker directly with unverified
   identity headers. Missing configuration must fail closed. See SECURITY.md.
+- Direct preview uses an owner-authorized WebRTC handshake through the Site, with an authenticated HTTP fallback. Never add a public signalling endpoint or expose originals through the video path.
 - OCR/extraction and reporting run in the owner's Work/Codex task after scanning. Preserve
   uncertainty and original source references. Initial PDFs are image PDFs.
 
