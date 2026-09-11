@@ -1,0 +1,27 @@
+[project]
+name = "receipt-scanner"
+version = "0.1.0"
+description = "A local, hands-free receipt capture station"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "opencv-contrib-python>=4.11,<5",
+  "numpy>=2,<3",
+  "Pillow>=11,<13",
+  "mediapipe>=0.10.21,<0.11",
+  "img2pdf>=0.6,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,1 @@
+"""Local receipt capture service."""
