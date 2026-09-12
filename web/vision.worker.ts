@@ -4,7 +4,6 @@ import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
 import { measurePrint } from "./print-quality";
-import { hasPaperEdges } from "./paper-edge";
 let cv: typeof CV;
 let hands: HandLandmarker;
 let previous: Uint8Array | undefined;
@@ -158,11 +157,7 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     const kernel = use(cv.Mat.ones(7, 7, cv.CV_8U));
     const contours = use(new cv.MatVector()),
       hierarchy = use(new cv.Mat());
-    const candidates: {
-      area: number;
-      points: number[][];
-      outline: number[][];
-    }[] = [];
+    const candidates: { area: number; points: number[][] }[] = [];
     const regions: number[][] = [];
     let large = false;
     for (const cut of cuts) {
@@ -201,14 +196,7 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
                 approx.data32S[j * 2],
                 approx.data32S[j * 2 + 1],
               ]);
-              candidates.push({
-                area,
-                points: ordered(pts),
-                outline: Array.from({ length: contour.rows }, (_, k) => [
-                  contour.data32S[k * 2],
-                  contour.data32S[k * 2 + 1],
-                ]),
-              });
+              candidates.push({ area, points: ordered(pts) });
             }
           } finally {
             approx.delete();
@@ -283,33 +271,23 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       return q;
     }
     complete.sort((a, b) => b.area - a.area);
-    const distinctPapers = (regions: typeof candidates) =>
-      regions.filter(
-        (candidate, i) =>
-          !regions.slice(0, i).some((other) => {
-            const bounds = (points: number[][]) => [
-              Math.min(...points.map((p) => p[0])),
-              Math.min(...points.map((p) => p[1])),
-              Math.max(...points.map((p) => p[0])),
-              Math.max(...points.map((p) => p[1])),
-            ];
-            const a = bounds(candidate.points),
-              b = bounds(other.points);
-            const overlap =
-              Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) *
-              Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
-            return overlap / ((a[2] - a[0]) * (a[3] - a[1])) > 0.85;
-          }),
-      );
-    let papers = distinctPapers(complete);
-    // Preserve the existing single-paper path. Only disambiguate reflections
-    // when the original segmentation would have rejected multiple regions.
-    if (papers[1]?.area > 0.05) {
-      const edged = complete.filter(({ points, outline }) =>
-        hasPaperEdges(gray.data, width, height, points, outline),
-      );
-      if (edged.length) papers = distinctPapers(edged);
-    }
+    const papers = complete.filter(
+      (candidate, i) =>
+        !complete.slice(0, i).some((other) => {
+          const bounds = (points: number[][]) => [
+            Math.min(...points.map((p) => p[0])),
+            Math.min(...points.map((p) => p[1])),
+            Math.max(...points.map((p) => p[0])),
+            Math.max(...points.map((p) => p[1])),
+          ];
+          const a = bounds(candidate.points),
+            b = bounds(other.points);
+          const overlap =
+            Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) *
+            Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+          return overlap / ((a[2] - a[0]) * (a[3] - a[1])) > 0.85;
+        }),
+    );
     const { points } = papers[0];
     q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
     if (papers[1]?.area > 0.05) {

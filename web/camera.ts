@@ -447,7 +447,7 @@ export class PhoneCamera {
           captureMethod: capture.method,
           sourcePixels: capture.sourcePixels,
           quality: capture.quality,
-          checks: "browser-opencv-mediapipe-v4-paper-edges",
+          checks: "browser-opencv-mediapipe-v3-local-print",
         }),
       },
     });

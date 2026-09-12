@@ -28,7 +28,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       "glare-after-removal",
       "clutter-after-removal",
       "two-papers",
-      "diffuse-reflection",
+      "ambiguous-soft-region",
       "dim",
       "faint",
       "sparse",
@@ -44,7 +44,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       ctx.filter = "none";
       ctx.fillStyle = kind === "lit-empty" ? "#727272" : "#181818";
       ctx.fillRect(0, 0, 2000, 2400);
-      if (kind === "diffuse-reflection") {
+      if (kind === "ambiguous-soft-region") {
         ctx.fillStyle = "#dddddd";
         ctx.fillRect(50, 300, 250, 1500);
         window.blurFixture(canvas, 32);
@@ -152,7 +152,6 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "sparse",
     "edge-glare",
     "merged-glare",
-    "diffuse-reflection",
   ])
     expect(results[kind].ok, `${kind}: ${results[kind].reason}`).toBe(true);
   for (const kind of [
@@ -164,8 +163,12 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "noise",
     "clipped",
     "small",
+    "ambiguous-soft-region",
   ])
     expect(results[kind].ok, kind).toBe(false);
+  // A diffuse reflection and a blurred second sheet can look alike.
+  // Keep rejecting this ambiguous scene rather than silently dropping a sheet.
+  expect(results["ambiguous-soft-region"].reason).toContain("More than one");
   expect(results["two-papers"].reason).toContain("More than one");
   expect(results["glare-after-removal"].empty).toBe(true);
   expect(results["clutter-after-removal"].empty).toBe(true);
