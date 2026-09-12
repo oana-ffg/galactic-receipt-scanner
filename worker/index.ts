@@ -1,7 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-import { prelaunchReset } from "./prelaunch-reset";
 export interface Env {
-  PRELAUNCH_RESET_MANIFEST?: string;
   RETIRED_CAPTURE_IDS?: string;
   DB: D1Database;
   BUCKET: R2Bucket;
@@ -248,7 +246,6 @@ function requireQuality(metadata: Record<string, unknown>) {
   );
 }
 async function route(request: Request, env: Env): Promise<Response> {
-  if (env.PRELAUNCH_RESET_MANIFEST) return prelaunchReset(request, env);
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;

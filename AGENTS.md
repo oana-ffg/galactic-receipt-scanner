@@ -25,7 +25,9 @@ tests, screenshots, commits, or documentation. Only synthetic documents belong i
 - Preserve real originals, metadata and derivative history. Future verification against
   production is read-only; perform all test writes and destructive tests in isolation.
 - Do not add or leave a production reset button, deletion endpoint or automatic cleanup
-  job. Record completion of the one-off cleanup here after verifying persisted storage.
+  job. The authorized cleanup was completed on 12 September 2026: six test captures
+  and seven stored files were removed, and the database tables and object storage were
+  verified empty. That exception is now spent and must never be reused.
 
 ## Accuracy is the highest priority
 
