@@ -15,6 +15,7 @@ import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
 import { isControlCommand, retakeTarget } from "../web/control-command";
+const APP_PAGES = new Set(["/", "/camera", "/issues", "/review"]);
 export interface Env {
   RETIRED_CAPTURE_IDS?: string;
   DB: D1Database;
@@ -56,7 +57,11 @@ export function authorize(
     "Cross-origin request denied.",
   );
   requireThat(
-    request.headers.get("sec-fetch-site") !== "cross-site",
+    request.headers.get("sec-fetch-site") !== "cross-site" ||
+      (["GET", "HEAD"].includes(request.method) &&
+        request.headers.get("sec-fetch-mode") === "navigate" &&
+        request.headers.get("sec-fetch-dest") === "document" &&
+        APP_PAGES.has(new URL(request.url).pathname)),
     403,
     "Cross-site request denied.",
   );
@@ -761,13 +766,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   requireThat(["GET", "HEAD"].includes(method), 405, "Method not allowed.");
   // Assets are fetched only after owner authorisation; no public bucket or asset routes.
   return env.ASSETS.fetch(
-    new Request(
-      new URL(
-        ["/camera", "/issues", "/review"].includes(path) ? "/" : path,
-        url.origin,
-      ),
-      request,
-    ),
+    new Request(new URL(APP_PAGES.has(path) ? "/" : path, url.origin), request),
   );
 }
 export default {
@@ -785,9 +784,7 @@ export default {
         error instanceof HttpError &&
         [401, 403].includes(error.status) &&
         request.method === "GET" &&
-        ["/", "/camera", "/issues", "/review"].includes(
-          new URL(request.url).pathname,
-        )
+        APP_PAGES.has(new URL(request.url).pathname)
       ) {
         const response = secure(accessPage(error.status));
         const nonce = crypto.randomUUID().replaceAll("-", "");

@@ -82,6 +82,81 @@ it("rejects anonymous, other-user and cross-origin requests on all sensitive rou
     ).status,
   ).toBe(403);
 });
+it("allows owner navigation from external links only to app pages", async () => {
+  // Invoke the Worker with a browser-shaped Request: the test transport uses
+  // fetch(), which supplies its own Sec-Fetch-Mode rather than navigation mode.
+  const navigate = (
+    path: string,
+    method = "GET",
+    headers: Record<string, string> = ownerHeaders,
+  ) =>
+    worker.fetch(new Request(origin + path, { method, headers }), {
+      OWNER_EMAIL: "owner@example.test",
+      APP_ORIGIN: origin,
+      ASSETS: { fetch: async () => new Response("Synthetic app page") },
+    } as never);
+  const navigation = {
+    "sec-fetch-site": "cross-site",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-dest": "document",
+  };
+  for (const path of ["/", "/camera", "/issues", "/review"]) {
+    for (const method of ["GET", "HEAD"]) {
+      const response = await navigate(path, method, {
+        ...ownerHeaders,
+        ...navigation,
+      });
+      expect(response.status, `${method} ${path}`).toBe(200);
+      expect(response.headers.get("x-frame-options")).toBe("DENY");
+      expect(response.headers.get("cache-control")).toContain("no-store");
+    }
+    expect((await navigate(path, "GET", navigation)).status).toBe(401);
+    for (const extra of [
+      { "oai-authenticated-user-email": "intruder@example.test" },
+      { Origin: "https://attacker.example" },
+      { "sec-fetch-mode": "cors" },
+      { "sec-fetch-mode": "no-cors" },
+      { "sec-fetch-dest": "image" },
+      { "sec-fetch-dest": "" },
+    ]) {
+      expect(
+        (
+          await navigate(path, "GET", {
+            ...ownerHeaders,
+            ...navigation,
+            ...extra,
+          })
+        ).status,
+        path,
+      ).toBe(403);
+    }
+    expect(
+      (
+        await navigate(path, "POST", {
+          ...ownerHeaders,
+          ...navigation,
+          Origin: origin,
+          "X-Scanner-Request": "1",
+        })
+      ).status,
+    ).toBe(403);
+  }
+  for (const path of [
+    "/api/me",
+    "/api/documents",
+    "/api/files/00000000-0000-4000-8000-000000000001/raw",
+    "/assets/app.js",
+    "/vendor/ocr/worker.min.js",
+    "/unknown",
+    "/review/",
+  ]) {
+    expect(
+      (await navigate(path, "GET", { ...ownerHeaders, ...navigation })).status,
+      path,
+    ).toBe(403);
+  }
+});
+
 it("preserves source bytes through retries and conflicts; accepts originals without waiting for derivatives", async () => {
   const id = crypto.randomUUID();
   const data = new Uint8Array([255, 216, 255, 1, 2, 3]);
