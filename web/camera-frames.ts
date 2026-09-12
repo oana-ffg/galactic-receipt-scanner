@@ -24,6 +24,10 @@ export class CameraFrames {
     return true;
   }
 
+  get presentedFrames(): number | undefined {
+    return this.confirmed ? this.sequence : undefined;
+  }
+
   close() {
     if (this.callback !== undefined)
       this.video.cancelVideoFrameCallback(this.callback);

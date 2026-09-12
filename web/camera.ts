@@ -14,6 +14,7 @@ import { CameraFrames } from "./camera-frames";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import type { Capture, ScanState } from "./types";
 import { diagnostics } from "./diagnostics";
+import { cameraSettings, MediaRate, mediaErrorName } from "./media-diagnostics";
 interface PhotoCapture {
   takePhoto(settings?: {
     imageWidth?: number;
@@ -52,7 +53,8 @@ export class PhoneCamera {
     () => {},
   );
   private wakeLock: WakeLockSentinel | null = null;
-  private nativePhotoAvailable = true;
+  private nativePhotoFailure:
+    { failedStage: string; error: string } | undefined;
   get savedCount(): number | null {
     return this.machine.value.countKnown ? this.machine.value.count : null;
   }
@@ -287,15 +289,42 @@ export class PhoneCamera {
   }
   private async detect(generation: number) {
     const frames = new CameraFrames(this.video);
+    const frameRate = new MediaRate();
+    let sampledAt = -Infinity;
+    let settingsSampleAt = -Infinity;
+    let settingsKey = "";
     let analyzed = 0;
     let lastAnalyzed: number | undefined;
     try {
       while (this.running && this.generation === generation) {
         const started = performance.now();
-        diagnostics.record(
-          "camera.frames",
-          {
+        if (started - sampledAt >= 2000) {
+          sampledAt = started;
+          try {
+            const track = this.stream?.getVideoTracks()[0];
+            if (track) {
+              const settings = cameraSettings(track);
+              const key = JSON.stringify(settings);
+              if (key !== settingsKey || started - settingsSampleAt >= 30000) {
+                diagnostics.record("camera.settings", settings);
+                settingsKey = key;
+                settingsSampleAt = started;
+              }
+            }
+          } catch (error) {
+            diagnostics.record(
+              "camera.settings",
+              {
+                error: mediaErrorName(error),
+              },
+              30000,
+              "error",
+            );
+          }
+          diagnostics.record("camera.frames", {
             confirmedFrames: frames.confirmed,
+            presentedFrames: frames.presentedFrames,
+            observedFps: frameRate.sample(frames.presentedFrames, started),
             analyzed,
             sinceAnalysisMs:
               lastAnalyzed === undefined ? null : started - lastAnalyzed,
@@ -306,9 +335,8 @@ export class PhoneCamera {
             connected: this.connected,
             busy: this.busy,
             visible: document.visibilityState === "visible",
-          },
-          2000,
-        );
+          });
+        }
         try {
           if (
             this.connected &&
@@ -410,10 +438,18 @@ export class PhoneCamera {
     const Constructor = (
       window as unknown as { ImageCapture?: PhotoConstructor }
     ).ImageCapture;
-    if (Constructor && this.nativePhotoAvailable) {
+    if (Constructor && !this.nativePhotoFailure) {
+      let stage = "constructor";
       try {
         const camera = new Constructor(track);
+        stage = "capabilities";
         const caps = await camera.getPhotoCapabilities();
+        diagnostics.record("camera.photo", {
+          stage: "capabilities",
+          maxWidth: caps.imageWidth?.max,
+          maxHeight: caps.imageHeight?.max,
+        });
+        stage = "take-photo";
         const blob = await camera.takePhoto({
           ...(caps.imageWidth?.max ? { imageWidth: caps.imageWidth.max } : {}),
           ...(caps.imageHeight?.max
@@ -422,10 +458,25 @@ export class PhoneCamera {
         });
         if (!blob.size) throw new Error("Empty photo.");
         return { blob, method: "ImageCapture.takePhoto" };
-      } catch {
-        this.nativePhotoAvailable = false;
+      } catch (error) {
+        this.nativePhotoFailure = {
+          failedStage: stage,
+          error: mediaErrorName(error),
+        };
+        diagnostics.record("camera.photo", {
+          stage,
+          error: this.nativePhotoFailure.error,
+          fallback: true,
+        });
       }
     }
+    diagnostics.record("camera.photo", {
+      stage: "video-frame",
+      reason: Constructor ? "native-failed" : "api-unavailable",
+      ...this.nativePhotoFailure,
+      width: this.video.videoWidth,
+      height: this.video.videoHeight,
+    });
     // Freeze the full-resolution frame and encode it in the existing worker.
     // Avoid repeated multi-megapixel HTML canvas/toBlob allocations on iOS.
     const bitmap = await createImageBitmap(this.video);
@@ -473,6 +524,14 @@ export class PhoneCamera {
       retained = true;
       const bitmap = await createImageBitmap(blob);
       capture.sourcePixels = [bitmap.width, bitmap.height];
+      diagnostics.record("camera.photo", {
+        stage: "decoded",
+        method,
+        width: bitmap.width,
+        height: bitmap.height,
+        bytes: blob.size,
+        photoMs,
+      });
       if (bitmap.width * bitmap.height > 55000000) {
         bitmap.close();
         throw new Error("Image exceeds the supported 55 megapixels.");

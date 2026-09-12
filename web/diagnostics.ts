@@ -11,11 +11,15 @@ type Event =
   | "camera.start"
   | "camera.stop"
   | "camera.frames"
+  | "camera.settings"
+  | "camera.photo"
   | "camera.error"
   | "vision"
   | "preview.peer"
   | "preview.channel"
   | "preview.http"
+  | "preview.delivery"
+  | "preview.rtp"
   | "upload.start"
   | "upload.saved";
 type Fields = Record<string, string | number | boolean | null | undefined>;

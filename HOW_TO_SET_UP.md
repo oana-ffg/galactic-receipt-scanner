@@ -93,6 +93,12 @@ is needed; both devices need Internet access.
 - Audio starts enabled and remembers the last choice in browser storage. A click or tap
   unlocks browser audio. Success uses one high ding; failure uses three low descending buzzes.
 - **Report issue** attaches a screenshot of the visible scanner page to a private report.
+  It also includes that device's recent structured diagnostics, captured when the report
+  opens: camera settings and observed frame rate, photo API failures and output dimensions,
+  capture/save transitions, and preview delivery, encoding and network statistics where
+  available. History is bounded to at most two minutes, 180 events and 24 KB, so busy
+  sessions may retain less. Report before refreshing; for phone-to-desktop problems,
+  reports from both devices provide both sides of the connection.
   Reports and screenshots stay in the instance's D1/R2 storage and can be reviewed under
   **Private issues**. The optional GitHub checkbox starts off and only opens a public draft
   for review; private report details and screenshots are never copied into it.

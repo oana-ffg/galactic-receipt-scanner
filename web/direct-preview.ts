@@ -2,6 +2,7 @@ import { api } from "./api";
 import type { ScanState } from "./types";
 import { isControlCommand } from "./control-command";
 import { diagnostics } from "./diagnostics";
+import { RtpTelemetry } from "./media-diagnostics";
 
 export interface PreviewSession {
   id: string;
@@ -22,6 +23,9 @@ export class DirectPreview {
   private started = 0;
   private renewedAt = 0;
   private lastState: ScanState | undefined;
+  private telemetry = new RtpTelemetry();
+  private sampledAt = -Infinity;
+  private sampling = false;
   constructor(
     private receiveState: (state: ScanState) => void,
     private receiveCommand: (command: string) => void,
@@ -103,6 +107,8 @@ export class DirectPreview {
     this.started = performance.now();
     const peer = new RTCPeerConnection({ iceServers: [] });
     this.peer = peer;
+    this.telemetry = new RtpTelemetry();
+    this.sampledAt = -Infinity;
     diagnostics.record("preview.peer", { state: "created" });
     peer.onconnectionstatechange = () => {
       if (this.peer !== peer) return;
@@ -141,6 +147,7 @@ export class DirectPreview {
     session: PreviewSession | null,
     stream?: MediaStream,
   ) {
+    void this.sampleStats();
     if (!camera) {
       this.close();
       return;
@@ -214,6 +221,28 @@ export class DirectPreview {
       this.retryAt = performance.now() + 10000;
     } finally {
       this.busy = false;
+    }
+  }
+  private async sampleStats() {
+    const peer = this.peer;
+    if (
+      !peer ||
+      this.sampling ||
+      performance.now() - this.sampledAt < 5000 ||
+      document.visibilityState !== "visible"
+    )
+      return;
+    this.sampledAt = performance.now();
+    this.sampling = true;
+    try {
+      const report = await peer.getStats();
+      if (this.peer !== peer) return;
+      for (const data of this.telemetry.sample(report))
+        diagnostics.record("preview.rtp", data);
+    } catch {
+      // Optional diagnostics must never disrupt preview negotiation or capture.
+    } finally {
+      this.sampling = false;
     }
   }
 }

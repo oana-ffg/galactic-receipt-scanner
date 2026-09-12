@@ -685,7 +685,13 @@ async function route(request: Request, env: Env): Promise<Response> {
         "Waiting for a fresh preview.",
       );
       return new Response(image.body, {
-        headers: { "Content-Type": "image/jpeg" },
+        headers: {
+          "Content-Type": "image/jpeg",
+          "X-Preview-Received-At": image.customMetadata!.capturedAt,
+          "X-Preview-Age-Ms": String(
+            Math.max(0, Date.now() - Number(image.customMetadata!.capturedAt)),
+          ),
+        },
       });
     }
   }

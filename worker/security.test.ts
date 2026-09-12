@@ -247,6 +247,43 @@ it("cannot accept an original with missing quality or a failed original write", 
   }
 });
 
+it("identifies fresh HTTP preview frames and rejects stale ones", async () => {
+  const db = await mf.getD1Database("DB");
+  const row = await db
+    .prepare("SELECT camera FROM station WHERE id=1")
+    .first<{ camera: string }>();
+  const camera = row!.camera;
+  await request(
+    "/api/station/heartbeat",
+    "POST",
+    JSON.stringify({ camera, state: {} }),
+  );
+  const before = Date.now();
+  const posted = await request(
+    "/api/station/preview",
+    "POST",
+    new Uint8Array([255, 216, 255, 1]),
+    { "x-camera-id": camera },
+  );
+  expect(posted.status).toBe(200);
+  const first = await request("/api/station/preview");
+  expect(first.status).toBe(200);
+  const received = first.headers.get("X-Preview-Received-At");
+  expect(Number(received)).toBeGreaterThanOrEqual(before);
+  expect(Number(received)).toBeLessThanOrEqual(Date.now());
+  expect(Number(first.headers.get("X-Preview-Age-Ms"))).toBeGreaterThanOrEqual(
+    0,
+  );
+  expect(first.headers.get("cache-control")).toContain("no-store");
+  const repeated = await request("/api/station/preview");
+  expect(repeated.headers.get("X-Preview-Received-At")).toBe(received);
+  const bucket = await mf.getR2Bucket("BUCKET");
+  await bucket.put("preview/latest", new Uint8Array([255, 216, 255, 1]), {
+    customMetadata: { camera, capturedAt: String(Date.now() - 4000) },
+  });
+  expect((await request("/api/station/preview")).status).toBe(404);
+});
+
 it("binds direct preview signalling to the active camera and one viewer session", async () => {
   const db = await mf.getD1Database("DB");
   const row = await db

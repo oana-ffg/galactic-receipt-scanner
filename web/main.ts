@@ -8,6 +8,7 @@ import type { ScanState } from "./types";
 import { CaptureLibrary } from "./library";
 import "./style.css";
 import { diagnostics, recordScanState, startDiagnostics } from "./diagnostics";
+import { MediaRate } from "./media-diagnostics";
 
 startDiagnostics();
 
@@ -248,6 +249,11 @@ function mountDashboard(): void {
   const stateOrder = new StateOrder();
   let lastVideoFrame = 0;
   let decodedFrames = 0;
+  let httpFrames = 0;
+  let lastHttpFrame = "";
+  let deliverySampleAt = -Infinity;
+  const directRate = new MediaRate();
+  const httpRate = new MediaRate();
   const videoFresh = () => {
     const frames = live.getVideoPlaybackQuality().totalVideoFrames;
     if (frames !== decodedFrames) {
@@ -398,27 +404,47 @@ function mountDashboard(): void {
     const started = performance.now();
     if (!videoFresh()) {
       live.hidden = true;
+      let status = 0;
       try {
         const response = await fetch("/api/station/preview", {
           cache: "no-store",
           redirect: "error",
           signal: AbortSignal.timeout(4000),
         });
-        diagnostics.record(
-          "preview.http",
-          { status: response.status, ms: performance.now() - started },
-          2000,
-        );
+        status = response.status;
         if (!response.ok) throw new Error("Waiting for a fresh phone preview.");
         const blob = await response.blob();
-        if (!videoFresh()) await drawPreview(blob);
-      } catch (problem) {
+        let newFrame = false;
         if (!videoFresh()) {
-          diagnostics.record(
-            "preview.http",
-            { ok: false, ms: performance.now() - started },
-            2000,
-          );
+          await drawPreview(blob);
+          const frame = response.headers.get("X-Preview-Received-At");
+          if (frame && frame !== lastHttpFrame) {
+            lastHttpFrame = frame;
+            httpFrames++;
+            newFrame = true;
+          }
+        }
+        const age = response.headers.get("X-Preview-Age-Ms");
+        diagnostics.record(
+          "preview.http",
+          {
+            ok: true,
+            status,
+            newFrame,
+            ms: performance.now() - started,
+            serverAgeMs: age === null ? undefined : Number(age),
+          },
+          2000,
+          "success",
+        );
+      } catch (problem) {
+        diagnostics.record(
+          "preview.http",
+          { ok: false, status, ms: performance.now() - started },
+          2000,
+          `failure-${status}`,
+        );
+        if (!videoFresh()) {
           element("feed").hidden = true;
           element("empty-preview").hidden = false;
           element("connection-warning").textContent =
@@ -429,6 +455,33 @@ function mountDashboard(): void {
       live.hidden = false;
       element("feed").hidden = true;
       element("empty-preview").hidden = true;
+    }
+    if (started - deliverySampleAt >= 2000) {
+      deliverySampleAt = started;
+      try {
+        const playback = live.getVideoPlaybackQuality();
+        diagnostics.record("preview.delivery", {
+          path:
+            !live.hidden && videoFresh()
+              ? "direct"
+              : element("feed").hidden
+                ? "none"
+                : "http",
+          directConnected: direct.connected,
+          stateFresh: direct.fresh,
+          width: live.videoWidth,
+          height: live.videoHeight,
+          decodedFrames: playback.totalVideoFrames,
+          decodedFps: directRate.sample(playback.totalVideoFrames, started),
+          droppedFrames: playback.droppedVideoFrames,
+          httpFrames,
+          httpFps: lastHttpFrame
+            ? httpRate.sample(httpFrames, started)
+            : undefined,
+        });
+      } catch {
+        // Telemetry failure must not affect the preview loop.
+      }
     }
     setTimeout(
       () => void preview(),

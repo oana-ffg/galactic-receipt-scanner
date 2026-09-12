@@ -17,6 +17,7 @@ it("uses presented frames despite zero playback counts and ignores clock-only pr
   expect(frames.take()).toBe(false);
   presented();
   expect(frames.take()).toBe(true);
+  expect(frames.presentedFrames).toBe(1);
   for (const time of [1, 2, 3]) {
     video.currentTime = time;
     expect(frames.take()).toBe(false);
@@ -32,6 +33,7 @@ it("marks media-clock fallback as unconfirmed so it cannot enable fast removal",
   const video = { currentTime: 0 };
   const frames = new CameraFrames(video as HTMLVideoElement);
   expect(frames.confirmed).toBe(false);
+  expect(frames.presentedFrames).toBeUndefined();
   expect(frames.take()).toBe(true);
   expect(frames.take()).toBe(false);
   video.currentTime = 1;

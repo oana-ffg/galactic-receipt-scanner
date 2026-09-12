@@ -7,8 +7,11 @@ import {
 } from "@playwright/test";
 import { startTestServer } from "../scripts/test-server.mjs";
 
-for (const engine of ["chromium", "webkit"] as const) {
-  test(`${engine} camera captures and rearms with playback counters stuck at zero`, async () => {
+for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
+  (engine) =>
+    ["unavailable", "failing"].map((photoApi) => ({ engine, photoApi })),
+)) {
+  test(`${engine} camera captures and rearms with playback counters stuck at zero and ${photoApi} photo API`, async () => {
     const server = await startTestServer();
     let context: BrowserContext | undefined;
     try {
@@ -24,7 +27,7 @@ for (const engine of ["chromium", "webkit"] as const) {
       const page = await context.newPage();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.addInitScript(() => {
+      await page.addInitScript((photoApi) => {
         const canvas = document.createElement("canvas");
         canvas.width = 2000;
         canvas.height = 2400;
@@ -51,7 +54,23 @@ for (const engine of ["chromium", "webkit"] as const) {
           value: async () => canvas.captureStream(15),
         });
         Object.defineProperty(window, "ImageCapture", {
-          value: undefined,
+          value:
+            photoApi === "unavailable"
+              ? undefined
+              : class {
+                  async getPhotoCapabilities() {
+                    return {
+                      imageWidth: { max: 2000 },
+                      imageHeight: { max: 2400 },
+                    };
+                  }
+                  async takePhoto() {
+                    throw new DOMException(
+                      "Sensitive native error detail",
+                      "OperationError",
+                    );
+                  }
+                },
           configurable: true,
         });
         HTMLVideoElement.prototype.getVideoPlaybackQuality = function () {
@@ -62,7 +81,7 @@ for (const engine of ["chromium", "webkit"] as const) {
             creationTime: 0,
           };
         };
-      });
+      }, photoApi);
       const before = (await (await request.get("/api/captures")).json())
         .captures.length;
       await page.goto("/camera");
@@ -133,6 +152,28 @@ for (const engine of ["chromium", "webkit"] as const) {
       expect(diagnostic.history).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ event: "camera.frames" }),
+          expect.objectContaining({ event: "camera.settings" }),
+          expect.objectContaining({
+            event: "camera.photo",
+            data: expect.objectContaining({
+              stage: "video-frame",
+              reason:
+                photoApi === "unavailable"
+                  ? "api-unavailable"
+                  : "native-failed",
+              ...(photoApi === "failing"
+                ? { failedStage: "take-photo", error: "OperationError" }
+                : {}),
+            }),
+          }),
+          expect.objectContaining({
+            event: "camera.photo",
+            data: expect.objectContaining({
+              stage: "decoded",
+              width: 2000,
+              height: 2400,
+            }),
+          }),
           expect.objectContaining({ event: "vision" }),
           expect.objectContaining({
             event: "scan.transition",
@@ -146,6 +187,9 @@ for (const engine of ["chromium", "webkit"] as const) {
             }),
           }),
         ]),
+      );
+      expect(JSON.stringify(diagnostic)).not.toContain(
+        "Sensitive native error detail",
       );
       expect(
         (await (await request.get("/api/captures")).json()).captures.length,
