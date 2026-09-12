@@ -1,5 +1,6 @@
 import type { Quality, ScanState } from "./types";
 import { retakeTarget } from "./control-command";
+import type { PreviewChecks } from "./hand-checks";
 export class CaptureState {
   value: ScanState = {
     type: "state",
@@ -34,6 +35,18 @@ export class CaptureState {
     since: number;
   } | null = null;
   private latched = false;
+  get previewChecks(): PreviewChecks {
+    return {
+      capture:
+        !this.value.paused &&
+        !this.latched &&
+        this.value.armed &&
+        !this.value.activeId,
+      removal:
+        !this.value.manualReview &&
+        Boolean(this.value.lastCapture || !this.value.armed),
+    };
+  }
   private reset() {
     this.stable = 0;
     this.frames = 0;
@@ -136,7 +149,7 @@ export class CaptureState {
       !this.value.manualReview &&
       (this.value.lastCapture || !this.value.armed)
     ) {
-      if (q.empty && !q.hands.length) {
+      if (q.empty && q.handsChecked === true && !q.hands.length) {
         this.absent ||= now;
         if (now - this.absent >= 450) {
           this.value.lastCapture = null;
@@ -161,7 +174,12 @@ export class CaptureState {
         : q.reason;
       return null;
     }
-    if (!q.ok || !q.quad || (q.motion ?? 0) > 3.5) {
+    if (
+      (!q.ok && !q.candidateReady) ||
+      q.hands.length ||
+      !q.quad ||
+      (q.motion ?? 0) > 3.5
+    ) {
       this.reset();
       this.showFeedback("red", q.reason, now);
       return null;
@@ -171,7 +189,12 @@ export class CaptureState {
     if (this.frames === 0) this.stable = now;
     this.frames++;
     this.showFeedback("amber", "Checking image stability…", now);
-    if (now - this.stable >= 900 && this.frames >= 4) {
+    if (
+      now - this.stable >= 900 &&
+      this.frames >= 4 &&
+      q.ok &&
+      q.handsChecked === true
+    ) {
       this.value.phase = "amber";
       this.value.activeId = crypto.randomUUID();
       this.value.message = "Taking the photo…";

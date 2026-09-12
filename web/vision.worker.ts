@@ -5,12 +5,18 @@ import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
 import { measurePrint } from "./print-quality";
+import { HandChecks, type PreviewChecks } from "./hand-checks";
 import {
   enclosePaperContour,
   hasPlausiblePaperCorners,
 } from "./paper-geometry";
 let cv: typeof CV;
 let hands: HandLandmarker;
+const handChecks = new HandChecks();
+const sceneCanvas = new OffscreenCanvas(32, 32);
+const sceneContext = sceneCanvas.getContext("2d", {
+  willReadFrequently: true,
+})!;
 let previous: Uint8Array | undefined;
 let paperBounds: number[] | undefined;
 const canvas = new OffscreenCanvas(1, 1);
@@ -105,10 +111,6 @@ function analyze(
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  const detection = hands.detect(canvas);
-  const handPoints = detection.landmarks.map((hand) =>
-    hand.map((p) => [p.x, p.y]),
-  );
   const allocated: { delete(): void }[] = [];
   const use = <T extends { delete(): void }>(mat: T): T => {
     allocated.push(mat);
@@ -117,7 +119,7 @@ function analyze(
   const q: OutputQuality = {
     ok: false,
     quad: null,
-    hands: handPoints,
+    hands: [],
     reason: "Place one receipt on a dark, matte background.",
     empty: false,
     motion: 0,
@@ -228,7 +230,6 @@ function analyze(
       }
     }
     const clearOfPaper = () => {
-      if (handPoints.length) return false;
       if (
         regions.every(
           (region) =>
@@ -266,8 +267,7 @@ function analyze(
     };
     if (!candidates.length) {
       q.empty = clearOfPaper();
-      if (handPoints.length) q.reason = "Move your hands clear.";
-      else if (large)
+      if (large)
         q.reason =
           "Paper outline is unclear. Reduce glare and leave space around the paper.";
       return q;
@@ -314,11 +314,6 @@ function analyze(
     if (papers[1]?.area > 0.05) {
       q.reason =
         "More than one paper-like region detected. Separate overlapping paper and move bright objects out of view.";
-      return q;
-    }
-    // Conservative: any detected hand blocks capture, including fingertips near the boundary.
-    if (handPoints.length) {
-      q.reason = "Hand or fingers detected. Move them out of view.";
       return q;
     }
     // Check only after the multiple-region check: discarding distorted candidates
@@ -436,12 +431,6 @@ function analyze(
       return q;
     }
     q.ok = true;
-    paperBounds = [
-      Math.min(...q.quad.map((p) => p[0])),
-      Math.min(...q.quad.map((p) => p[1])),
-      Math.max(...q.quad.map((p) => p[0])),
-      Math.max(...q.quad.map((p) => p[1])),
-    ];
     q.reason = "Image checks passed.";
     if (outputs) {
       // Containment corners may bridge folds and must not be treated as true
@@ -467,13 +456,37 @@ function analyze(
     allocated.reverse().forEach((m) => m.delete());
   }
 }
-async function process(bitmap: ImageBitmap, full: boolean, outputs: boolean) {
+async function process(
+  bitmap: ImageBitmap,
+  full: boolean,
+  outputs: boolean,
+  preview?: PreviewChecks,
+) {
   if (outputs) {
     // Saved originals are independent documents, not consecutive camera frames.
     previous = undefined;
     paperBounds = undefined;
   }
   const quality = analyze(bitmap, full, outputs);
+  handChecks.apply(
+    quality,
+    full || outputs ? undefined : preview,
+    performance.now(),
+    () => {
+      sceneContext.drawImage(canvas, 0, 0, 32, 32);
+      return sceneContext.getImageData(0, 0, 32, 32).data;
+    },
+    () =>
+      hands.detect(canvas).landmarks.map((hand) => hand.map((p) => [p.x, p.y])),
+  );
+  if (quality.ok && quality.quad) {
+    paperBounds = [
+      Math.min(...quality.quad.map((p) => p[0])),
+      Math.min(...quality.quad.map((p) => p[1])),
+      Math.max(...quality.quad.map((p) => p[0])),
+      Math.max(...quality.quad.map((p) => p[1])),
+    ];
+  }
   if (!outputs || !quality.ok) return { quality };
   const frame = new OffscreenCanvas(bitmap.width, bitmap.height);
   const context = frame.getContext("2d")!;
@@ -546,9 +559,10 @@ self.onmessage = async (
     full?: boolean;
     outputs?: boolean;
     encode?: boolean;
+    preview?: PreviewChecks;
   }>,
 ) => {
-  const { id, bitmap, full, outputs, encode } = event.data;
+  const { id, bitmap, full, outputs, encode, preview } = event.data;
   try {
     if (encode && bitmap) {
       const photo = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -568,7 +582,9 @@ self.onmessage = async (
     }
     ready ??= initialize();
     await ready;
-    const result = bitmap ? await process(bitmap, !!full, !!outputs) : {};
+    const result = bitmap
+      ? await process(bitmap, !!full, !!outputs, preview)
+      : {};
     self.postMessage({ id, ...result });
   } catch (error) {
     self.postMessage({

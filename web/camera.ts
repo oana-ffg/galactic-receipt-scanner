@@ -265,6 +265,7 @@ export class PhoneCamera {
           drawFrame(this.video, this.canvas, 800);
           const analysis = await this.vision!.request(
             await createImageBitmap(this.canvas),
+            { preview: this.machine.previewChecks },
           );
           if (!this.running || this.generation !== generation) return;
           if (!this.connected) continue;
@@ -410,7 +411,7 @@ export class PhoneCamera {
       this.machine.value.message = "Checking the captured image…";
       this.emitState();
       const checksStarted = performance.now();
-      const result = await this.vision!.request(bitmap, true);
+      const result = await this.vision!.request(bitmap, { full: true });
       this.machine.value.timings = {
         photoMs,
         checksMs: performance.now() - checksStarted,

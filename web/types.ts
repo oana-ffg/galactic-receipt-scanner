@@ -2,6 +2,9 @@ export interface Quality {
   ok: boolean;
   quad: number[][] | null;
   hands: number[][][];
+  handsChecked?: boolean;
+  /** Preview geometry/print checks passed; ML may still be pending. */
+  candidateReady?: boolean;
   reason: string;
   empty?: boolean;
   motion?: number;

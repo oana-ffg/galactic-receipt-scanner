@@ -135,11 +135,10 @@ export function registerSiteTools(refresh: () => Promise<void>) {
         );
       const vision = new Vision();
       try {
-        const result = await vision.request(
-          await createImageBitmap(blob),
-          true,
-          true,
-        );
+        const result = await vision.request(await createImageBitmap(blob), {
+          full: true,
+          outputs: true,
+        });
         if (!result.quality.ok || !result.image || !result.pdf)
           throw new Error(`Review this original: ${result.quality.reason}`);
         const uploads = await Promise.allSettled(

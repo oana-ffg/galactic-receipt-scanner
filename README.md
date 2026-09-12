@@ -22,6 +22,9 @@ public signup, shared receipt database, pairing secret or public file bucket.
 
 - Browser camera with rear-camera preference, high-resolution stills and a video-frame fallback.
 - OpenCV paper edges, focus/print/motion checks and MediaPipe hand detection in a phone worker.
+  Preview hand detection runs near the end of the stability window after the other
+  checks pass, and when confirming removal. Every captured photo is checked afresh.
+  Idle or paused previews skip capture ML; pause still leaves the camera and preview on.
 - Direct live video and controls between owner-authenticated devices when the network allows it, with an Internet preview fallback.
 - Full-resolution original capture; crops and image PDFs are prepared by Work/Codex after scanning.
 - Recent captures compares the saved original and outline with an unsaved, downloadable PDF draft, prepared on the desktop as rows become visible.

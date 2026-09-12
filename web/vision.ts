@@ -1,4 +1,5 @@
 import type { Quality } from "./types";
+import type { PreviewChecks } from "./hand-checks";
 export interface Analysis {
   quality: Quality;
   image?: Blob;
@@ -42,7 +43,7 @@ export class Vision {
     this.pending.clear();
   }
   async encodeFrame(bitmap: ImageBitmap): Promise<Blob> {
-    const result = await this.request(bitmap, false, false, true);
+    const result = await this.request(bitmap, { encode: true });
     if (!result.original?.size)
       throw new Error(
         "The camera frame could not be encoded. Retake the photo.",
@@ -51,9 +52,12 @@ export class Vision {
   }
   request(
     bitmap?: ImageBitmap,
-    full = false,
-    outputs = false,
-    encode = false,
+    options: {
+      full?: boolean;
+      outputs?: boolean;
+      encode?: boolean;
+      preview?: PreviewChecks;
+    } = {},
   ): Promise<Analysis> {
     return new Promise((resolve, reject) => {
       const id = ++this.counter;
@@ -63,7 +67,7 @@ export class Vision {
       }, 60000);
       this.pending.set(id, { resolve, reject, timer });
       this.worker.postMessage(
-        { id, bitmap, full, outputs, encode },
+        { id, bitmap, ...options },
         bitmap ? [bitmap] : [],
       );
     });

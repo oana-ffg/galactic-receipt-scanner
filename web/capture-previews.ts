@@ -130,8 +130,7 @@ export class CapturePreviews {
           this.worker ??= new Vision();
           const result = await this.worker.request(
             await createImageBitmap(blob),
-            true,
-            true,
+            { full: true, outputs: true },
           );
           if (this.entries.get(entry.capture.id) !== entry) continue;
           if (!result.quality.ok || !result.image || !result.pdf)
