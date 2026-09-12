@@ -81,6 +81,62 @@ in progress while you work. This is not a disposable development instance.**
 - The optional GitHub checkbox is off by default and opens a generic public draft for
   the reporter to review. It never automatically publishes the private report or image.
 
+## Accessing saved originals from Work/Codex
+
+**Use the owner's authenticated browser session to retrieve the actual image bytes.**
+This procedure has been verified with full-resolution originals and matching SHA-256
+hashes. A failed standalone download does not establish that saved scans are inaccessible.
+
+1. Resolve the existing Site from `.openai/hosting.json` and Sites metadata. Use browser
+   inventory to select a current tab/handle; do not reuse another task's browser IDs.
+   If no usable signed-in tab exists, open the Site's normal `/camera` HTML page. Leave
+   **Enable camera** untouched: this provides a read-only session without claiming the
+   camera or competing for the dashboard's direct preview. Never reload the active phone.
+2. Verify `GET /api/me` from inside that page returns HTTP 200 and the expected owner.
+   Requests use the browser's own session with `credentials: "same-origin"`,
+   `cache: "no-store"`, and `redirect: "error"`. Do not export cookies, manufacture
+   identity headers, or substitute Sites source/dispatch credentials for this session.
+3. Prefer the dashboard's discovered WebMCP tools (`list_receipts`, `read_receipt`) for
+   metadata when available. Otherwise use same-origin `GET /api/captures` and
+   `GET /api/captures/{id}`. Follow pagination and resolve the actual capture ID. The
+   saved-pictures counter is not a database row number: retakes count once and rejected
+   takes remain in history. Use capture time, receipt ID and nearby images to identify it.
+   No manual scrolling is needed: request `/api/captures?limit=100`, then append
+   `&before=` with the URL-encoded returned `next` cursor until it is null. Add
+   `&current=1` when only current takes are wanted; omit it for complete capture history.
+4. For byte retrieval through Browser Use, read the selected tab's `cdp` capability
+   documentation, then use `Runtime.evaluate` with `awaitPromise: true` and
+   `returnByValue: true` for the authorized same-origin reads. Do not use the ordinary
+   read-only DOM evaluator for network requests. Fetch metadata and
+   `/api/files/{id}/raw`, require successful responses, read `arrayBuffer()`, compute
+   SHA-256 with `crypto.subtle.digest`, and compare it exactly with metadata `sha256`.
+5. Convert those verified bytes to an image data URL using `Blob` and `FileReader`.
+   Keep the returned object in the browser REPL; print only bounded verification facts,
+   then call `nodeRepl.emitImage(dataUrl)` to actually inspect the pixels. Do not print
+   the base64 payload. If local files are needed for requested processing, keep originals
+   and private results outside tracked source, under an ignored private working directory.
+6. A second supported retrieval method is to enable CDP `Network` events, open a saved
+   original through the UI, identify its exact successful `Network.responseReceived`
+   request, and read `Network.getResponseBody`. Respect `base64Encoded` when decoding
+   and verify the original hash before processing it.
+
+Direct navigation to an API/attachment URL can return `ERR_BLOCKED_BY_CLIENT` even when
+the same-origin fetch from a normal signed-in page works. Recover through that page before
+reporting an access blocker. If an actual in-page request fails authentication, inspect
+the response and normal sign-in state; preserve access controls. Metadata, a file URL,
+a thumbnail or a screenshot alone is not proof that original bytes were retrieved.
+Keep receipt content, capture identifiers and private verification output out of this
+public documentation and commits. Close temporary inspection tabs when finished, or mark
+one for handoff when follow-up processing needs its authenticated session.
+
+For requested local exports, enumerate through the API and retain a private manifest of
+capture IDs, selected takes, artifact versions/hashes, successful downloads and failures.
+Use `outputs.pdf` and capture-detail `artifacts` to distinguish stored PDFs from missing
+derivatives. Pin each existing PDF with `/api/files/{id}/pdf?version={sha256}` and verify
+its bytes against that artifact hash. Downloading existing PDFs and generating missing
+PDFs are separate operations; never silently skip missing outputs or claim an incomplete
+batch is complete. Resume from verified local files instead of downloading them again.
+
 ## Accuracy is the highest priority
 
 **These are financial source documents. Accuracy outranks throughput and file size.**
