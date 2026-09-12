@@ -21,6 +21,8 @@ export interface ScanState {
   paused: boolean;
   activeId: string | null;
   lastSaved: string | null;
+  lastCapture: string | null;
+  retakeOf: string | null;
   armed: boolean;
   cameraConnected: boolean;
   streamFresh: boolean;
@@ -36,6 +38,11 @@ export interface ScanState {
 
 export interface Capture {
   id: string;
+  receipt_id: string;
+  retake_of: string | null;
+  take_number: number;
+  is_current: boolean;
+  current_capture_id: string | null;
   created_at: string;
   sha256: string;
   status: "checking" | "accepted" | "rejected";

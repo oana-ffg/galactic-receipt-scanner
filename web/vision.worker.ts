@@ -291,7 +291,8 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     const { points } = papers[0];
     q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
     if (papers[1]?.area > 0.05) {
-      q.reason = "More than one paper region detected.";
+      q.reason =
+        "More than one paper-like region detected. Separate overlapping paper and move bright objects out of view.";
       return q;
     }
     // Conservative: any detected hand blocks capture, including fingertips near the boundary.

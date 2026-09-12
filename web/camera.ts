@@ -370,6 +370,7 @@ export class PhoneCamera {
       const photoMs = performance.now() - started;
       const capture: PendingCapture = {
         id,
+        retakeOf: this.machine.value.retakeOf,
         blob,
         method,
         sourcePixels: [this.video.videoWidth, this.video.videoHeight],
@@ -441,6 +442,7 @@ export class PhoneCamera {
       headers: {
         "Content-Type": capture.blob.type,
         "X-Capture-Status": capture.quality.ok ? "accepted" : "rejected",
+        ...(capture.retakeOf ? { "X-Retake-Of": capture.retakeOf } : {}),
         "X-Capture-Metadata": JSON.stringify({
           captureMethod: capture.method,
           sourcePixels: capture.sourcePixels,
@@ -474,6 +476,7 @@ export class PhoneCamera {
       this.machine.failed(
         `Previous photo needs retaking: ${capture.quality.reason} The image is kept; tap Retake photo to try again.`,
         "retake",
+        capture.id,
       );
   }
 }

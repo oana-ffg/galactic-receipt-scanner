@@ -7,6 +7,8 @@ export class CaptureState {
     paused: true,
     activeId: null,
     lastSaved: null,
+    lastCapture: null,
+    retakeOf: null,
     armed: true,
     cameraConnected: true,
     streamFresh: true,
@@ -43,6 +45,17 @@ export class CaptureState {
   control(action: string) {
     this.feedback = null;
     if (this.value.activeId) return;
+    if (
+      (action === "start" || action === "retry") &&
+      this.value.recovery === "upload"
+    )
+      return;
+    if (
+      action === "retry" &&
+      !this.value.lastCapture &&
+      this.value.recovery !== "retake"
+    )
+      return;
     this.reset();
     if (action === "pause") {
       this.value.paused = true;
@@ -54,24 +67,44 @@ export class CaptureState {
       this.value.recovery = undefined;
       this.value.paused = false;
       this.latched = false;
-      if (action === "retry") this.value.armed = true;
+      if (action === "retry") {
+        this.value.retakeOf = this.value.lastCapture;
+        this.value.armed = true;
+      }
       this.value.phase = "red";
-      this.value.message = "Place one receipt on the dark background.";
+      this.value.message = this.value.retakeOf
+        ? "Retaking the same receipt. Keep it in view and hold steady."
+        : "Place one receipt on the dark background.";
     }
   }
   observe(q: Quality, now: number): string | null {
     this.value.quality = q;
-    if (this.value.activeId || this.value.paused || this.latched) return null;
-    if (!this.value.armed) {
-      if (q.empty) {
+    if (this.value.activeId) return null;
+    // Removal also clears retake intent while paused or waiting after a failed check.
+    // A later receipt must never inherit the previous receipt's identity.
+    if (this.value.lastCapture || !this.value.armed) {
+      if (q.empty && !q.hands.length) {
         this.absent ||= now;
         if (now - this.absent >= 450) {
+          this.value.lastCapture = null;
+          this.value.retakeOf = null;
           this.value.armed = true;
           this.reset();
-          this.value.phase = "red";
-          this.value.message = "Ready for the next receipt.";
+          if (!this.latched && !this.value.paused) {
+            this.value.phase = "red";
+            this.value.message = "Ready for the next receipt.";
+          }
         }
       } else this.absent = 0;
+    }
+    if (this.value.paused || this.latched || !this.value.armed) return null;
+    if (q.empty && !q.hands.length) {
+      this.reset();
+      this.feedback = null;
+      this.value.phase = "red";
+      this.value.message = this.value.lastSaved
+        ? "Ready for the next receipt."
+        : q.reason;
       return null;
     }
     if (!q.ok || !q.quad || (q.motion ?? 0) > 3.5) {
@@ -100,6 +133,8 @@ export class CaptureState {
     this.value.needsAttention = false;
     this.value.activeId = null;
     this.value.lastSaved = id;
+    this.value.lastCapture = id;
+    this.value.retakeOf = null;
     this.value.recovery = undefined;
     this.value.armed = false;
     this.absent = 0;
@@ -108,7 +143,13 @@ export class CaptureState {
     this.value.message = "Saved privately. Remove the receipt, then next.";
     this.reset();
   }
-  failed(message: string, recovery?: "retake" | "upload") {
+  failed(message: string, recovery?: "retake" | "upload", retainedId?: string) {
+    if (retainedId) {
+      this.value.lastCapture = retainedId;
+      this.value.retakeOf = null;
+      this.value.armed = false;
+      this.absent = 0;
+    }
     this.value.recovery = recovery;
     this.feedback = null;
     this.value.stage = undefined;

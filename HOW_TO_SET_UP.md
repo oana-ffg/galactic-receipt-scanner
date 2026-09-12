@@ -74,7 +74,7 @@ is needed; both devices need Internet access.
 - Amber: the label distinguishes stability checks, taking the photo, checking the captured image, and saving the original. Crops and PDFs do not run during capture.
 - Green: the original and quality metadata are durably saved and its checksum verified; remove the receipt completely before inserting the next.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
-- **Retry this receipt** creates another capture. It never replaces a previous original.
+- **Retake photo** creates a linked, numbered take of the receipt still in view. The latest accepted take is current and counts once; previous originals and derivatives remain available. A rejected retake leaves the previous accepted take current. Remove the receipt completely to start a different receipt.
 
 Inspect the first few originals at full size to calibrate lighting, height, small print
 and glare. Browser quality checks are conservative heuristics, not proof of legibility.
@@ -101,7 +101,7 @@ credential. No bearer-bypass tokens, public download links or embedded API keys 
 
 Where supported, the open dashboard exposes these WebMCP tools:
 
-- `list_receipts`: list captures, hashes and quality results; follow the returned cursor.
+- `list_receipts`: list current accepted takes, one per receipt; follow the returned cursor. Set `history: true` to inspect rejected and previous takes.
 - `read_receipt`: get one capture and authenticated file URLs for inspecting the sources.
 - `prepare_receipt_outputs`: after scanning, verify an original against its hash and create its crop and image PDF. Run one receipt at a time; failed derivative generation never changes the saved original.
 - `transcribe_saved_receipts`: after scanning, run private Danish/English OCR for up to 20 accepted originals, retaining both layout passes, coordinates, model hashes and uncertainty scores.
@@ -132,3 +132,8 @@ new schema migrations with `npm run db:generate`, validate them locally, and fol
 same private publish and access-verification steps. Do not clone a fresh instance as an
 update strategy or copy somebody else's hosting manifest. The original LAN implementation
 is retained in Git history before the Sites migration; ignored local captures remain intact.
+
+Retake tracking applies to new captures after this update. Existing captures retain their
+own receipt IDs because their earlier retake relationships were never recorded. Review
+possible earlier duplicates against the originals before accounting; never merge them by
+timestamp alone. Reload the dashboard and camera after updating so both use linked retakes.

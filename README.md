@@ -25,6 +25,7 @@ public signup, shared receipt database, pairing secret or public file bucket.
 - Direct live video and controls between owner-authenticated devices when the network allows it, with an Internet preview fallback.
 - Full-resolution original capture; crops and image PDFs are prepared by Work/Codex after scanning.
 - Durable D1 metadata and private R2 objects; retry-safe capture IDs and versioned derivatives.
+- Retakes are numbered takes of one receipt: the latest accepted take is current, previous originals stay available, and the receipt is counted once.
 - Pending-upload recovery on the phone; green only after the original and quality metadata are durably saved and the returned checksum is verified.
 - Private Danish/English OCR after scanning, with two layout passes, source coordinates and flagged uncertainties for downstream visual review.
 - Authenticated downloads and WebMCP tools for the owner's downstream Work/Codex task.
@@ -32,6 +33,7 @@ public signup, shared receipt database, pairing secret or public file bucket.
 For the smoothest preview, put the phone and desktop on the same network and keep one dashboard open. Direct video uses no external relay service; networks that block it use the slower authenticated image preview.
 
 Use light paper on a dark background. Keep all four edges visible and hands out of view.
+Leave a dark gap around the paper and keep keyboards and other bright objects away from it.
 Completely remove each receipt before adding the next. Calibrate the first few scans on
 the actual phone: partial fingertips, curled paper, glare and faint print can defeat checks.
 The minimum 900 pixels across a receipt is a quality gate, not a physical-DPI claim.

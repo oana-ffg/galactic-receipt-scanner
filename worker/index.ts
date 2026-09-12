@@ -174,6 +174,11 @@ async function bodyJson(
 }
 interface CaptureRow {
   id: string;
+  receipt_id: string | null;
+  retake_of: string | null;
+  take_number: number;
+  is_current: number;
+  current_capture_id: string | null;
   created_at: string;
   sha256: string;
   status: string;
@@ -188,6 +193,11 @@ interface CaptureRow {
 function publicCapture(row: CaptureRow) {
   return {
     id: row.id,
+    receipt_id: row.receipt_id ?? row.id,
+    retake_of: row.retake_of,
+    take_number: row.take_number,
+    is_current: Boolean(row.is_current),
+    current_capture_id: row.current_capture_id,
     acceptedCount: row.accepted_count,
     created_at: row.created_at,
     status: row.status,
@@ -201,9 +211,21 @@ function publicCapture(row: CaptureRow) {
     },
   };
 }
+// Legacy rows with no receipt_id use their own ID without rewriting source metadata.
+// Selection is derived from immutable take numbers, so retries and rejected retakes
+// cannot demote an accepted source. One accepted take represents each receipt.
+const currentTake =
+  "captures.status='accepted' AND NOT EXISTS (SELECT 1 FROM captures newer WHERE (newer.receipt_id=COALESCE(captures.receipt_id,captures.id) OR newer.id=COALESCE(captures.receipt_id,captures.id)) AND newer.status='accepted' AND newer.take_number>captures.take_number)";
+const receiptCount =
+  "SELECT COUNT(DISTINCT COALESCE(receipt_id,id)) FROM captures WHERE status='accepted'";
+const captureSelection = `SELECT captures.*, (${currentTake}) AS is_current,
+  (SELECT id FROM captures accepted WHERE (accepted.receipt_id=COALESCE(captures.receipt_id,captures.id) OR accepted.id=COALESCE(captures.receipt_id,captures.id)) AND accepted.status='accepted' ORDER BY accepted.take_number DESC LIMIT 1) AS current_capture_id,
+  EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available,
+  EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available,
+  EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available`;
 async function captureRow(env: Env, id: string): Promise<CaptureRow> {
   const row = await env.DB.prepare(
-    "SELECT *, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available, (SELECT COUNT(*) FROM captures WHERE status='accepted') AS accepted_count FROM captures WHERE id = ?",
+    `${captureSelection}, (${receiptCount}) AS accepted_count FROM captures WHERE id = ?`,
   )
     .bind(id)
     .first<CaptureRow>();
@@ -255,7 +277,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     const cursor = (url.searchParams.get("before") ?? "9999|").split("|");
     requireThat(cursor.length === 2, 400, "Invalid cursor.");
     const rows = await env.DB.prepare(
-      "SELECT *, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available, EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available FROM captures WHERE (created_at,id) < (?,?) ORDER BY created_at DESC,id DESC LIMIT 100",
+      `${captureSelection} FROM captures WHERE (created_at,id) < (?,?) ${url.searchParams.get("current") === "1" ? `AND (${currentTake})` : ""} ORDER BY created_at DESC,id DESC LIMIT 100`,
     )
       .bind(cursor[0], cursor[1])
       .all<CaptureRow>();
@@ -311,6 +333,25 @@ async function route(request: Request, env: Env): Promise<Response> {
         "Invalid capture result.",
       );
       if (completed === "accepted") requireQuality(metadata);
+      const retakeOf = request.headers.get("x-retake-of");
+      requireThat(
+        retakeOf === null || (UUID.test(retakeOf) && retakeOf !== id),
+        400,
+        "Invalid retake source.",
+      );
+      const parent = retakeOf ? await captureRow(env, retakeOf) : null;
+      const receiptId = parent ? (parent.receipt_id ?? parent.id) : id;
+      const existing = await env.DB.prepare(
+        "SELECT sha256,retake_of FROM captures WHERE id=?",
+      )
+        .bind(id)
+        .first<{ sha256: string; retake_of: string | null }>();
+      requireThat(
+        !existing ||
+          (existing.sha256 === sha && existing.retake_of === retakeOf),
+        409,
+        "Capture ID already belongs to different bytes or retake source. Original unchanged.",
+      );
       // A completed original needs no crop or PDF; those are downstream derivatives.
       const key = `raw/${id}/${sha}`;
       // Conditional object creation + insert-first-wins make retries non-destructive, including races.
@@ -326,7 +367,7 @@ async function route(request: Request, env: Env): Promise<Response> {
           "Original storage not confirmed.",
         );
       await env.DB.prepare(
-        "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata) VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(MAX(take_number),0)+1 FROM captures WHERE receipt_id=? OR id=?",
       )
         .bind(
           id,
@@ -337,13 +378,17 @@ async function route(request: Request, env: Env): Promise<Response> {
           data.length,
           completed ?? "checking",
           JSON.stringify(metadata),
+          receiptId,
+          retakeOf,
+          receiptId,
+          receiptId,
         )
         .run();
       const row = await captureRow(env, id);
       requireThat(
-        row.sha256 === sha,
+        row.sha256 === sha && row.retake_of === retakeOf,
         409,
-        "Capture ID already belongs to different bytes. Original unchanged.",
+        "Capture ID already belongs to different bytes or retake source. Original unchanged.",
       );
       requireThat(
         await env.BUCKET.head(row.raw_key),
@@ -479,9 +524,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/api/station" && method === "GET") {
     const row = await stationRow(env);
     const fresh = row.expires > Date.now() && row.updated > Date.now() - 5000;
-    const count = await env.DB.prepare(
-      "SELECT count(*) AS n FROM captures WHERE status='accepted'",
-    ).first<{ n: number }>();
+    const count = await env.DB.prepare(`SELECT (${receiptCount}) AS n`).first<{
+      n: number;
+    }>();
     return json({
       camera: fresh ? row.camera : null,
       previewSession:
@@ -512,9 +557,9 @@ async function route(request: Request, env: Env): Promise<Response> {
       409,
       "Another camera is active. Close it and wait ten seconds.",
     );
-    const count = await env.DB.prepare(
-      "SELECT count(*) AS n FROM captures WHERE status='accepted'",
-    ).first<{ n: number }>();
+    const count = await env.DB.prepare(`SELECT (${receiptCount}) AS n`).first<{
+      n: number;
+    }>();
     return json({
       count: count?.n ?? 0,
       sequence: row.sequence,

@@ -5,7 +5,7 @@ export const ownerHeaders = {
   "oai-authenticated-user-id": "synthetic-owner",
   "oai-authenticated-user-email": "owner@example.test",
 };
-export async function runtime({ retiredCaptureIds } = {}) {
+export async function runtime({ retiredCaptureIds, migrationLimit } = {}) {
   const mf = new Miniflare({
     modules: true,
     scriptPath: "dist/server/index.js",
@@ -29,7 +29,8 @@ export async function runtime({ retiredCaptureIds } = {}) {
   const db = await mf.getD1Database("DB");
   for (const file of (await readdir("drizzle"))
     .filter((f) => f.endsWith(".sql"))
-    .sort())
+    .sort()
+    .slice(0, migrationLimit))
     for (const sql of (await readFile(`drizzle/${file}`, "utf8")).split(
       "--> statement-breakpoint",
     ))

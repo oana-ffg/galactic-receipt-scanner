@@ -7,6 +7,7 @@ describe("phone upload recovery buffer", () => {
     const blob = new Blob(["source-image-bytes"], { type: "image/jpeg" });
     await savePending({
       id: "capture-one",
+      retakeOf: "previous-take",
       blob,
       method: "still",
       sourcePixels: [2000, 2400],
@@ -14,6 +15,7 @@ describe("phone upload recovery buffer", () => {
     });
     const reloaded = await pendingCaptures();
     expect(reloaded).toHaveLength(1);
+    expect(reloaded[0].retakeOf).toBe("previous-take");
     expect(await reloaded[0].blob.text()).toBe("source-image-bytes");
     // An attempted upload alone never deletes the pending image.
     expect(await pendingCaptures()).toHaveLength(1);
