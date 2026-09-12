@@ -17,6 +17,7 @@
     "@techstark/opencv-js": "^5.0.0-release.1",
     "html2canvas": "1.4.1",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.3.289",
     "qrcode": "^1.5.4",
     "tesseract.js": "^7.0.0"
   },

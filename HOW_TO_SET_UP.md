@@ -25,7 +25,7 @@ Give ChatGPT Work or Codex the public repository URL and ask:
    owner, use first-visitor ownership, or commit account details. Missing configuration
    denies all requests. The server requires both the dispatcher user-ID header and the
    exact owner email; authentication alone does not authorize a different visitor.
-6. Install Node.js 22.12+ (24 recommended), then run:
+6. Install Node.js 22.13+ (24 recommended), then run:
 
    ```sh
    npm ci

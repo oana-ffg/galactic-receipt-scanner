@@ -443,7 +443,13 @@ export async function mountReview(app: HTMLElement) {
     if (doc.pdf) {
       const link = el("a", "Download saved PDF");
       link.href = `/api/documents/${doc.id}/pdf?version=${doc.pdf.sha256}&revision=${doc.pdf.revision}`;
-      outputs.append(link);
+      const preview = el("button", "Preview saved PDF", "secondary");
+      preview.onclick = () =>
+        void action(async () => {
+          const { inspectPdf } = await import("./pdf-preview");
+          await inspectPdf(link.href, doc.pdf!.sha256, doc.filename!);
+        });
+      outputs.append(preview, link);
     }
     detail.append(outputs);
     if (doc.duplicateOf) {

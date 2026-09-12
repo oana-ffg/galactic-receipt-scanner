@@ -56,7 +56,7 @@ image PDFs. Follow [the post-processing workflow](POST_PROCESSING.md). Preserve 
 ## Development
 
 See [setup instructions](HOW_TO_SET_UP.md) for the ignored local manifest and environment.
-Node.js 22.12+ is required; Node 24 and installed Google Chrome are recommended.
+Node.js 22.13+ is required; Node 24 and installed Google Chrome are recommended.
 
 ```sh
 npm ci

@@ -144,6 +144,69 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     path: "test-results/documents/review-desktop.png",
     fullPage: true,
   });
+  await page.getByRole("button", { name: "Preview saved PDF" }).click();
+  const preview = page.getByRole("dialog", { name: /Saved PDF:/ });
+  await expect(
+    preview.getByRole("img", { name: "PDF page 1 of 2" }),
+  ).toBeVisible();
+  await expect(preview.getByRole("status")).toHaveText(
+    /saved PDF checksum verified/,
+  );
+  await preview.getByRole("button", { name: "Next page" }).click();
+  await expect(
+    preview.getByRole("img", { name: "PDF page 2 of 2" }),
+  ).toBeVisible();
+  await expect(preview.locator("canvas")).toHaveCount(1);
+  await preview.getByRole("button", { name: "Zoom in" }).click();
+  await expect(preview.getByRole("button", { name: "Fit page" })).toBeVisible();
+  await preview.getByRole("button", { name: "Previous page" }).click();
+  await expect(
+    preview.getByRole("img", { name: "PDF page 1 of 2" }),
+  ).toBeVisible();
+  await preview.getByRole("button", { name: "Close PDF" }).click();
+  await expect(preview).toHaveCount(0);
+  const pdfUrl = `${origin}/api/documents/${ids[0]}/pdf?version=${result.sha256}&revision=${result.revision}`;
+  await page.route(pdfUrl, (route) =>
+    route.fulfill({
+      contentType: "application/pdf",
+      body: Buffer.from("%PDF-tampered synthetic response"),
+    }),
+  );
+  await page.getByRole("button", { name: "Preview saved PDF" }).click();
+  await expect(preview.getByRole("status")).toHaveText(/PDF checksum mismatch/);
+  await expect(preview.locator("canvas")).toBeHidden();
+  await preview.getByRole("button", { name: "Close PDF" }).click();
+  await expect(preview).toHaveCount(0);
+  await page.unroute(pdfUrl);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  let release!: () => void;
+  let requested!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
+  await page.route(pdfUrl, async (route) => {
+    requested();
+    await held;
+    await route
+      .fulfill({ contentType: "application/pdf", body: pdfBytes })
+      .catch(() => {});
+  });
+  await page.getByRole("button", { name: "Preview saved PDF" }).click();
+  await started;
+  await preview.getByRole("button", { name: "Close PDF" }).click();
+  await expect(preview).toHaveCount(0);
+  release();
+  await page.unroute(pdfUrl);
+  await page.getByRole("button", { name: "Preview saved PDF" }).click();
+  await expect(
+    preview.getByRole("img", { name: "PDF page 1 of 2" }),
+  ).toBeVisible();
+  await preview.getByRole("button", { name: "Close PDF" }).click();
+  expect(errors).toEqual([]);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(
     await page.evaluate(
