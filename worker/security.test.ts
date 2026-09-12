@@ -34,6 +34,8 @@ it("rejects anonymous, other-user and cross-origin requests on all sensitive rou
     "/api/station",
     "/api/station/preview",
     "/api/station/direct-preview",
+    "/api/station/release",
+    "/vendor/ocr/worker.min.js",
     "/vendor/opencv.js",
     "/api/files/00000000-0000-4000-8000-000000000001/raw",
   ]) {
@@ -161,6 +163,39 @@ it("rejects missing quality, unsafe payload formats, traversal and competing cam
       )
     ).status,
   ).toBe(409);
+  await request(
+    "/api/station/release",
+    "POST",
+    JSON.stringify({ camera: crypto.randomUUID() }),
+  );
+  expect(
+    (
+      await request(
+        "/api/station/heartbeat",
+        "POST",
+        JSON.stringify({ camera: id, state: {} }),
+      )
+    ).status,
+  ).toBe(200);
+  await request("/api/station/release", "POST", JSON.stringify({ camera: id }));
+  expect(
+    (
+      await request(
+        "/api/station/heartbeat",
+        "POST",
+        JSON.stringify({ camera: id, state: {} }),
+      )
+    ).status,
+  ).toBe(409);
+  expect(
+    (
+      await request(
+        "/api/station/claim",
+        "POST",
+        JSON.stringify({ camera: crypto.randomUUID() }),
+      )
+    ).status,
+  ).toBe(200);
 });
 
 it("fails closed without owner configuration and never acknowledges a failed object write", async () => {

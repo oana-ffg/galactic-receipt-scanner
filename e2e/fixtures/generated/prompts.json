@@ -1,0 +1,26 @@
+{
+  "mode": "built-in imagegen",
+  "note": "Synthetic images only. Flat, creased, hand and Danish are 941x1672; glare is 1086x1448. These do not validate native camera resolution.",
+  "prompts": [
+    {
+      "key": "danish",
+      "prompt": "Create a photorealistic high-resolution camera photo of one Danish thermal receipt, full paper visible on matte dark desk under even bright light, crisp small print, slight natural texture. Portrait composition. This is a synthetic OCR test, no real merchant, tax identifier, address or financial source. Header fictional text logo 'ØKOHJØRNET' in bold stylized sans serif with a small original leaf symbol. Print exactly these lines: 'SYNTETISK TEST – IKKE ET KØB'; '12-09-2026 14:32'; 'Æbler  24,95'; 'Økologisk mælk  16,50'; 'Havregryn  18,75'; 'Rugbrød  22,00'; 'Rabat  -5,00'; 'I ALT DKK  77,20'; 'Heraf moms 25%  15,44'; 'Betalt med kort  77,20'; 'Tak for besøget'; 'TESTDATA'. Preserve Danish æ ø å and decimal commas. No extra invented numbers. No actual brand logo. All edges and a margin visible. Request 2160x3840 pixels if supported."
+    },
+    {
+      "key": "glare",
+      "prompt": "Photorealistic smartphone capture test photograph of one synthetic Danish receipt on a glossy dark desk under a desk lamp. Receipt is noticeably OFF CENTRE toward upper LEFT, tilted clockwise about 12 degrees, all four paper edges still fully inside image with minimum margin 4 percent. Perspective mildly oblique, receipt naturally creased, not perfectly rectangular. Strong broad lamp reflection on desk toward lower right, near but not covering receipt. A small sheen at blank bottom receipt margin, ALL PRINT still clear and legible. Portrait image, highest available native resolution. Fictional header 'TESTBUTIK' with a simple outlined star logo, and exact Danish text 'SYNTETISK KVITTERING', 'IKKE ET RIGTIGT KØB', 'Æbler 24,95', 'Mælk 16,50', 'Brød 22,00', 'I ALT 63,45', 'Moms 12,69', 'TESTDATA'. No actual brands, tax IDs or payment identifiers. Receipt occupies about 60 percent image width and 75 percent height. This is quality-gate calibration data, so preserve realistic paper/background contrast and readable print. Do not center the paper."
+    },
+    {
+      "key": "flat",
+      "prompt": "Use case: photorealistic-natural. Asset type: synthetic receipt-scanner test image, one photograph. Generate at portrait 2160x3840 resolution if supported. Top-down phone camera view of ONE long white thermal receipt on a dark matte charcoal desk mat. The receipt occupies about 65% of image width and 80% height, all edges visible with generous margin. Sharp readable small black thermal printing, soft ordinary indoor lighting, subtle paper texture, slightly uneven torn bottom edge. NO hands, no other objects, no collage. Text must be fictional synthetic test data only, headed 'SYNTHETIC TEST RECEIPT' and 'NOT A REAL TRANSACTION'. Include exactly these clear lines: 'TEST SHOP', '2026-09-12', 'Paper towels  25.00', 'Cat litter  74.50', 'Cat food  125.50', 'TOTAL  225.00', 'VAT included 45.00', 'TEST DATA ONLY'. No real brand, address, registration number, payment card details or personal information. This is for computer vision testing, not a design mockup; natural realistic photograph."
+    },
+    {
+      "key": "creased",
+      "prompt": "Use case: photorealistic-natural. Asset type: synthetic receipt-scanner test image, one photograph. Generate portrait 2160x3840 if supported. A long, lightly crumpled off-white thermal receipt lying on a dark textured desk, photographed from a modest handheld oblique angle. Receipt takes around 65% image width and 80% height, every edge inside the image. Several realistic creases and a gently curled corner; printed text is faint gray but still clearly readable and in focus. Ordinary indoor lamp light from upper left, mild soft glare on desk away from text; no severe overexposure. NO hands, no other documents, no collage. Fictional synthetic text only: 'SYNTHETIC TEST RECEIPT', 'NOT A REAL TRANSACTION', 'TEST SHOP', '2026-09-12', 'Food 125.50', 'Litter 74.50', 'TOTAL 200.00', 'VAT included 40.00', 'TEST DATA ONLY'. No real brands, people, addresses, tax IDs, card numbers or private data. Natural photograph for image-quality testing."
+    },
+    {
+      "key": "hand",
+      "prompt": "Use case: photorealistic-natural. Asset type: negative synthetic receipt-scanner test image, one photograph. Portrait 2160x3840 if supported. Top-down view of one white thermal receipt on dark matte charcoal mat. The receipt fills around 65% width and 80% height, all paper edges inside the frame. A realistic adult hand reaches in from the right, resting three fingers across the center of the printed receipt and covering some item lines. The hand MUST clearly visibly obstruct text, realistic anatomy and skin texture. Normal sharp indoor photograph, no motion blur. Receipt text fictional synthetic data only: 'SYNTHETIC TEST RECEIPT', 'NOT A REAL TRANSACTION', 'TEST SHOP', 'TOTAL 200.00', 'TEST DATA ONLY'. No real brand names, addresses, IDs, card details or personal data; no collage. This image should test rejection of a hand obscuring a financial source document."
+    }
+  ]
+}

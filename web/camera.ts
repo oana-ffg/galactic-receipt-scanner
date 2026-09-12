@@ -1,3 +1,4 @@
+import { sha256 } from "./checksum";
 import { api } from "./api";
 import { messageOf, RequestError } from "./errors";
 import {
@@ -45,15 +46,26 @@ export class PhoneCamera {
     () => {},
   );
   private wakeLock: WakeLockSentinel | null = null;
+  private nativePhotoAvailable = true;
   constructor(
     private video: HTMLVideoElement,
     private status: (message: string) => void,
     private state: (state: ScanState) => void,
     private onStopped: () => void,
   ) {
+    window.addEventListener("pagehide", () => this.stop());
     document.addEventListener("visibilitychange", () => {
-      if (this.running && document.visibilityState === "visible")
+      this.machine.interrupt();
+      if (this.running && document.visibilityState === "visible") {
         void this.keepAwake();
+        void this.video
+          .play()
+          .catch(() =>
+            this.stop(
+              "Camera playback stopped. Tap Enable camera to restart it.",
+            ),
+          );
+      }
     });
   }
   async start() {
@@ -63,6 +75,7 @@ export class PhoneCamera {
         "Camera access requires HTTPS. Open the private Site in Safari.",
       );
     this.machine = new CaptureState();
+    this.camera = crypto.randomUUID();
     const generation = ++this.generation;
     this.status("Loading receipt and hand checks…");
     this.vision = new Vision();
@@ -79,15 +92,7 @@ export class PhoneCamera {
     this.video.srcObject = this.stream;
     await this.video.play();
     try {
-      const claim = await api<{ sequence: number; count: number }>(
-        "/api/station/claim",
-        {
-          method: "POST",
-          body: JSON.stringify({ camera: this.camera }),
-        },
-      );
-      this.sequence = claim.sequence;
-      this.machine.value.count = claim.count;
+      await this.claim();
     } catch (error) {
       this.stop();
       throw error;
@@ -109,6 +114,29 @@ export class PhoneCamera {
     await this.recover();
     if (!this.running) throw new Error(this.machine.value.message);
   }
+  private async claim() {
+    const claim = await api<{ sequence: number; count: number }>(
+      "/api/station/claim",
+      {
+        method: "POST",
+        body: JSON.stringify({ camera: this.camera }),
+        signal: AbortSignal.timeout(4000),
+      },
+    );
+    this.sequence = claim.sequence;
+    this.machine.value.count = claim.count;
+  }
+  retake() {
+    if (
+      !this.running ||
+      !this.connected ||
+      this.busy ||
+      this.machine.value.recovery === "upload"
+    )
+      return;
+    this.machine.control("retry");
+    this.emitState();
+  }
   private async keepAwake() {
     try {
       this.wakeLock = (await navigator.wakeLock?.request("screen")) ?? null;
@@ -117,6 +145,14 @@ export class PhoneCamera {
     }
   }
   stop(message = "Camera stopped. Tap Enable camera to reconnect.") {
+    if (this.running)
+      void api("/api/station/release", {
+        method: "POST",
+        body: JSON.stringify({ camera: this.camera }),
+        keepalive: true,
+      }).catch(() => {
+        /* Expiry releases the lease if the network is unavailable. */
+      });
     this.generation++;
     this.running = false;
     this.connected = false;
@@ -159,6 +195,11 @@ export class PhoneCamera {
   }
   private async heartbeat(generation: number) {
     while (this.running && this.generation === generation) {
+      if (document.visibilityState !== "visible") {
+        this.machine.interrupt();
+        await delay(700);
+        continue;
+      }
       try {
         const result = await api<{
           sequence: number;
@@ -182,10 +223,20 @@ export class PhoneCamera {
         }
       } catch (error) {
         if (!this.running || this.generation !== generation) return;
-        if (this.sessionEnded(error)) return;
         this.connected = false;
         this.connectionIssue = messageOf(error);
         this.machine.interrupt();
+        if (error instanceof RequestError && error.status === 409) {
+          try {
+            await this.claim();
+            if (!this.running || this.generation !== generation) return;
+            this.direct.close();
+            this.connected = true;
+          } catch (claimError) {
+            if (this.sessionEnded(claimError)) return;
+            this.connectionIssue = messageOf(claimError);
+          }
+        } else if (this.sessionEnded(error)) return;
       }
       this.emitState();
       await delay(700);
@@ -257,7 +308,11 @@ export class PhoneCamera {
           this.machine.value.streamFresh = true;
         } catch (error) {
           if (!this.running || this.generation !== generation) return;
-          if (this.sessionEnded(error)) return;
+          if (
+            !(error instanceof RequestError && error.status === 409) &&
+            this.sessionEnded(error)
+          )
+            return;
           this.machine.value.streamFresh = false;
           this.machine.value.previewWarning = `Desktop preview is delayed. ${messageOf(error)} Retrying automatically.`;
         }
@@ -274,7 +329,7 @@ export class PhoneCamera {
     const Constructor = (
       window as unknown as { ImageCapture?: PhotoConstructor }
     ).ImageCapture;
-    if (Constructor) {
+    if (Constructor && this.nativePhotoAvailable) {
       try {
         const camera = new Constructor(track);
         const caps = await camera.getPhotoCapabilities();
@@ -287,17 +342,14 @@ export class PhoneCamera {
         if (!blob.size) throw new Error("Empty photo.");
         return { blob, method: "ImageCapture.takePhoto" };
       } catch {
-        this.status(
-          "Using the full-resolution video frame; quality checks still apply.",
-        );
+        this.nativePhotoAvailable = false;
       }
     }
-    const frame = document.createElement("canvas");
-    frame.width = this.video.videoWidth;
-    frame.height = this.video.videoHeight;
-    frame.getContext("2d")!.drawImage(this.video, 0, 0);
+    // Freeze the full-resolution frame and encode it in the existing worker.
+    // Avoid repeated multi-megapixel HTML canvas/toBlob allocations on iOS.
+    const bitmap = await createImageBitmap(this.video);
     return {
-      blob: await encode(frame, 0.98),
+      blob: await this.vision!.encodeFrame(bitmap),
       method: "full-resolution-video-frame",
     };
   }
@@ -305,9 +357,12 @@ export class PhoneCamera {
     if (this.busy) return;
     this.busy = true;
     const started = performance.now();
+    let retained = false;
     try {
-      if ((await pendingCaptures()).length)
+      if ((await pendingCaptures()).length) {
+        retained = true;
         throw new Error("An image is pending. Use Retry upload first.");
+      }
       this.machine.value.stage = "photo";
       this.machine.value.message = "Taking the photo…";
       this.emitState();
@@ -327,6 +382,7 @@ export class PhoneCamera {
         },
       };
       await savePending(capture);
+      retained = true;
       const bitmap = await createImageBitmap(blob);
       capture.sourcePixels = [bitmap.width, bitmap.height];
       if (bitmap.width * bitmap.height > 55000000) {
@@ -346,7 +402,10 @@ export class PhoneCamera {
       await savePending(capture);
       await this.upload(capture);
     } catch (error) {
-      this.machine.failed(`Capture needs attention: ${messageOf(error)}`);
+      this.machine.failed(
+        `Capture needs attention: ${messageOf(error)}`,
+        retained ? "upload" : "retake",
+      );
       this.status(messageOf(error));
     } finally {
       this.busy = false;
@@ -361,6 +420,7 @@ export class PhoneCamera {
     } catch (error) {
       this.machine.failed(
         `Image retained on phone: ${messageOf(error)} Use Retry upload.`,
+        "upload",
       );
     } finally {
       this.busy = false;
@@ -385,17 +445,11 @@ export class PhoneCamera {
           captureMethod: capture.method,
           sourcePixels: capture.sourcePixels,
           quality: capture.quality,
-          checks: "browser-opencv-mediapipe-v2-paper-motion",
+          checks: "browser-opencv-mediapipe-v3-local-print",
         }),
       },
     });
-    const hash = Array.from(
-      new Uint8Array(
-        await crypto.subtle.digest("SHA-256", await capture.blob.arrayBuffer()),
-      ),
-    )
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    const hash = await sha256(await capture.blob.arrayBuffer());
     if (result.sha256 !== hash)
       throw new Error("Stored checksum did not match. Keep this receipt.");
     const final =
@@ -418,7 +472,8 @@ export class PhoneCamera {
       this.machine.saved(capture.id, final.acceptedCount);
     } else
       this.machine.failed(
-        `Original saved; retake needed: ${capture.quality.reason}`,
+        `Previous photo needs retaking: ${capture.quality.reason} The image is kept; tap Retake photo to try again.`,
+        "retake",
       );
   }
 }
@@ -446,7 +501,9 @@ function drawFrame(
     1,
     edge / Math.max(video.videoWidth, video.videoHeight),
   );
-  canvas.width = Math.round(video.videoWidth * ratio);
-  canvas.height = Math.round(video.videoHeight * ratio);
+  const width = Math.round(video.videoWidth * ratio);
+  const height = Math.round(video.videoHeight * ratio);
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
   canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
 }

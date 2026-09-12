@@ -270,7 +270,15 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (capture) {
     const id = capture[1];
     requireThat(UUID.test(id), 400, "Invalid capture ID.");
-    if (method === "GET") return json(publicCapture(await captureRow(env, id)));
+    if (method === "GET") {
+      const row = await captureRow(env, id);
+      const versions = await env.DB.prepare(
+        "SELECT kind,sha256,created_at FROM artifacts WHERE capture_id=? ORDER BY created_at DESC,sha256 DESC",
+      )
+        .bind(id)
+        .all();
+      return json({ ...publicCapture(row), artifacts: versions.results });
+    }
     if (method === "POST") {
       const data = await bytes(request, MAX_IMAGE);
       const type = imageType(data);
@@ -431,13 +439,24 @@ async function route(request: Request, env: Env): Promise<Response> {
     const [, id, kind] = file;
     requireThat(UUID.test(id), 400, "Invalid capture ID.");
     const row = await captureRow(env, id);
+    const version = url.searchParams.get("version");
+    requireThat(
+      version === null || /^[0-9a-f]{64}$/.test(version),
+      400,
+      "Invalid artifact version.",
+    );
+    requireThat(
+      kind !== "raw" || version === null || version === row.sha256,
+      404,
+      "File version not available.",
+    );
     const artifact =
       kind === "raw"
         ? null
         : await env.DB.prepare(
-            "SELECT key,content_type FROM artifacts WHERE capture_id=? AND kind=? ORDER BY created_at DESC LIMIT 1",
+            "SELECT key,content_type FROM artifacts WHERE capture_id=? AND kind=? AND (? IS NULL OR sha256=?) ORDER BY created_at DESC,sha256 DESC LIMIT 1",
           )
-            .bind(id, kind)
+            .bind(id, kind, version, version)
             .first<{ key: string; content_type: string }>();
     const key = kind === "raw" ? row.raw_key : artifact?.key;
     requireThat(key, 404, "File not available.");
@@ -498,6 +517,20 @@ async function route(request: Request, env: Env): Promise<Response> {
         ? JSON.parse(row.preview_session)
         : null,
     });
+  }
+  if (path === "/api/station/release" && method === "POST") {
+    const { camera } = await bodyJson(request);
+    requireThat(
+      typeof camera === "string" && UUID.test(camera),
+      400,
+      "Invalid camera ID.",
+    );
+    await env.DB.prepare(
+      "UPDATE station SET expires=0,updated=0,state=NULL,preview_session=NULL WHERE id=1 AND camera=?",
+    )
+      .bind(camera)
+      .run();
+    return json({ ok: true });
   }
   if (path === "/api/station/heartbeat" && method === "POST") {
     const info = await bodyJson(request);

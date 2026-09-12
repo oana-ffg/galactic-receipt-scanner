@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { readOriginal } from "./original";
 import { Vision } from "./vision";
 import type { Capture } from "./types";
 interface Tool {
@@ -76,28 +77,15 @@ export function registerSiteTools(refresh: () => Promise<void>) {
     annotations: { readOnlyHint: false, untrustedContentHint: true },
     async execute(input) {
       const captureId = id(input.id);
-      const capture = await api<Capture>(`/api/captures/${captureId}`);
+      const { capture, blob } = await readOriginal(captureId);
       if (capture.status !== "accepted")
         throw new Error(
           "This original needs review before making a crop or PDF.",
         );
-      const response = await fetch(`/api/files/${captureId}/raw`, {
-        cache: "no-store",
-        redirect: "error",
-      });
-      if (!response.ok) throw new Error("Could not retrieve the original.");
-      const bytes = await response.arrayBuffer();
-      const hash = Array.from(
-        new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-      )
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-      if (hash !== capture.sha256)
-        throw new Error("Original checksum mismatch. No outputs were created.");
       const vision = new Vision();
       try {
         const result = await vision.request(
-          await createImageBitmap(new Blob([bytes])),
+          await createImageBitmap(blob),
           true,
           true,
         );
@@ -127,6 +115,54 @@ export function registerSiteTools(refresh: () => Promise<void>) {
     },
   });
   context.registerTool({
+    name: "transcribe_saved_receipts",
+    description:
+      "After scanning, run private Danish/English OCR on up to 20 accepted saved originals. Stores versioned unverified text, word coordinates, confidence and source hashes. Review uncertain words, numbers and logos against the source images before accounting. Never called by the capture loop.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ids: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 1,
+          maxItems: 20,
+        },
+      },
+      required: ["ids"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: true },
+    async execute(input) {
+      if (
+        !Array.isArray(input.ids) ||
+        input.ids.length < 1 ||
+        input.ids.length > 20
+      )
+        throw new Error("Provide 1 to 20 capture IDs.");
+      const ids = [...new Set(input.ids.map(id))];
+      const { ReceiptOcr } = await import("./ocr");
+      const ocr = new ReceiptOcr();
+      const results = [];
+      try {
+        for (const captureId of ids) {
+          try {
+            results.push({ ok: true, ...(await ocr.transcribe(captureId)) });
+          } catch (error) {
+            results.push({
+              ok: false,
+              id: captureId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        await refresh();
+        return { results };
+      } finally {
+        await ocr.close();
+      }
+    },
+  });
+  context.registerTool({
     name: "save_receipt_transcription",
     description:
       "Store a new unverified OCR/extraction JSON artifact for one receipt. Preserve exact text, uncertain fields, provenance, and source coordinates. Does not overwrite the original or certify accounting values.",
@@ -137,8 +173,27 @@ export function registerSiteTools(refresh: () => Promise<void>) {
         text: { type: "string" },
         provenance: { type: "string" },
         uncertainties: { type: "array", items: { type: "string" } },
+        regions: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              kind: { enum: ["text", "logo", "unreadable"] },
+              text: { type: ["string", "null"] },
+              box: {
+                type: "array",
+                items: { type: "number" },
+                minItems: 4,
+                maxItems: 4,
+              },
+              uncertain: { type: "boolean" },
+            },
+            required: ["kind", "text", "box", "uncertain"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["id", "text", "provenance", "uncertainties"],
+      required: ["id", "text", "provenance", "uncertainties", "regions"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, untrustedContentHint: true },
@@ -150,12 +205,53 @@ export function registerSiteTools(refresh: () => Promise<void>) {
         input.uncertainties.some((v) => typeof v !== "string")
       )
         throw new Error("Provide text, provenance and uncertainty strings.");
-      const result = await api(`/api/captures/${id(input.id)}/artifacts/ocr`, {
+      const captureId = id(input.id);
+      const capture = await api<Capture>(`/api/captures/${captureId}`);
+      const dimensions = capture.metadata.sourcePixels;
+      if (
+        !dimensions ||
+        !Array.isArray(input.regions) ||
+        input.regions.some((region) => {
+          if (!region || typeof region !== "object") return true;
+          const { kind, text, box, uncertain } = region as Record<
+            string,
+            unknown
+          >;
+          return (
+            !["text", "logo", "unreadable"].includes(String(kind)) ||
+            (text !== null && typeof text !== "string") ||
+            typeof uncertain !== "boolean" ||
+            !Array.isArray(box) ||
+            box.length !== 4 ||
+            box.some(
+              (value) => typeof value !== "number" || !Number.isFinite(value),
+            ) ||
+            box[0] < 0 ||
+            box[1] < 0 ||
+            box[2] <= box[0] ||
+            box[3] <= box[1] ||
+            box[2] > dimensions[0] ||
+            box[3] > dimensions[1]
+          );
+        })
+      )
+        throw new Error(
+          "Regions need valid original-pixel boxes [left, top, right, bottom], text or null, and an uncertainty flag.",
+        );
+      const result = await api(`/api/captures/${captureId}/artifacts/ocr`, {
         method: "POST",
         body: JSON.stringify({
           text: input.text,
           provenance: input.provenance,
           uncertainties: input.uncertainties,
+          regions: input.regions,
+          source: {
+            captureId,
+            sha256: capture.sha256,
+            pixels: dimensions,
+            coordinates: "original image pixels; top-left origin",
+          },
+          schemaVersion: 1,
           verified: false,
         }),
         headers: { "Content-Type": "application/json" },

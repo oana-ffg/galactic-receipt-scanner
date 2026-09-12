@@ -74,3 +74,35 @@ it("uses the confirmed server count when recovering a save already counted at st
   s.saved("recovered", 8);
   expect(s.value.count).toBe(8);
 });
+
+it("allows handheld translation while requiring stable paper content", () => {
+  const s = new CaptureState();
+  s.control("start");
+  let capture: string | null = null;
+  for (const time of [100, 400, 700, 1100]) {
+    const offset = time % 3 === 1 ? 0.035 : -0.025;
+    capture = s.observe(
+      { ...clear, quad: clear.quad.map(([x, y]) => [x + offset, y]) },
+      time,
+    );
+  }
+  expect(capture).toBeTruthy();
+});
+
+it("dampens brief feedback flicker without allowing a failed check to capture", () => {
+  const s = new CaptureState();
+  s.control("start");
+  s.observe(clear, 100);
+  s.observe(clear, 400);
+  expect(s.value.phase).toBe("amber");
+  const bad = { ...clear, ok: false, reason: "Blurred" };
+  expect(s.observe(bad, 550)).toBeNull();
+  expect(s.value.phase).toBe("amber");
+  expect(s.observe(clear, 700)).toBeNull();
+  expect(s.observe(clear, 1000)).toBeNull();
+  expect(s.observe(bad, 1100)).toBeNull();
+  expect(s.observe(bad, 1400)).toBeNull();
+  expect(s.value.phase).toBe("red");
+  expect(s.value.message).toBe("Blurred");
+  expect(s.value.activeId).toBeNull();
+});

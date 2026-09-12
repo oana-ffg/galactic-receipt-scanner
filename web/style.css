@@ -59,8 +59,15 @@ header p {
   align-items: center;
   gap: 18px;
   border-radius: 8px;
-  margin-bottom: 22px;
-  min-height: 96px;
+  margin-bottom: 8px;
+  height: 116px;
+  min-height: 0;
+}
+.signal > div {
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 .signal.red {
   --signal: #fa7280;
@@ -117,10 +124,14 @@ header p {
 }
 .connection-warning {
   color: #ffc568;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.4;
+  height: 44px;
+  margin: 0 0 12px;
+  overflow-y: auto;
 }
 .connection-warning:empty {
-  display: none;
+  visibility: hidden;
 }
 #feed,
 #live-feed {
@@ -139,7 +150,8 @@ header p {
   display: none;
 }
 .detail {
-  min-height: 40px;
+  height: 44px;
+  overflow-y: auto;
   color: #aab8c5;
   font-size: 13px;
   line-height: 1.6;
@@ -302,14 +314,21 @@ h2 {
   .signal {
     padding: 14px 16px;
     gap: 12px;
-    min-height: 94px;
+    height: 154px;
   }
   #status {
     font-size: 16px;
   }
   .preview {
-    height: 45vh;
+    height: 34vh;
+    height: 34svh;
     min-height: 200px;
+  }
+  .connection-warning {
+    height: 60px;
+  }
+  .detail {
+    height: 54px;
   }
   aside {
     margin-top: 12px;

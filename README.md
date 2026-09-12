@@ -26,6 +26,7 @@ public signup, shared receipt database, pairing secret or public file bucket.
 - Full-resolution original capture; crops and image PDFs are prepared by Work/Codex after scanning.
 - Durable D1 metadata and private R2 objects; retry-safe capture IDs and versioned derivatives.
 - Pending-upload recovery on the phone; green only after the original and quality metadata are durably saved and the returned checksum is verified.
+- Private Danish/English OCR after scanning, with two layout passes, source coordinates and flagged uncertainties for downstream visual review.
 - Authenticated downloads and WebMCP tools for the owner's downstream Work/Codex task.
 
 For the smoothest preview, put the phone and desktop on the same network and keep one dashboard open. Direct video uses no external relay service; networks that block it use the slower authenticated image preview.
@@ -36,7 +37,7 @@ the actual phone: partial fingertips, curled paper, glare and faint print can de
 The minimum 900 pixels across a receipt is a quality gate, not a physical-DPI claim.
 
 OCR, categorisation and reporting belong to the downstream AI workflow. Downstream PDFs start as
-image PDFs. Preserve exact values, uncertainties and source evidence when processing them.
+image PDFs. Follow [the post-processing workflow](POST_PROCESSING.md). Preserve exact values, uncertainties and source evidence when processing them.
 
 ## Development
 

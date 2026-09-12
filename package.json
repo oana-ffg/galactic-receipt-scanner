@@ -16,7 +16,8 @@
     "@mediapipe/tasks-vision": "^1.0.1",
     "@techstark/opencv-js": "^5.0.0-release.1",
     "pdf-lib": "^1.17.1",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",

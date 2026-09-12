@@ -2,5 +2,13 @@
   "hand_landmarker.task": {
     "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
     "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
+  },
+  "ocr/dan.traineddata.gz": {
+    "url": "https://cdn.jsdelivr.net/npm/@tesseract.js-data/dan@1.0.0/4.0.0_best_int/dan.traineddata.gz",
+    "sha256": "6af1a07c22894b728ebc75f0fd0c8519eca002cfab6da903eb4d62e24f163abc"
+  },
+  "ocr/eng.traineddata.gz": {
+    "url": "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz",
+    "sha256": "45b4cb346724ac1774f1c36f42f182b887bcdb28ebe63e6fff90ac41f3fcff91"
   }
 }

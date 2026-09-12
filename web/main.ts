@@ -19,7 +19,7 @@ let lastState: ScanState | undefined;
     <p id="connection-warning" class="connection-warning" role="status"></p>
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="recover">Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retry this receipt</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}</div>
+    <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}</div>
     <p id="error" class="error" role="alert"></p></section>
     ${isCamera ? "" : '<aside><details open><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
     </div>
@@ -70,16 +70,29 @@ function renderState(state: ScanState): void {
     element("detail").textContent =
       `Original checked and saved in ${seconds.toFixed(1)} s. PDFs and OCR are processed later.`;
   }
+  if (isCamera) {
+    element<HTMLButtonElement>("retake").disabled =
+      !state.detectorReady ||
+      Boolean(state.activeId) ||
+      (state.recovery !== "retake" && state.phase !== "green");
+    element<HTMLButtonElement>("recover").disabled =
+      Boolean(state.activeId) || state.recovery !== "upload";
+  }
   if (!isCamera) {
     for (const id of ["start", "pause", "retry"]) {
       element<HTMLButtonElement>(id).disabled =
         Boolean(state.activeId) || !state.detectorReady;
     }
+    element<HTMLButtonElement>("retry").disabled ||=
+      state.recovery === "upload";
+    element<HTMLButtonElement>("recover").disabled =
+      Boolean(state.activeId) || state.recovery !== "upload";
     element<HTMLButtonElement>("start").disabled ||= !state.paused;
     element<HTMLButtonElement>("pause").disabled ||= state.paused;
-    if (state.phase !== "green" && state.quality.focus !== undefined)
-      element("detail").textContent =
-        `Focus score ${state.quality.focus.toFixed(0)} · ${state.quality.reason} · Remove each receipt completely before the next.`;
+    if (state.phase !== "green")
+      element("detail").textContent = state.activeId
+        ? "Wait for green before removing this receipt."
+        : "Keep all paper edges visible. Remove each saved receipt completely before the next.";
   }
 }
 
@@ -122,6 +135,7 @@ function mountCamera(): void {
     }
   };
   element("recover").onclick = () => void camera.recover();
+  element("retake").onclick = () => camera.retake();
 }
 
 function mountDashboard(): void {
@@ -133,6 +147,7 @@ function mountDashboard(): void {
   });
   let lastSaved: string | null = null;
   let lastError = "";
+  let needsAttention = false;
   let audio: AudioContext | null = null;
   const live = element<HTMLVideoElement>("live-feed");
   let lastVideoFrame = 0;
@@ -187,6 +202,8 @@ function mountDashboard(): void {
     oscillator.stop(audio.currentTime + 0.22);
   }
   function acceptState(state: ScanState) {
+    if (state.needsAttention && !needsAttention) void refreshLibrary();
+    needsAttention = !!state.needsAttention;
     if (state.lastSaved && state.lastSaved !== lastSaved) {
       if (lastState) sound(true);
       void refreshLibrary();
@@ -216,7 +233,9 @@ function mountDashboard(): void {
         if (!direct.fresh) acceptState(message);
       } else {
         if (!direct.fresh)
-          disconnected("Waiting for the phone. Sign in and enable its camera.");
+          disconnected(
+            "Phone preview paused or disconnected. Reopen the camera page on your phone; it will reconnect.",
+          );
         element("count").textContent = String(result.count);
       }
     } catch (problem) {

@@ -22,14 +22,26 @@ export class CaptureState {
   private stable = 0;
   private frames = 0;
   private absent = 0;
-  private previous: number[][] | null = null;
+  private feedback: {
+    phase: "red" | "amber";
+    message: string;
+    since: number;
+  } | null = null;
   private latched = false;
   private reset() {
     this.stable = 0;
     this.frames = 0;
-    this.previous = null;
+  }
+  private showFeedback(phase: "red" | "amber", message: string, now: number) {
+    if (this.feedback?.phase !== phase || this.feedback.message !== message)
+      this.feedback = { phase, message, since: now };
+    if (now - this.feedback.since >= 250) {
+      this.value.phase = phase;
+      this.value.message = message;
+    }
   }
   control(action: string) {
+    this.feedback = null;
     if (this.value.activeId) return;
     this.reset();
     if (action === "pause") {
@@ -39,6 +51,7 @@ export class CaptureState {
     }
     if (action === "start" || action === "retry") {
       this.value.needsAttention = false;
+      this.value.recovery = undefined;
       this.value.paused = false;
       this.latched = false;
       if (action === "retry") this.value.armed = true;
@@ -61,26 +74,18 @@ export class CaptureState {
       } else this.absent = 0;
       return null;
     }
-    if (!q.ok || !q.quad) {
+    if (!q.ok || !q.quad || (q.motion ?? 0) > 3.5) {
       this.reset();
-      this.value.phase = "red";
-      this.value.message = q.reason;
+      this.showFeedback("red", q.reason, now);
       return null;
     }
-    const changed =
-      !this.previous ||
-      q.quad.some((p, i) =>
-        p.some((v, j) => Math.abs(v - this.previous![i][j]) > 0.012),
-      );
-    if (changed || (q.motion ?? 0) > 3.5) {
-      this.stable = now;
-      this.frames = 0;
-    }
-    this.previous = q.quad;
+    // The worker compares aligned paper content. Handheld translation must not
+    // reset stability merely because the same sharp paper moved in the frame.
+    if (this.frames === 0) this.stable = now;
     this.frames++;
-    this.value.phase = "amber";
-    this.value.message = "Hold still—checking the receipt.";
+    this.showFeedback("amber", "Checking image stability…", now);
     if (now - this.stable >= 900 && this.frames >= 4) {
+      this.value.phase = "amber";
       this.value.activeId = crypto.randomUUID();
       this.value.message = "Taking the photo…";
       return this.value.activeId;
@@ -88,12 +93,14 @@ export class CaptureState {
     return null;
   }
   saved(id: string, count?: number) {
+    this.feedback = null;
     if (count !== undefined) this.value.count = count;
     else if (this.value.lastSaved !== id) this.value.count++;
     this.value.stage = undefined;
     this.value.needsAttention = false;
     this.value.activeId = null;
     this.value.lastSaved = id;
+    this.value.recovery = undefined;
     this.value.armed = false;
     this.absent = 0;
     this.latched = false;
@@ -101,7 +108,9 @@ export class CaptureState {
     this.value.message = "Saved privately. Remove the receipt, then next.";
     this.reset();
   }
-  failed(message: string) {
+  failed(message: string, recovery?: "retake" | "upload") {
+    this.value.recovery = recovery;
+    this.feedback = null;
     this.value.stage = undefined;
     this.value.needsAttention = true;
     this.value.activeId = null;

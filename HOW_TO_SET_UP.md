@@ -104,7 +104,10 @@ Where supported, the open dashboard exposes these WebMCP tools:
 - `list_receipts`: list captures, hashes and quality results; follow the returned cursor.
 - `read_receipt`: get one capture and authenticated file URLs for inspecting the sources.
 - `prepare_receipt_outputs`: after scanning, verify an original against its hash and create its crop and image PDF. Run one receipt at a time; failed derivative generation never changes the saved original.
-- `save_receipt_transcription`: save unverified text, provenance and explicit uncertainties.
+- `transcribe_saved_receipts`: after scanning, run private Danish/English OCR for up to 20 accepted originals, retaining both layout passes, coordinates, model hashes and uncertainty scores.
+- `save_receipt_transcription`: save source-backed text, provenance, explicit uncertainties and original-pixel regions after visual inspection.
+
+Follow [POST_PROCESSING.md](POST_PROCESSING.md) for batch processing and source reconciliation.
 
 Image bytes must actually be retrieved and inspected; a file URL alone is not visual
 inspection. Extraction and reporting run in the user's Work/Codex task. The hosted Site
@@ -113,6 +116,8 @@ contain a crop derived from the preserved original; searchable PDFs and reports 
 Authenticated clients may upload versioned PDF, image or OCR artifacts with
 `POST /api/captures/{id}/artifacts/{pdf|image|ocr}`. Use `Origin` equal to the Site origin
 and `X-Scanner-Request: 1` on every mutation. Preserve uncertainties and source references.
+Capture detail includes artifact hashes; append `?version=<sha256>` to an artifact download
+to retrieve an earlier revision without replacing the latest one.
 
 ## Development and updates
 

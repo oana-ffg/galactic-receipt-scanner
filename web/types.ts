@@ -7,6 +7,10 @@ export interface Quality {
   motion?: number;
   focus?: number;
   contrast?: number;
+  inkFraction?: number;
+  sharpness?: number;
+  noiseFloor?: number;
+  glare?: boolean;
   receiptPixels?: number[];
 }
 
@@ -22,6 +26,7 @@ export interface ScanState {
   streamFresh: boolean;
   detectorReady: boolean;
   needsAttention?: boolean;
+  recovery?: "retake" | "upload";
   previewWarning?: string;
   stage?: "photo" | "checking" | "uploading";
   timings?: { photoMs?: number; checksMs?: number; saveMs?: number };

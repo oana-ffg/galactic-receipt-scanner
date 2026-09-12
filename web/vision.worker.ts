@@ -3,9 +3,11 @@ import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
+import { measurePrint } from "./print-quality";
 let cv: typeof CV;
 let hands: HandLandmarker;
 let previous: Uint8Array | undefined;
+let paperBounds: number[] | undefined;
 const canvas = new OffscreenCanvas(1, 1);
 const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 // OpenCV's browser bundle publishes a promise on self.cv, including its WASM payload.
@@ -88,8 +90,10 @@ function crop(src: CV.Mat, quad: number[][]): CV.Mat {
 }
 function analyze(bitmap: ImageBitmap, full: boolean): Quality {
   const scale = Math.min(1, 800 / Math.max(bitmap.width, bitmap.height));
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   const detection = hands.detect(canvas);
   const handPoints = detection.landmarks.map((hand) =>
@@ -124,75 +128,170 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       255,
       cv.THRESH_BINARY + cv.THRESH_OTSU,
     );
-    cv.threshold(smooth, mask, Math.max(100, threshold), 255, cv.THRESH_BINARY);
+    // Separate paper from the actual background, including underexposed scenes.
+    // The relative floor leaves an empty, uniformly lit desk empty.
+    const levels = new Uint32Array(256);
+    for (const pixel of smooth.data) levels[pixel]++;
+    let seen = 0;
+    let dark = 0;
+    for (; dark < 255; dark++) {
+      seen += levels[dark];
+      if (seen >= smooth.data.length * 0.1) break;
+    }
+    let bright = 0;
+    seen = 0;
+    for (; bright < 255; bright++) {
+      seen += levels[bright];
+      if (seen >= smooth.data.length * 0.9) break;
+    }
+    const base = Math.max(dark + 12, threshold);
+    const cuts = [
+      ...new Set(
+        [
+          base,
+          Math.max(base, (base + bright) / 2),
+          Math.max(base, bright * 0.9),
+        ].map(Math.round),
+      ),
+    ].sort((a, b) => a - b);
     const kernel = use(cv.Mat.ones(7, 7, cv.CV_8U));
-    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
     const contours = use(new cv.MatVector()),
       hierarchy = use(new cv.Mat());
-    cv.findContours(
-      mask,
-      contours,
-      hierarchy,
-      cv.RETR_EXTERNAL,
-      cv.CHAIN_APPROX_SIMPLE,
-    );
     const candidates: { area: number; points: number[][] }[] = [];
+    const regions: number[][] = [];
     let large = false;
-    for (let i = 0; i < contours.size(); i++) {
-      const contour = contours.get(i);
-      try {
-        const area = cv.contourArea(contour) / (canvas.width * canvas.height);
-        if (area < 0.025) continue;
-        large = true;
-        const approx = new cv.Mat();
+    for (const cut of cuts) {
+      cv.threshold(smooth, mask, cut, 255, cv.THRESH_BINARY);
+      cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
+      cv.findContours(
+        mask,
+        contours,
+        hierarchy,
+        cv.RETR_EXTERNAL,
+        cv.CHAIN_APPROX_SIMPLE,
+      );
+      for (let i = 0; i < contours.size(); i++) {
+        const contour = contours.get(i);
         try {
-          cv.approxPolyDP(
-            contour,
-            approx,
-            0.025 * cv.arcLength(contour, true),
-            true,
-          );
-          if (approx.rows === 4 && cv.isContourConvex(approx)) {
-            const pts = Array.from({ length: 4 }, (_, j) => [
-              approx.data32S[j * 2],
-              approx.data32S[j * 2 + 1],
-            ]);
-            candidates.push({ area, points: ordered(pts) });
+          const area = cv.contourArea(contour) / (canvas.width * canvas.height);
+          if (area < 0.025) continue;
+          large = true;
+          const bounds = cv.boundingRect(contour);
+          regions.push([
+            bounds.x / canvas.width,
+            bounds.y / canvas.height,
+            (bounds.x + bounds.width) / canvas.width,
+            (bounds.y + bounds.height) / canvas.height,
+          ]);
+          const approx = new cv.Mat();
+          try {
+            cv.approxPolyDP(
+              contour,
+              approx,
+              0.025 * cv.arcLength(contour, true),
+              true,
+            );
+            if (approx.rows === 4 && cv.isContourConvex(approx)) {
+              const pts = Array.from({ length: 4 }, (_, j) => [
+                approx.data32S[j * 2],
+                approx.data32S[j * 2 + 1],
+              ]);
+              candidates.push({ area, points: ordered(pts) });
+            }
+          } finally {
+            approx.delete();
           }
         } finally {
-          approx.delete();
+          contour.delete();
         }
-      } finally {
-        contour.delete();
       }
     }
+    const clearOfPaper = () => {
+      if (handPoints.length) return false;
+      if (
+        regions.every(
+          (region) =>
+            paperBounds &&
+            (region[2] < paperBounds[0] ||
+              region[0] > paperBounds[2] ||
+              region[3] < paperBounds[1] ||
+              region[1] > paperBounds[3]),
+        )
+      )
+        return true;
+      if (!paperBounds) return false;
+      // A region's bounding box can cover an empty desk (glare, keyboard,
+      // cables). Measure actual foreground occupancy where paper was seen.
+      // Use the highest segmentation cut, which separates paper from glare.
+      const [left, top, right, bottom] = paperBounds;
+      const insetX = (right - left) * 0.1;
+      const insetY = (bottom - top) * 0.1;
+      let occupied = 0,
+        samples = 0;
+      for (
+        let y = Math.ceil((top + insetY) * height);
+        y < (bottom - insetY) * height;
+        y++
+      )
+        for (
+          let x = Math.ceil((left + insetX) * width);
+          x < (right - insetX) * width;
+          x++
+        ) {
+          occupied += mask.data[y * width + x] > 0 ? 1 : 0;
+          samples++;
+        }
+      return samples > 0 && occupied / samples < 0.3;
+    };
     if (!candidates.length) {
-      q.empty = !large && !handPoints.length && (q.motion ?? 0) < 2;
+      q.empty = clearOfPaper();
       if (handPoints.length) q.reason = "Move your hands clear.";
       else if (large)
         q.reason =
           "Paper outline is unclear. Reduce glare and leave space around the paper.";
       return q;
     }
-    candidates.sort((a, b) => b.area - a.area);
-    const { area, points } = candidates[0];
-    q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
-    if (candidates[1]?.area > 0.05) {
-      q.reason = "More than one paper region detected.";
+    const complete = candidates.filter(
+      ({ area, points }) =>
+        area <= 0.9 &&
+        points.every(
+          (p) =>
+            p[0] >= 5 &&
+            p[1] >= 5 &&
+            p[0] <= canvas.width - 6 &&
+            p[1] <= canvas.height - 6,
+        ),
+    );
+    if (!complete.length) {
+      // Peripheral glare must not prevent rearming after the last paper's area
+      // is clear. An edge region overlapping that area still blocks removal.
+      q.empty = clearOfPaper();
+      q.reason =
+        "No complete paper outline. Keep the whole receipt inside the preview, away from glare.";
       return q;
     }
-    if (
-      area > 0.9 ||
-      points.some(
-        (p) =>
-          p[0] < 5 ||
-          p[1] < 5 ||
-          p[0] > canvas.width - 6 ||
-          p[1] > canvas.height - 6,
-      )
-    ) {
-      q.reason =
-        "Paper is too close to the frame edge. Leave a visible margin.";
+    complete.sort((a, b) => b.area - a.area);
+    const papers = complete.filter(
+      (candidate, i) =>
+        !complete.slice(0, i).some((other) => {
+          const bounds = (points: number[][]) => [
+            Math.min(...points.map((p) => p[0])),
+            Math.min(...points.map((p) => p[1])),
+            Math.max(...points.map((p) => p[0])),
+            Math.max(...points.map((p) => p[1])),
+          ];
+          const a = bounds(candidate.points),
+            b = bounds(other.points);
+          const overlap =
+            Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) *
+            Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+          return overlap / ((a[2] - a[0]) * (a[3] - a[1])) > 0.85;
+        }),
+    );
+    const { points } = papers[0];
+    q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
+    if (papers[1]?.area > 0.05) {
+      q.reason = "More than one paper region detected.";
       return q;
     }
     // Conservative: any detected hand blocks capture, including fingertips near the boundary.
@@ -223,6 +322,7 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       // Compare aligned paper interiors, not the desk or automatic exposure.
       const mini = use(new cv.Mat());
       cv.resize(interior, mini, new cv.Size(160, 160));
+      cv.GaussianBlur(mini, mini, new cv.Size(3, 3), 0);
       if (previous) {
         let offset = 0;
         for (let i = 0; i < mini.data.length; i++)
@@ -235,35 +335,33 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       }
       previous = mini.data.slice();
     }
-    const histogram = new Uint32Array(256);
-    for (let y = 0; y < interior.rows; y++)
-      for (let x = 0; x < interior.cols; x++)
-        histogram[interior.ucharAt(y, x)]++;
-    const count = interior.rows * interior.cols;
-    const percentile = (fraction: number) => {
-      let sum = 0;
-      for (let i = 0; i < 256; i++) {
-        sum += histogram[i];
-        if (sum >= count * fraction) return i;
-      }
-      return 255;
-    };
-    const bright = percentile(0.9);
-    q.contrast = bright - percentile(0.05);
-    let ink = 0;
-    for (let i = 0; i < bright - 45; i++) ink += histogram[i];
-    if (ink / count < 0.004) {
+    const localBackground = use(new cv.Mat());
+    const strokeKernel = use(cv.Mat.ones(15, 15, cv.CV_8U));
+    cv.morphologyEx(interior, localBackground, cv.MORPH_CLOSE, strokeKernel);
+    // ROI rows can have a stride; copy before reading packed pixel arrays.
+    const pixels = use(new cv.Mat());
+    interior.copyTo(pixels);
+    const print = measurePrint(
+      pixels.data,
+      localBackground.data,
+      lap.data64F,
+      interior.cols,
+      interior.rows,
+    );
+    Object.assign(q, print);
+    if (print.glare) {
       q.reason =
-        "No clear print detected. Check the printed side and lighting.";
+        "Glare is washing out part of the paper. Move the light or tilt the phone slightly.";
       return q;
     }
-    if (q.focus < 65) {
+    if (print.inkFraction < 0.004) {
       q.reason =
-        "Print looks blurred. Wait for focus or adjust the phone height.";
+        "Writing is too faint to check reliably. Add even light or move the phone closer.";
       return q;
     }
-    if (percentile(0.8) < 90) {
-      q.reason = "Receipt is too dark. Add even lighting.";
+    if (print.sharpness < 0.2) {
+      q.reason =
+        "Text edges look blurred. Hold steady briefly or adjust the phone height.";
       return q;
     }
     if (full) {
@@ -292,6 +390,12 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       return q;
     }
     q.ok = true;
+    paperBounds = [
+      Math.min(...q.quad.map((p) => p[0])),
+      Math.min(...q.quad.map((p) => p[1])),
+      Math.max(...q.quad.map((p) => p[0])),
+      Math.max(...q.quad.map((p) => p[1])),
+    ];
     q.reason = "Image checks passed.";
     return q;
   } finally {
@@ -355,10 +459,27 @@ self.onmessage = async (
     bitmap?: ImageBitmap;
     full?: boolean;
     outputs?: boolean;
+    encode?: boolean;
   }>,
 ) => {
-  const { id, bitmap, full, outputs } = event.data;
+  const { id, bitmap, full, outputs, encode } = event.data;
   try {
+    if (encode && bitmap) {
+      const photo = new OffscreenCanvas(bitmap.width, bitmap.height);
+      try {
+        photo
+          .getContext("2d", { willReadFrequently: true })!
+          .drawImage(bitmap, 0, 0);
+        const original = await photo.convertToBlob({
+          type: "image/jpeg",
+          quality: 0.98,
+        });
+        self.postMessage({ id, original });
+      } finally {
+        photo.width = photo.height = 0;
+      }
+      return;
+    }
     ready ??= initialize();
     await ready;
     const result = bitmap ? await process(bitmap, !!full, !!outputs) : {};

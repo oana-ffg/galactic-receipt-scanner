@@ -153,19 +153,33 @@ test("capture survives preview delays and a lost acknowledgement without creatin
         .then((station) => station.state?.armed),
     )
     .toBe(true);
+  let reclaimCount = 0;
+  phone.on("request", (req) => {
+    if (new URL(req.url()).pathname === "/api/station/claim") reclaimCount++;
+  });
+  await phone.route(
+    "**/api/station/heartbeat",
+    (route) =>
+      route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Camera lease expired." }),
+      }),
+    { times: 1 },
+  );
+  await expect.poll(() => reclaimCount).toBe(1);
+  await expect(
+    phone.getByRole("button", { name: "Camera enabled", exact: true }),
+  ).toBeDisabled();
+  expect(
+    (await (await request.get("/api/captures")).json()).captures.length,
+  ).toBe(1);
   await phone.route("**/api/station/heartbeat", (route) =>
-    route.fulfill({
-      status: 409,
-      contentType: "application/json",
-      body: JSON.stringify({ detail: "Camera lease expired." }),
-    }),
+    route.fulfill({ status: 403, contentType: "application/json", body: "{}" }),
   );
   await expect(phone.locator("#phase")).toHaveText("CAMERA STOPPED");
-  await expect(phone.locator("#status")).toContainText(
-    "Tap Enable camera to reconnect",
-  );
   await expect(
-    phone.getByRole("button", { name: "Enable camera" }),
+    phone.getByRole("button", { name: "Enable camera", exact: true }),
   ).toBeEnabled();
   await phone.close();
   await expect(page.locator("#signal")).toHaveClass("signal red", {
@@ -182,13 +196,41 @@ async function syntheticCamera(phone: Page) {
     const ctx = canvas.getContext("2d")!;
     const fixture = {
       paper: false,
+      blankPhoto: false,
       previewOffline: false,
       heartbeatOffline: false,
       failAcknowledgement: true,
       previewDelay: 0,
       originalDelay: 0,
       backgroundPulse: false,
+      handheld: false,
       exposurePulse: false,
+    };
+    const originalBitmap = window.createImageBitmap.bind(window);
+    window.createImageBitmap = ((
+      source: ImageBitmapSource,
+      ...args: unknown[]
+    ) => {
+      if (source instanceof HTMLVideoElement && fixture.blankPhoto) {
+        const blank = document.createElement("canvas");
+        blank.width = 2000;
+        blank.height = 2400;
+        blank.getContext("2d")!.fillRect(0, 0, 2000, 2400);
+        return originalBitmap(blank);
+      }
+      return (originalBitmap as (...params: unknown[]) => Promise<ImageBitmap>)(
+        source,
+        ...args,
+      );
+    }) as typeof createImageBitmap;
+    const originalEncode = HTMLCanvasElement.prototype.toBlob;
+    let photoEncodes = 0;
+    HTMLCanvasElement.prototype.toBlob = function (callback, type, quality) {
+      if (this.width > 1000 && ++photoEncodes > 1) {
+        callback(null);
+        return;
+      }
+      originalEncode.call(this, callback, type, quality);
     };
     const fetchOriginal = window.fetch.bind(window);
     window.fetch = async (input, init) => {
@@ -227,11 +269,13 @@ async function syntheticCamera(phone: Page) {
     };
     Object.assign(window, { scannerFixture: fixture });
     setInterval(() => {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       const phase = Math.floor(performance.now() / 350) % 2;
       const background = fixture.backgroundPulse && phase ? 75 : 25;
       ctx.fillStyle = `rgb(${background},${background},${background})`;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       if (!fixture.paper) return;
+      if (fixture.handheld) ctx.translate(phase ? 50 : -50, phase ? 20 : -20);
       const paper = fixture.exposurePulse && phase ? 224 : 244;
       ctx.fillStyle = `rgb(${paper},${paper},${paper})`;
       ctx.fillRect(380, 180, 1240, 2040);
@@ -290,7 +334,11 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     ).scannerFixture;
     f.failAcknowledgement = false;
     f.previewDelay = 3000;
-    Object.assign(f, { backgroundPulse: true, exposurePulse: true });
+    Object.assign(f, {
+      backgroundPulse: true,
+      exposurePulse: true,
+      handheld: true,
+    });
   });
   // The prior camera's lease naturally expires; no test data is deleted.
   await expect
@@ -367,6 +415,43 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     ).scannerFixture.paper = false;
   });
   await expect(phone.locator("#phase")).toHaveText("SAVED · NEXT");
+  await expect(phone.locator("#status")).toHaveText(
+    "Ready for the next receipt.",
+  );
+  await phone.evaluate(() =>
+    Object.assign(
+      (window as unknown as { scannerFixture: object }).scannerFixture,
+      { paper: true, blankPhoto: true, originalDelay: 0 },
+    ),
+  );
+  await expect(phone.locator("#phase")).toHaveText("NEEDS ATTENTION");
+  await expect(
+    phone.getByRole("button", { name: "Retake photo", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    phone.getByRole("button", { name: "Retry upload", exact: true }),
+  ).toBeDisabled();
+  await phone.evaluate(() =>
+    Object.assign(
+      (window as unknown as { scannerFixture: object }).scannerFixture,
+      { blankPhoto: false },
+    ),
+  );
+  await phone
+    .getByRole("button", { name: "Retake photo", exact: true })
+    .click();
+  await expect(phone.locator("#phase")).toHaveText("SAVED · NEXT");
+  const batch = (await (await request.get("/api/captures")).json()).captures;
+  expect(
+    batch.filter(
+      (capture: { status: string }) => capture.status === "rejected",
+    ),
+  ).toHaveLength(1);
+  expect(
+    batch.filter(
+      (capture: { status: string }) => capture.status === "accepted",
+    ),
+  ).toHaveLength(4);
   await phone.close();
   // Crops and PDFs are an explicit downstream action on an existing original.
   const prepared = (await page.evaluate(async (id) => {
