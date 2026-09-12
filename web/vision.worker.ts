@@ -5,7 +5,10 @@ import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
 import { measurePrint } from "./print-quality";
-import { hasPlausiblePaperCorners } from "./paper-geometry";
+import {
+  enclosePaperContour,
+  hasPlausiblePaperCorners,
+} from "./paper-geometry";
 let cv: typeof CV;
 let hands: HandLandmarker;
 let previous: Uint8Array | undefined;
@@ -159,7 +162,11 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     const kernel = use(cv.Mat.ones(7, 7, cv.CV_8U));
     const contours = use(new cv.MatVector()),
       hierarchy = use(new cv.Mat());
-    const candidates: { area: number; points: number[][] }[] = [];
+    const candidates: {
+      area: number;
+      points: number[][];
+      contour: number[][];
+    }[] = [];
     const regions: number[][] = [];
     let large = false;
     for (const cut of cuts) {
@@ -198,7 +205,14 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
                 approx.data32S[j * 2],
                 approx.data32S[j * 2 + 1],
               ]);
-              candidates.push({ area, points: ordered(pts) });
+              candidates.push({
+                area,
+                points: ordered(pts),
+                contour: Array.from({ length: contour.rows }, (_, j) => [
+                  contour.data32S[j * 2],
+                  contour.data32S[j * 2 + 1],
+                ]),
+              });
             }
           } finally {
             approx.delete();
@@ -307,6 +321,23 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     if (!hasPlausiblePaperCorners(points)) {
       q.reason =
         "Paper outline is too distorted. Flatten the paper and keep the camera above it, or use Force take for manual review.";
+      return q;
+    }
+    const enclosed = enclosePaperContour(points, papers[0].contour);
+    if (!enclosed) {
+      q.reason =
+        "Paper boundary is too irregular to enclose safely. Flatten the paper or use Force take for manual review.";
+      return q;
+    }
+    q.quad = enclosed.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
+    if (
+      enclosed.some(
+        ([x, y]) =>
+          x < 5 || y < 5 || x > canvas.width - 6 || y > canvas.height - 6,
+      )
+    ) {
+      q.reason =
+        "Complete paper bounds need more space. Move the receipt away from the preview edges.";
       return q;
     }
     const cropped = use(crop(source, q.quad));

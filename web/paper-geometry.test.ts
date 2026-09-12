@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { hasPlausiblePaperCorners } from "./paper-geometry";
+import {
+  enclosePaperContour,
+  hasPlausiblePaperCorners,
+} from "./paper-geometry";
 
 describe("overhead paper corner plausibility", () => {
   it("allows narrow, rotated and moderately skewed paper in pixel coordinates", () => {
@@ -70,5 +73,108 @@ describe("overhead paper corner plausibility", () => {
       [[0], [100, 0], [100, 100], [0, 100]],
     ])
       expect(hasPlausiblePaperCorners(points)).toBe(false);
+  });
+});
+
+describe("paper boundary enclosure", () => {
+  const quad = [
+    [0, 0],
+    [100, 0],
+    [100, 200],
+    [0, 200],
+  ];
+
+  it("leaves an enclosing quad alone and includes a small protruding fold", () => {
+    expect(enclosePaperContour(quad, quad)).toEqual(quad);
+    const contour = [...quad, [-6, 80]];
+    expect(enclosePaperContour(quad, contour)).toEqual([
+      [-6, 0],
+      [100, 0],
+      [100, 200],
+      [-6, 200],
+    ]);
+  });
+
+  it("encloses every boundary point for either winding and rotated paper", () => {
+    const contour = [
+      [0, 0],
+      [86, 0],
+      [100, 12],
+      [100, 200],
+      [14, 200],
+      [0, 188],
+    ];
+    const inset = [contour[0], contour[2], contour[3], contour[5]];
+    const rotate = ([x, y]: number[]) => [
+      x * 0.8 - y * 0.6 + 300,
+      x * 0.6 + y * 0.8 + 500,
+    ];
+    for (const [input, boundary] of [
+      [inset, contour],
+      [[...inset].reverse(), contour],
+      [inset.map(rotate), contour.map(rotate)],
+    ]) {
+      const enclosed = enclosePaperContour(input, boundary)!;
+      expect(enclosed).not.toBeNull();
+      const center = enclosed.reduce(
+        (c, p) => [c[0] + p[0] / 4, c[1] + p[1] / 4],
+        [0, 0],
+      );
+      for (let i = 0; i < 4; i++) {
+        const a = enclosed[i],
+          b = enclosed[(i + 1) % 4];
+        const cross = ([x, y]: number[]) =>
+          (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+        const winding = Math.sign(cross(center));
+        for (const p of boundary)
+          expect(cross(p) * winding).toBeGreaterThanOrEqual(-1e-8);
+      }
+    }
+  });
+
+  it("allows combined folded margins and one-edge folds with segmentation jitter", () => {
+    for (const jitter of [-0.25, 0, 0.25]) {
+      const margin = 9.5 + jitter;
+      expect(
+        enclosePaperContour(quad, [
+          [-margin, -margin],
+          [100 + margin, -margin],
+          [100 + margin, 200 + margin],
+          [-margin, 200 + margin],
+        ]),
+      ).not.toBeNull();
+      expect(
+        enclosePaperContour(quad, [...quad, [-17 + jitter, 80]]),
+      ).not.toBeNull();
+    }
+  });
+
+  it("rejects distant outliers and excessive total growth", () => {
+    expect(enclosePaperContour(quad, [...quad, [-20, 80]])).not.toBeNull();
+    expect(enclosePaperContour(quad, [...quad, [-21, 80]])).toBeNull();
+    expect(
+      enclosePaperContour(quad, [
+        [-11, -11],
+        [111, -11],
+        [111, 211],
+        [-11, 211],
+      ]),
+    ).toBeNull();
+  });
+
+  it("rejects malformed boundaries and degenerate quadrilaterals", () => {
+    expect(enclosePaperContour(quad, [])).toBeNull();
+    expect(enclosePaperContour(quad, [[NaN, 0]])).toBeNull();
+    expect(
+      enclosePaperContour(
+        [
+          [0, 0],
+          [0, 0],
+          [100, 100],
+          [0, 100],
+        ],
+        quad,
+      ),
+    ).toBeNull();
   });
 });

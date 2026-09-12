@@ -17,3 +17,58 @@ export function hasPlausiblePaperCorners(points: number[][]): boolean {
     return Number.isFinite(cosine) && Math.abs(cosine) <= Math.SQRT1_2 + 1e-12;
   });
 }
+
+function signedArea(points: number[][]): number {
+  return (
+    points.reduce((area, p, i) => {
+      const next = points[(i + 1) % points.length];
+      return area + p[0] * next[1] - next[0] * p[1];
+    }, 0) / 2
+  );
+}
+
+// Douglas–Peucker corners may sit inside a folded boundary. Move their four
+// supporting lines only outward, using this contour alone. Reject large changes
+// rather than fitting a generic rectangle to a potentially merged reflection.
+export function enclosePaperContour(
+  quad: number[][],
+  contour: number[][],
+): number[][] | null {
+  if (
+    !hasPlausiblePaperCorners(quad) ||
+    !contour.length ||
+    contour.some((p) => p.length !== 2 || !p.every(Number.isFinite))
+  )
+    return null;
+  const area = signedArea(quad);
+  const winding = Math.sign(area);
+  if (!winding) return null;
+  const lengths = quad.map((p, i) =>
+    Math.hypot(quad[(i + 1) % 4][0] - p[0], quad[(i + 1) % 4][1] - p[1]),
+  );
+  const maxShift = Math.min(...lengths) * 0.2;
+  const lines = quad.map((p, i) => {
+    const next = quad[(i + 1) % 4];
+    const nx = (winding * (p[1] - next[1])) / lengths[i];
+    const ny = (winding * (next[0] - p[0])) / lengths[i];
+    const original = nx * p[0] + ny * p[1];
+    let offset = original;
+    for (const c of contour) offset = Math.min(offset, nx * c[0] + ny * c[1]);
+    return { nx, ny, offset, shift: original - offset };
+  });
+  if (lines.some((line) => line.shift > maxShift)) return null;
+  const expanded = lines.map((line, i) => {
+    const before = lines[(i + 3) % 4];
+    const determinant = before.nx * line.ny - line.nx * before.ny;
+    return [
+      (before.offset * line.ny - line.offset * before.ny) / determinant,
+      (before.nx * line.offset - line.nx * before.offset) / determinant,
+    ];
+  });
+  const growth = signedArea(expanded) / area;
+  return hasPlausiblePaperCorners(expanded) &&
+    growth >= 1 - 1e-9 &&
+    growth <= 4 / 3
+    ? expanded
+    : null;
+}

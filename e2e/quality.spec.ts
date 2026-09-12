@@ -46,6 +46,9 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       "textured-wedge-empty",
       "wedge-and-paper-empty",
       "perspective",
+      "folded-corners",
+      "folded-two-papers",
+      "folded-near-frame",
     ]) {
       ctx.filter = "none";
       ctx.fillStyle = kind === "lit-empty" ? "#727272" : "#181818";
@@ -100,13 +103,29 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       }
       if (!kind.includes("empty") && !kind.endsWith("after-removal")) {
         ctx.save();
+        if (kind === "folded-near-frame") ctx.translate(0, -150);
         if (kind === "perspective") ctx.transform(0.85, 0.1, 0.15, 0.85, 0, 0);
         const paper = kind === "dim" ? 84 : kind === "white" ? 255 : 200;
         ctx.fillStyle = `rgb(${paper},${paper},${paper})`;
         const x = kind === "clipped" ? -50 : 380;
         const width =
           kind === "small" ? 400 : kind.startsWith("thin") ? 600 : 1240;
-        ctx.fillRect(x, 180, width, 2040);
+        if (kind.startsWith("folded")) {
+          ctx.beginPath();
+          for (const [i, [px, py]] of [
+            [380, 180],
+            [1450, 180],
+            [1620, 330],
+            [1620, 2220],
+            [550, 2220],
+            [380, 2070],
+          ].entries()) {
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+        } else ctx.fillRect(x, 180, width, 2040);
         if (kind === "gradient") {
           const gradient = ctx.createLinearGradient(380, 180, 1620, 2220);
           gradient.addColorStop(0, "#888888");
@@ -144,7 +163,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(600, 500, 800, 500);
         }
-        if (kind === "two-papers") {
+        if (kind === "two-papers" || kind === "folded-two-papers") {
           ctx.fillStyle = "#eeeeee";
           ctx.fillRect(50, 300, 250, 1500);
         }
@@ -186,6 +205,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "thin",
     "thin-faint",
     "perspective",
+    "folded-corners",
   ])
     expect(results[kind].ok, `${kind}: ${results[kind].reason}`).toBe(true);
   for (const kind of [
@@ -201,6 +221,8 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "ambiguous-soft-region",
     "textured-wedge-empty",
     "wedge-and-paper-empty",
+    "folded-two-papers",
+    "folded-near-frame",
   ])
     expect(results[kind].ok, kind).toBe(false);
   // A diffuse reflection and a blurred second sheet can look alike.
@@ -209,6 +231,34 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
   expect(results["two-papers"].reason).toContain("More than one");
   expect(results["wedge-and-paper-empty"].reason).toContain("More than one");
   expect(results["textured-wedge-empty"].reason).toContain("distorted");
+  expect(results["folded-two-papers"].reason).toContain("More than one");
+  expect(results["folded-near-frame"].reason).toContain("more space");
+  // The automatic bounds must include the folds, not bridge diagonally inside
+  // them. Permit only segmentation rounding (four source pixels).
+  const folded = results["folded-corners"].quad!.map(([x, y]) => [
+    x * 2000,
+    y * 2400,
+  ]);
+  for (const [x, y] of [
+    [380, 180],
+    [1450, 180],
+    [1620, 330],
+    [1620, 2220],
+    [550, 2220],
+    [380, 2070],
+  ]) {
+    for (let i = 0; i < 4; i++) {
+      const a = folded[i],
+        b = folded[(i + 1) % 4];
+      const signedDistance =
+        ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])) /
+        Math.hypot(b[0] - a[0], b[1] - a[1]);
+      expect(
+        signedDistance,
+        `fold vertex ${x},${y} outside side ${i}`,
+      ).toBeGreaterThanOrEqual(-4);
+    }
+  }
   expect(results["glare-after-removal"].empty).toBe(true);
   expect(results["clutter-after-removal"].empty).toBe(true);
   expect(results.blurred.reason).toContain("blurred");
