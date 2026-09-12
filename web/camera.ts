@@ -7,6 +7,7 @@ import {
   savePending,
   type PendingCapture,
 } from "./pending";
+import { retakeTarget } from "./control-command";
 import { CaptureState } from "./state";
 import { Vision } from "./vision";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
@@ -217,7 +218,14 @@ export class PhoneCamera {
         if (!this.running || this.generation !== generation) return;
         this.connected = true;
         void this.direct.sync(this.camera, result.previewSession, this.stream!);
-        if (result.sequence !== this.sequence && !this.busy) {
+        if (
+          result.sequence !== this.sequence &&
+          !this.busy &&
+          !(
+            retakeTarget(result.command) &&
+            this.machine.value.recovery === "upload"
+          )
+        ) {
           this.sequence = result.sequence;
           if (result.command === "retry-upload") void this.recover();
           else if (result.command === "force") void this.force();
@@ -460,7 +468,7 @@ export class PhoneCamera {
           manualCapture: capture.manual === true,
           sourcePixels: capture.sourcePixels,
           quality: capture.quality,
-          checks: "browser-opencv-mediapipe-v3-local-print",
+          checks: "browser-opencv-mediapipe-v4-narrow-receipts",
         }),
       },
     });

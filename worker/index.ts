@@ -1,3 +1,5 @@
+/// <reference types="@cloudflare/workers-types" />
+import { hasReceiptResolution } from "../web/capture-resolution";
 import {
   UUID,
   MAX_IMAGE,
@@ -12,7 +14,6 @@ import {
 import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
 import { isControlCommand, retakeTarget } from "../web/control-command";
-/// <reference types="@cloudflare/workers-types" />
 export interface Env {
   RETIRED_CAPTURE_IDS?: string;
   DB: D1Database;
@@ -184,12 +185,7 @@ function requireQuality(metadata: Record<string, unknown>) {
   const q = metadata.quality as
     { ok?: unknown; receiptPixels?: unknown } | undefined;
   requireThat(
-    q?.ok === true &&
-      Array.isArray(q.receiptPixels) &&
-      q.receiptPixels.length === 2 &&
-      q.receiptPixels.every(
-        (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 900,
-      ),
+    q?.ok === true && hasReceiptResolution(q.receiptPixels),
     409,
     "Image quality checks did not pass.",
   );
@@ -707,11 +703,14 @@ async function route(request: Request, env: Env): Promise<Response> {
         409,
         "Enable or reload the phone camera before selecting a retake.",
       );
-      requireThat(
-        !state.activeId && state.recovery !== "upload",
-        409,
-        "Finish the pending photo upload before selecting a retake.",
-      );
+      // Targeted retakes are queued until the phone finishes any pending upload.
+      // Its live state is authoritative; the stored heartbeat can lag a save acknowledgement.
+      if (!retakeTarget(command))
+        requireThat(
+          !state.activeId && state.recovery !== "upload",
+          409,
+          "Finish the pending photo upload before using this control.",
+        );
     }
     await env.DB.prepare(
       "UPDATE station SET command=?,sequence=sequence+1 WHERE id=1",

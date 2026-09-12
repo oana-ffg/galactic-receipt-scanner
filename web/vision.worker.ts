@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { hasReceiptResolution } from "./capture-resolution";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
@@ -380,9 +381,9 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
         Math.round(Math.max(edges[0], edges[2])),
         Math.round(Math.max(edges[1], edges[3])),
       ];
-      if (Math.min(...q.receiptPixels) < 900) {
+      if (!hasReceiptResolution(q.receiptPixels)) {
         q.reason =
-          "Receipt is under 900 pixels across. Move closer or raise resolution.";
+          "Receipt needs at least 450 pixels on the short side and 900 on the long side. Move closer or raise resolution.";
         return q;
       }
     }

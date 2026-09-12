@@ -120,7 +120,7 @@ credential. No bearer-bypass tokens, public download links or embedded API keys 
 
 Where supported, the open dashboard exposes these WebMCP tools:
 
-- `list_receipts`: list current accepted takes, one per receipt; follow the returned cursor. Set `history: true` to inspect rejected and previous takes.
+- `list_receipts`: list current takes (accepted or marked `manual-review`), one per receipt; follow the returned cursor. Set `history: true` to inspect rejected and previous takes.
 - `read_receipt`: get one capture and authenticated file URLs for inspecting the sources.
 - `prepare_receipt_outputs`: after scanning, verify an original against its hash and create its crop and image PDF. Run one receipt at a time; failed derivative generation never changes the saved original.
 - `transcribe_saved_receipts`: after scanning, run private Danish/English OCR for up to 20 accepted originals, retaining both layout passes, coordinates, model hashes and uncertainty scores.

@@ -73,8 +73,13 @@ test("generated photographs cover real paper texture, creases, fingers and blur"
   // Partial fingers can evade landmarks; paper/obstruction checks must still reject.
   expect(result.hand.empty).toBe(false);
   expect(result.blurred.ok).toBe(false);
-  expect(result["native-resolution"].ok).toBe(false);
-  expect(result["native-resolution"].reason).toContain("900 pixels");
+  expect(result["native-resolution"].ok).toBe(true);
+  expect(
+    Math.min(...result["native-resolution"].receiptPixels!),
+  ).toBeGreaterThanOrEqual(450);
+  expect(Math.min(...result["native-resolution"].receiptPixels!)).toBeLessThan(
+    900,
+  );
 });
 
 test("textured photographs settle promptly with handheld jitter and exposure changes", async ({

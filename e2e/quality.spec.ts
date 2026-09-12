@@ -37,6 +37,9 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       "gradient",
       "noise",
       "clipped",
+      "thin",
+      "thin-faint",
+      "thin-blurred",
       "small",
       "empty",
       "lit-empty",
@@ -75,7 +78,8 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
         const paper = kind === "dim" ? 84 : kind === "white" ? 255 : 200;
         ctx.fillStyle = `rgb(${paper},${paper},${paper})`;
         const x = kind === "clipped" ? -50 : 380;
-        const width = kind === "small" ? 600 : 1240;
+        const width =
+          kind === "small" ? 400 : kind.startsWith("thin") ? 600 : 1240;
         ctx.fillRect(x, 180, width, 2040);
         if (kind === "gradient") {
           const gradient = ctx.createLinearGradient(380, 180, 1620, 2220);
@@ -93,7 +97,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
           }
           ctx.putImageData(data, 380, 180);
         } else if (kind !== "blank") {
-          const ink = kind === "dim" ? 24 : kind === "faint" ? 170 : 35;
+          const ink = kind === "dim" ? 24 : kind.includes("faint") ? 170 : 35;
           ctx.fillStyle = `rgb(${ink},${ink},${ink})`;
           ctx.font =
             kind === "sparse" ? "italic 56px serif" : "56px sans-serif";
@@ -118,7 +122,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
           ctx.fillStyle = "#eeeeee";
           ctx.fillRect(50, 300, 250, 1500);
         }
-        if (kind === "blurred") {
+        if (kind.includes("blurred")) {
           window.blurFixture(canvas, 16);
         }
       }
@@ -152,6 +156,8 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "sparse",
     "edge-glare",
     "merged-glare",
+    "thin",
+    "thin-faint",
   ])
     expect(results[kind].ok, `${kind}: ${results[kind].reason}`).toBe(true);
   for (const kind of [
@@ -163,6 +169,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "noise",
     "clipped",
     "small",
+    "thin-blurred",
     "ambiguous-soft-region",
   ])
     expect(results[kind].ok, kind).toBe(false);

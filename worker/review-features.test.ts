@@ -171,3 +171,61 @@ it("rejects raw targeted commands and unsupported camera clients", async () => {
   ).toBe(400);
   expect((await request("/api/control/force", "POST")).status).toBe(409);
 });
+
+it("accepts narrow sharp captures and rejects insufficient source dimensions", async () => {
+  for (const pixels of [
+    [450, 900],
+    [900, 450],
+    [594, 2034],
+    [449, 2000],
+    [800, 800],
+  ]) {
+    const response = await request(
+      `/api/captures/${crypto.randomUUID()}`,
+      "POST",
+      image,
+      {
+        "X-Capture-Status": "accepted",
+        "X-Capture-Metadata": JSON.stringify({
+          quality: { ok: true, receiptPixels: pixels },
+        }),
+      },
+    );
+    expect(response.status).toBe(
+      Math.min(...pixels) >= 450 && Math.max(...pixels) >= 900 ? 200 : 409,
+    );
+  }
+});
+
+it("queues targeted retakes when a saved acknowledgement is newer than the stored heartbeat", async () => {
+  const id = crypto.randomUUID();
+  await upload(id, "accepted");
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare(
+      "UPDATE station SET camera=?,expires=?,updated=?,state=? WHERE id=1",
+    )
+    .bind(
+      crypto.randomUUID(),
+      Date.now() + 10000,
+      Date.now(),
+      JSON.stringify({
+        supportsTargetedRetake: true,
+        activeId: id,
+        recovery: "upload",
+      }),
+    )
+    .run();
+  expect(
+    (
+      await request(
+        "/api/control/retake",
+        "POST",
+        JSON.stringify({ captureId: id }),
+      )
+    ).status,
+  ).toBe(200);
+  expect(
+    await db.prepare("SELECT command FROM station WHERE id=1").first(),
+  ).toEqual({ command: `retake:${id}` });
+});

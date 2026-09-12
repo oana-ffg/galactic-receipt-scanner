@@ -36,7 +36,9 @@ Use light paper on a dark background. Keep all four edges visible and hands out 
 Leave a dark gap around the paper and keep keyboards and other bright objects away from it.
 Completely remove each receipt before adding the next. Calibrate the first few scans on
 the actual phone: partial fingertips, curled paper, glare and faint print can defeat checks.
-The minimum 900 pixels across a receipt is a quality gate, not a physical-DPI claim.
+The source must cover at least 450 pixels on the receipt’s short side and 900 on its long
+side, in either orientation. This allows narrow receipts while retaining focus, contrast
+and glare checks. These are heuristic quality gates, not a physical-DPI or legibility guarantee.
 
 OCR, categorisation and reporting belong to the downstream AI workflow. Downstream PDFs start as
 image PDFs. Follow [the post-processing workflow](POST_PROCESSING.md). Preserve exact values, uncertainties and source evidence when processing them.

@@ -228,7 +228,7 @@ it("cannot accept an original with missing quality or a failed original write", 
   for (const quality of [
     undefined,
     { ok: true, receiptPixels: [] },
-    { ok: true, receiptPixels: [899, 1500] },
+    { ok: true, receiptPixels: [449, 1500] },
     { ok: false, receiptPixels: [1200, 1500] },
   ]) {
     const id = crypto.randomUUID();

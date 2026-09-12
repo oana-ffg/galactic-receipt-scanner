@@ -507,7 +507,14 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     currentTakes.some((capture: { id: string }) => capture.id === current.id),
   ).toBe(false);
   // Selecting an old capture pauses the phone and requires a deliberate restart.
+  const selectionResponse = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/control/retake") &&
+      response.request().method() === "POST",
+  );
   await page.locator(`[data-retake="${retake.id}"]`).click();
+  const selectedResponse = await selectionResponse;
+  expect(selectedResponse.status(), await selectedResponse.text()).toBe(200);
   await expect(phone.locator("#status")).toContainText("Retake selected");
   await expect(page.locator("#start")).toBeEnabled();
   await phone.evaluate(() =>
