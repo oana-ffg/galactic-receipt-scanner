@@ -169,6 +169,7 @@ interface StationRow {
   updated: number;
   preview_key: string | null;
   preview_session: string | null;
+  preview_requested_until: number;
 }
 async function stationRow(env: Env): Promise<StationRow> {
   const row = await env.DB.prepare(
@@ -492,7 +493,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     );
     await stationRow(env);
     await env.DB.prepare(
-      "UPDATE station SET camera=?, expires=?, state=NULL, preview_session=NULL, command='pause', sequence=sequence+1, updated=0 WHERE id=1 AND (expires<? OR camera=?)",
+      "UPDATE station SET camera=?, expires=?, state=NULL, preview_session=NULL, preview_requested_until=0, command='pause', sequence=sequence+1, updated=0 WHERE id=1 AND (expires<? OR camera=?)",
     )
       .bind(camera, Date.now() + 10000, Date.now(), camera)
       .run();
@@ -522,7 +523,7 @@ async function route(request: Request, env: Env): Promise<Response> {
       "Invalid camera ID.",
     );
     await env.DB.prepare(
-      "UPDATE station SET expires=0,updated=0,state=NULL,preview_session=NULL WHERE id=1 AND camera=?",
+      "UPDATE station SET expires=0,updated=0,state=NULL,preview_session=NULL,preview_requested_until=0 WHERE id=1 AND camera=?",
     )
       .bind(camera)
       .run();
@@ -536,7 +537,7 @@ async function route(request: Request, env: Env): Promise<Response> {
       "Missing state.",
     );
     const row = await env.DB.prepare(
-      "UPDATE station SET state=?,updated=?,expires=? WHERE id=1 AND camera=? AND expires>? RETURNING sequence,command,preview_session",
+      "UPDATE station SET state=?,updated=?,expires=? WHERE id=1 AND camera=? AND expires>? RETURNING sequence,command,preview_session,preview_requested_until",
     )
       .bind(
         JSON.stringify(info.state),
@@ -548,12 +549,32 @@ async function route(request: Request, env: Env): Promise<Response> {
       .first<StationRow>();
     requireThat(row, 409, "Camera lease expired. Enable camera again.");
     return json({
+      previewRequestedForMs: Math.max(
+        0,
+        row.preview_requested_until - Date.now(),
+      ),
       sequence: row.sequence,
       command: row.command,
       previewSession: row.preview_session
         ? JSON.parse(row.preview_session)
         : null,
     });
+  }
+  if (path === "/api/station/preview-request" && method === "POST") {
+    const { camera } = await bodyJson(request);
+    requireThat(
+      typeof camera === "string" && UUID.test(camera),
+      400,
+      "Invalid camera ID.",
+    );
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      "UPDATE station SET preview_requested_until=? WHERE id=1 AND camera=? AND expires>?",
+    )
+      .bind(now + 5000, camera, now)
+      .run();
+    requireThat(result.meta.changes === 1, 409, "Camera lease expired.");
+    return json({ ok: true });
   }
   if (path === "/api/station/direct-preview" && method === "POST") {
     const info = await bodyJson(request, 24000);

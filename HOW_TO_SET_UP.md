@@ -104,7 +104,7 @@ do not clear site data or use private browsing while anything is pending.
 
 D1 stores metadata, hashes, artifact revisions and the current capture-station state.
 R2 stores originals (`raw/`), crops (`image/`), PDFs (`pdf/`) and unverified extraction
-artifacts (`ocr/`). A direct WebRTC video/data connection is attempted between owner-authenticated devices, using only host ICE candidates and no external STUN/TURN service. Keep one dashboard open; network isolation can prevent a direct connection. The same-origin private preview remains the fallback over the Internet. The `preview/latest` object is overwritten as fallback frames arrive; a stale
+artifacts (`ocr/`). A direct WebRTC video/data connection is attempted between owner-authenticated devices, using only host ICE candidates and no external STUN/TURN service. One dashboard can hold that connection; additional viewers and dashboards with stalled video request a short fallback lease. Network isolation can prevent a direct connection. The same-origin private preview remains the fallback over the Internet. The `preview/latest` object is overwritten as fallback frames arrive; a stale
 preview is inaccessible through the application. It is a private last-frame buffer, not
 an accumulating video recording. Receipts are never served through public object URLs.
 

@@ -305,6 +305,7 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
   page,
   request,
 }) => {
+  test.setTimeout(120000);
   await page.addInitScript(() => {
     const tools: Record<
       string,
@@ -373,6 +374,56 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     });
   console.log("Direct preview benchmark", JSON.stringify(sample));
   expect(sample.frames).toBeGreaterThan(10);
+  await phone.evaluate(() => {
+    (
+      window as unknown as { scannerFixture: { previewDelay: number } }
+    ).scannerFixture.previewDelay = 0;
+  });
+  // Another desktop cannot own RTC but still receives requested HTTP frames.
+  const secondViewer = await browser.newPage();
+  await secondViewer.addInitScript(() => {
+    Object.defineProperty(window, "RTCPeerConnection", { value: undefined });
+  });
+  await secondViewer.goto("http://127.0.0.1:8766/");
+  await expect(secondViewer.locator("#feed")).toBeVisible({ timeout: 15000 });
+  await expect(secondViewer.locator("#empty-preview")).toBeHidden();
+  await expect(page.locator("#live-feed")).toBeVisible();
+  await secondViewer.close();
+  await expect
+    .poll(async () => {
+      const response = await request.get("/api/station");
+      return (await response.json()).fresh;
+    })
+    .toBe(true);
+  // A connected channel with stalled decoded video must also recover over HTTP.
+  await page.locator("#live-feed").evaluate((video: HTMLVideoElement) => {
+    video.getVideoPlaybackQuality = () => ({
+      totalVideoFrames: 0,
+      droppedVideoFrames: 0,
+      corruptedVideoFrames: 0,
+      creationTime: 0,
+    });
+  });
+  await expect(page.locator("#feed")).toBeVisible({ timeout: 15000 });
+  await expect(page.locator("#empty-preview")).toBeHidden();
+  await page.locator("#live-feed").evaluate((video: HTMLVideoElement) => {
+    delete (video as unknown as { getVideoPlaybackQuality?: unknown })
+      .getVideoPlaybackQuality;
+  });
+  await expect(page.locator("#live-feed")).toBeVisible({ timeout: 15000 });
+  // Keep delivering an older amber RTC state after the phone saves. HTTP's
+  // newer revision must turn the desktop green despite a "fresh" data channel.
+  await phone.evaluate(() => {
+    const send = RTCDataChannel.prototype.send;
+    let amber: string | undefined;
+    RTCDataChannel.prototype.send = function (data: string) {
+      const message = JSON.parse(data);
+      if (message.state?.phase === "amber") amber = data;
+      if (message.state?.phase === "green" && amber)
+        return send.call(this, amber);
+      return send.call(this, data);
+    } as typeof send;
+  });
   await page
     .getByRole("button", { name: "Start scanning", exact: true })
     .click();
@@ -385,6 +436,9 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
   });
   await expect(phone.locator("#phase")).toHaveText("SAVED · NEXT", {
     timeout: 5000,
+  });
+  await expect(page.locator("#phase")).toHaveText("SAVED · NEXT", {
+    timeout: 2000,
   });
   console.log("Original capture benchmark ms", Date.now() - started);
   const { captures } = await (await request.get("/api/captures")).json();

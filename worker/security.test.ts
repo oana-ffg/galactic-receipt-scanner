@@ -33,6 +33,7 @@ it("rejects anonymous, other-user and cross-origin requests on all sensitive rou
     "/api/captures",
     "/api/station",
     "/api/station/preview",
+    "/api/station/preview-request",
     "/api/station/direct-preview",
     "/api/station/release",
     "/vendor/ocr/worker.min.js",
@@ -288,4 +289,59 @@ it("binds direct preview signalling to the active camera and one viewer session"
     (await signal({ camera, id, answer: { type: "offer", sdp: "wrong" } }))
       .status,
   ).toBe(400);
+});
+
+it("leases fallback demand without stealing direct preview or carrying it to another camera", async () => {
+  const db = await mf.getD1Database("DB");
+  const { camera, preview_session } = (await db
+    .prepare("SELECT camera,preview_session FROM station WHERE id=1")
+    .first())!;
+  const demand = (id: unknown) =>
+    request(
+      "/api/station/preview-request",
+      "POST",
+      JSON.stringify({ camera: id }),
+    );
+  const heartbeat = async () =>
+    (
+      await request(
+        "/api/station/heartbeat",
+        "POST",
+        JSON.stringify({ camera, state: {} }),
+      )
+    ).json();
+  expect((await demand("invalid")).status).toBe(400);
+  expect((await demand(crypto.randomUUID())).status).toBe(409);
+  expect((await demand(camera)).status).toBe(200);
+  const state = await heartbeat();
+  expect(state.previewRequestedForMs).toBeGreaterThan(0);
+  expect(state.previewRequestedForMs).toBeLessThanOrEqual(5000);
+  expect(state.previewSession).toEqual(JSON.parse(String(preview_session)));
+  await db
+    .prepare("UPDATE station SET preview_requested_until=? WHERE id=1")
+    .bind(Date.now() - 1)
+    .run();
+  expect((await heartbeat()).previewRequestedForMs).toBe(0);
+  await demand(camera);
+  expect(
+    (await request("/api/station/release", "POST", JSON.stringify({ camera })))
+      .status,
+  ).toBe(200);
+  expect((await demand(camera)).status).toBe(409);
+  const replacement = crypto.randomUUID();
+  expect(
+    (
+      await request(
+        "/api/station/claim",
+        "POST",
+        JSON.stringify({ camera: replacement }),
+      )
+    ).status,
+  ).toBe(200);
+  expect(
+    (await db
+      .prepare("SELECT preview_requested_until FROM station WHERE id=1")
+      .first())!.preview_requested_until,
+  ).toBe(0);
+  expect((await demand(camera)).status).toBe(409);
 });

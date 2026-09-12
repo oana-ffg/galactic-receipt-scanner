@@ -58,6 +58,9 @@ export const station = sqliteTable("station", {
   state: text("state"),
   preview_key: text("preview_key"),
   preview_session: text("preview_session"),
+  preview_requested_until: integer("preview_requested_until")
+    .notNull()
+    .default(0),
   updated: integer("updated").notNull().default(0),
 });
 

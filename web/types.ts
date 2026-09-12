@@ -19,6 +19,8 @@ export interface Quality {
 
 export interface ScanState {
   type: "state";
+  cameraId?: string;
+  stateRevision?: number;
   phase: "red" | "amber" | "green";
   message: string;
   paused: boolean;
@@ -40,6 +42,7 @@ export interface ScanState {
   stage?: "photo" | "checking" | "uploading";
   timings?: { photoMs?: number; checksMs?: number; saveMs?: number };
   count: number;
+  countKnown?: boolean;
   quality: Quality;
 }
 

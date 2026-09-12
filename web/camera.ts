@@ -30,9 +30,11 @@ export class PhoneCamera {
   private running = false;
   private busy = false;
   private connected = false;
+  private previewRequestedUntil = 0;
   private camera = crypto.randomUUID();
   private sequence = 0;
   private generation = 0;
+  private stateRevision = 0;
   private connectionIssue = "";
   private canvas = document.createElement("canvas");
   private previewCanvas = document.createElement("canvas");
@@ -49,6 +51,9 @@ export class PhoneCamera {
   );
   private wakeLock: WakeLockSentinel | null = null;
   private nativePhotoAvailable = true;
+  get savedCount(): number | null {
+    return this.machine.value.countKnown ? this.machine.value.count : null;
+  }
   constructor(
     private video: HTMLVideoElement,
     private status: (message: string) => void,
@@ -78,6 +83,7 @@ export class PhoneCamera {
       );
     this.machine = new CaptureState();
     this.camera = crypto.randomUUID();
+    this.stateRevision = 0;
     const generation = ++this.generation;
     this.status("Loading receipt and hand checks…");
     this.vision = new Vision();
@@ -127,6 +133,8 @@ export class PhoneCamera {
     );
     this.sequence = claim.sequence;
     this.machine.value.count = claim.count;
+    this.machine.value.countKnown = true;
+    this.previewRequestedUntil = 0;
   }
   retake() {
     if (
@@ -170,6 +178,8 @@ export class PhoneCamera {
     this.onStopped();
   }
   private emitState() {
+    this.machine.value.cameraId = this.camera;
+    this.machine.value.stateRevision = ++this.stateRevision;
     const state: ScanState =
       this.running && !this.connected
         ? {
@@ -207,6 +217,7 @@ export class PhoneCamera {
           sequence: number;
           command: string;
           previewSession: PreviewSession | null;
+          previewRequestedForMs?: number;
         }>("/api/station/heartbeat", {
           method: "POST",
           body: JSON.stringify({
@@ -217,6 +228,9 @@ export class PhoneCamera {
         });
         if (!this.running || this.generation !== generation) return;
         this.connected = true;
+        this.previewRequestedUntil =
+          performance.now() +
+          Math.min(5000, Math.max(0, result.previewRequestedForMs ?? 0));
         void this.direct.sync(this.camera, result.previewSession, this.stream!);
         if (
           result.sequence !== this.sequence &&
@@ -288,7 +302,8 @@ export class PhoneCamera {
       // Direct video continues during capture. HTTP preview yields upload bandwidth
       // to the original and never holds up detection or creates a frame backlog.
       if (
-        !this.direct.connected &&
+        (!this.direct.connected ||
+          performance.now() < this.previewRequestedUntil) &&
         this.connected &&
         !this.busy &&
         this.video.readyState >= 2 &&

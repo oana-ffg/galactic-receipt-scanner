@@ -36,6 +36,13 @@
       "when": 1789221308069,
       "tag": "0004_dark_sabretooth",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789231080076,
+      "tag": "0005_classy_nick_fury",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,6 @@
 import QRCode from "qrcode";
 import { api } from "./api";
+import { StateOrder } from "./state-order";
 import { PhoneCamera } from "./camera";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import { messageOf } from "./errors";
@@ -17,7 +18,7 @@ if (location.pathname === "/issues") {
   void import("./issues").then((module) => module.mountIssues(app));
 } else {
   app.innerHTML = `
-    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count">0</strong><span>saved pics</span></div><a href="/issues">Private issues</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
+    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/issues">Private issues</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
     <p id="connection-warning" class="connection-warning" role="status"></p>
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
@@ -50,6 +51,12 @@ function input(id: string): HTMLInputElement {
 }
 function error(message: string): void {
   element("error").textContent = message;
+}
+
+function renderCount(count: number): void {
+  if (!Number.isSafeInteger(count) || count < 0) return;
+  element("count").textContent = String(count);
+  element("count").setAttribute("aria-label", `${count} saved pictures`);
 }
 
 function renderState(state: ScanState): void {
@@ -94,7 +101,7 @@ function renderState(state: ScanState): void {
   element("status").textContent = retakePending
     ? "Waiting for the phone to select this retake. Do not start scanning yet."
     : state.message;
-  element("count").textContent = String(state.count);
+  if (state.countKnown !== false) renderCount(state.count);
   if (state.phase === "green" && state.timings) {
     const seconds =
       Object.values(state.timings).reduce((sum, ms) => sum + (ms ?? 0), 0) /
@@ -167,6 +174,18 @@ function mountCamera(): void {
       element("empty-preview").hidden = false;
     },
   );
+  // A claim may finish before startup emits state; its newer count wins.
+  // This read itself never claims the lease or enables the camera.
+  void api<{ count: number }>("/api/station", {
+    signal: AbortSignal.timeout(4000),
+  }).then(
+    ({ count }) => renderCount(camera.savedCount ?? count),
+    () => {
+      if (camera.savedCount !== null) renderCount(camera.savedCount);
+      else
+        element("count").setAttribute("aria-label", "Saved count unavailable");
+    },
+  );
   element("enable").onclick = async () => {
     element<HTMLButtonElement>("enable").disabled = true;
     element<HTMLButtonElement>("enable").textContent = "Starting camera…";
@@ -220,6 +239,7 @@ function mountDashboard(): void {
   let needsAttention = false;
   let audio: AudioContext | null = null;
   const live = element<HTMLVideoElement>("live-feed");
+  const stateOrder = new StateOrder();
   let lastVideoFrame = 0;
   let decodedFrames = 0;
   const videoFresh = () => {
@@ -239,13 +259,14 @@ function mountDashboard(): void {
     () => {},
     (stream) => {
       live.srcObject = stream;
-      lastVideoFrame = stream ? performance.now() : 0;
+      lastVideoFrame = 0;
       decodedFrames = 0;
       live.hidden = !stream;
       if (stream) {
         element("feed").hidden = true;
         element("empty-preview").hidden = true;
         void live.play().catch(() => {
+          lastVideoFrame = 0;
           live.hidden = true;
         });
       }
@@ -293,6 +314,7 @@ function mountDashboard(): void {
     }
   }
   function acceptState(state: ScanState) {
+    if (!stateOrder.accept(state)) return;
     if (state.needsAttention && !needsAttention) void refreshLibrary();
     needsAttention = !!state.needsAttention;
     if (state.lastSaved && state.lastSaved !== lastSaved) {
@@ -310,6 +332,28 @@ function mountDashboard(): void {
     lastError = state.message;
     renderState(state);
   }
+  let fallbackRequestedAt = -Infinity;
+  let fallbackRequestPending = false;
+  async function requestFallback(camera: string) {
+    if (
+      fallbackRequestPending ||
+      performance.now() - fallbackRequestedAt < 2000
+    )
+      return;
+    fallbackRequestPending = true;
+    fallbackRequestedAt = performance.now();
+    try {
+      await api("/api/station/preview-request", {
+        method: "POST",
+        body: JSON.stringify({ camera }),
+        signal: AbortSignal.timeout(4000),
+      });
+    } catch {
+      // Preview retrieval reports availability; retry this short demand lease.
+    } finally {
+      fallbackRequestPending = false;
+    }
+  }
   async function poll() {
     try {
       const result = await api<{
@@ -318,17 +362,25 @@ function mountDashboard(): void {
         previewSession: PreviewSession | null;
         count: number;
         fresh: boolean;
-      }>("/api/station");
+      }>("/api/station", { signal: AbortSignal.timeout(4000) });
+      stateOrder.setCamera(result.camera);
       void direct.sync(result.camera, result.previewSession);
+      if (
+        result.camera &&
+        document.visibilityState === "visible" &&
+        !videoFresh()
+      )
+        void requestFallback(result.camera);
       if (result.state && result.fresh) {
         const message = { ...result.state, count: result.count };
-        if (!direct.fresh) acceptState(message);
+        if (message.stateRevision !== undefined || !direct.fresh)
+          acceptState(message);
       } else {
         if (!direct.fresh)
           disconnected(
             "Phone preview paused or disconnected. Reopen the camera page on your phone; it will reconnect.",
           );
-        element("count").textContent = String(result.count);
+        renderCount(result.count);
       }
     } catch (problem) {
       if (!direct.fresh) disconnected(messageOf(problem));

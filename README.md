@@ -34,7 +34,9 @@ public signup, shared receipt database, pairing secret or public file bucket.
 - Private Danish/English OCR after scanning, with two layout passes, source coordinates and flagged uncertainties for downstream visual review.
 - Authenticated downloads and WebMCP tools for the owner's downstream Work/Codex task.
 
-For the smoothest preview, put the phone and desktop on the same network and keep one dashboard open. Direct video uses no external relay service; networks that block it use the slower authenticated image preview.
+For the smoothest preview, put the phone and desktop on the same network. One dashboard owns the direct video connection; additional dashboards use the authenticated image preview. A dashboard with stalled or missing video requests fallback images for five seconds at a time. The phone stops that extra encoding and uploading when requests expire, and original uploads still take priority. Direct video uses no external relay service; networks that block it use the same fallback.
+
+Phone states carry a camera ID and increasing revision so the desktop can use the newest status from either connection without reverting to an older colour. Already-open older clients remain compatible; reload both pages after a saved acknowledgement to activate these improvements. Before the saved count loads, the counter shows a dash rather than an unverified zero.
 
 Use light paper on a dark background. Keep all four edges visible and hands out of view.
 Leave a dark gap around the paper and keep keyboards and other bright objects away from it.

@@ -1,0 +1,1 @@
+ALTER TABLE `station` ADD `preview_requested_until` integer DEFAULT 0 NOT NULL;

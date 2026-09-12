@@ -19,6 +19,7 @@ export class CaptureState {
     streamFresh: true,
     detectorReady: false,
     count: 0,
+    countKnown: false,
     quality: {
       ok: false,
       quad: null,
@@ -206,6 +207,7 @@ export class CaptureState {
     this.feedback = null;
     if (count !== undefined) this.value.count = count;
     else if (this.value.lastSaved !== id) this.value.count++;
+    this.value.countKnown = true;
     this.value.stage = undefined;
     this.value.needsAttention = false;
     this.value.activeId = null;
