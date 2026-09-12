@@ -13,6 +13,20 @@ implementation generic. Never put actual receipts, extracted text, financial inf
 local credentials, machine-specific settings, or private organisation details in source,
 tests, screenshots, commits, or documentation. Only synthetic documents belong in tests.
 
+## Production data and test isolation
+
+- Synthetic tests must use isolated local test databases and object storage, or a
+  separately provisioned test instance. Never save synthetic captures or artifacts in
+  the main production database or bucket, including during browser smoke tests.
+- The owner authorized exactly one pre-production cleanup on 12 September 2026, before
+  real receipt scanning. This is a one-off exception, not a maintenance procedure or
+  reusable permission. Once completed, never reset, truncate, bulk-clear or delete
+  production receipts to test, debug, repair or prepare another scanning session.
+- Preserve real originals, metadata and derivative history. Future verification against
+  production is read-only; perform all test writes and destructive tests in isolation.
+- Do not add or leave a production reset button, deletion endpoint or automatic cleanup
+  job. Record completion of the one-off cleanup here after verifying persisted storage.
+
 ## Accuracy is the highest priority
 
 **These are financial source documents. Accuracy outranks throughput and file size.**

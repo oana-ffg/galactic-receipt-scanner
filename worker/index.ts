@@ -1,5 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
+import { prelaunchReset } from "./prelaunch-reset";
 export interface Env {
+  PRELAUNCH_RESET_MANIFEST?: string;
+  RETIRED_CAPTURE_IDS?: string;
   DB: D1Database;
   BUCKET: R2Bucket;
   ASSETS: Fetcher;
@@ -245,6 +248,7 @@ function requireQuality(metadata: Record<string, unknown>) {
   );
 }
 async function route(request: Request, env: Env): Promise<Response> {
+  if (env.PRELAUNCH_RESET_MANIFEST) return prelaunchReset(request, env);
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
@@ -280,6 +284,11 @@ async function route(request: Request, env: Env): Promise<Response> {
       return json({ ...publicCapture(row), artifacts: versions.results });
     }
     if (method === "POST") {
+      requireThat(
+        !(env.RETIRED_CAPTURE_IDS ?? "").split(",").includes(id),
+        410,
+        "This test capture was permanently retired during the authorized pre-production cleanup. Reload the camera page before scanning real receipts.",
+      );
       const data = await bytes(request, MAX_IMAGE);
       const type = imageType(data);
       const sha = await digest(data);

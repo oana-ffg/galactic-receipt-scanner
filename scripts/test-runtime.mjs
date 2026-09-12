@@ -5,12 +5,19 @@ export const ownerHeaders = {
   "oai-authenticated-user-id": "synthetic-owner",
   "oai-authenticated-user-email": "owner@example.test",
 };
-export async function runtime() {
+export async function runtime({ maintenanceManifest, retiredCaptureIds } = {}) {
   const mf = new Miniflare({
     modules: true,
     scriptPath: "dist/server/index.js",
     compatibilityDate: "2026-08-01",
-    bindings: { OWNER_EMAIL: "owner@example.test", APP_ORIGIN: origin },
+    bindings: {
+      OWNER_EMAIL: "owner@example.test",
+      APP_ORIGIN: origin,
+      ...(maintenanceManifest
+        ? { PRELAUNCH_RESET_MANIFEST: maintenanceManifest }
+        : {}),
+      ...(retiredCaptureIds ? { RETIRED_CAPTURE_IDS: retiredCaptureIds } : {}),
+    },
     d1Databases: ["DB"],
     r2Buckets: ["BUCKET"],
     assets: {
