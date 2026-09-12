@@ -1,6 +1,11 @@
 import { messageOf, RequestError } from "./errors";
+import { diagnostics, requestCategory } from "./diagnostics";
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const started = performance.now();
+  const route = requestCategory(path);
+  const method = init.method ?? "GET";
+  let status = 0;
   try {
     const response = await fetch(path, {
       ...init,
@@ -10,6 +15,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       headers: { "X-Scanner-Request": "1", ...init.headers },
       signal: init.signal ?? AbortSignal.timeout(45000),
     });
+    status = response.status;
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       const message =
@@ -28,8 +34,33 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
         "Your session may have ended. Reopen the scanner and sign in with the owner account.",
         401,
       );
-    return (await response.json()) as T;
+    const result = (await response.json()) as T;
+    diagnostics.record(
+      "request",
+      {
+        route,
+        method,
+        status,
+        ok: true,
+        ms: performance.now() - started,
+      },
+      2000,
+      `${route}:${method}:${status}:ok`,
+    );
+    return result;
   } catch (error) {
+    diagnostics.record(
+      "request",
+      {
+        route,
+        method,
+        status,
+        ok: false,
+        ms: performance.now() - started,
+      },
+      2000,
+      `${route}:${method}:${status}:failed`,
+    );
     if (error instanceof RequestError) throw error;
     throw new RequestError(messageOf(error));
   }

@@ -113,7 +113,11 @@ export async function issueRoute(
       "Description must be at most 8000 characters.",
     );
     const contextJson = JSON.stringify(context);
-    requireThat(contextJson.length <= 4000, 413, "Issue context is too large.");
+    requireThat(
+      contextJson.length <= 48000,
+      413,
+      "Issue context is too large.",
+    );
     const screenshotFile = form.get("screenshot");
     requireThat(
       screenshotFile instanceof File &&

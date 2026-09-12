@@ -1,6 +1,7 @@
 import { api } from "./api";
 import type { ScanState } from "./types";
 import { isControlCommand } from "./control-command";
+import { diagnostics } from "./diagnostics";
 
 export interface PreviewSession {
   id: string;
@@ -37,6 +38,7 @@ export class DirectPreview {
   }
   close() {
     const peer = this.peer;
+    if (peer) diagnostics.record("preview.peer", { state: "closed" });
     this.peer = null;
     this.channel = null;
     peer?.close();
@@ -64,7 +66,17 @@ export class DirectPreview {
   private attach(channel: RTCDataChannel, peer: RTCPeerConnection) {
     this.channel = channel;
     channel.onopen = () => {
+      if (this.peer !== peer || this.channel !== channel) return;
+      diagnostics.record("preview.channel", { state: "open" });
       if (this.lastState) this.sendState(this.lastState);
+    };
+    channel.onclose = () => {
+      if (this.peer === peer && this.channel === channel)
+        diagnostics.record("preview.channel", { state: "closed" });
+    };
+    channel.onerror = () => {
+      if (this.peer === peer && this.channel === channel)
+        diagnostics.record("preview.channel", { state: "error" });
     };
     channel.onmessage = (event) => {
       if (
@@ -91,6 +103,14 @@ export class DirectPreview {
     this.started = performance.now();
     const peer = new RTCPeerConnection({ iceServers: [] });
     this.peer = peer;
+    diagnostics.record("preview.peer", { state: "created" });
+    peer.onconnectionstatechange = () => {
+      if (this.peer !== peer) return;
+      diagnostics.record("preview.peer", {
+        state: peer.connectionState,
+        ice: peer.iceConnectionState,
+      });
+    };
     peer.ondatachannel = (event) => this.attach(event.channel, peer);
     peer.ontrack = (event) => {
       if (this.peer === peer) this.receiveVideo(new MediaStream([event.track]));
@@ -190,6 +210,7 @@ export class DirectPreview {
       }
     } catch {
       this.close();
+      diagnostics.record("preview.peer", { state: "setup-failed" });
       this.retryAt = performance.now() + 10000;
     } finally {
       this.busy = false;

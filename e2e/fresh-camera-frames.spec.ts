@@ -113,6 +113,43 @@ for (const engine of ["chromium", "webkit"] as const) {
       await expect(page.locator("#status")).toHaveText(
         "Ready for the next receipt.",
       );
+      await page
+        .getByRole("button", { name: "Report issue", exact: true })
+        .click();
+      const dialog = page.getByRole("dialog", {
+        name: "Report a private issue",
+      });
+      await dialog
+        .getByLabel("Title", { exact: true })
+        .fill("Synthetic camera diagnostics");
+      await dialog.getByRole("button", { name: "Save private issue" }).click();
+      await expect(dialog.locator(".issue-feedback")).toContainText(
+        "Private issue saved.",
+      );
+      const reports = await (await request.get("/api/issues")).json();
+      const diagnostic = reports.issues[0].context.diagnostics;
+      expect(diagnostic.device).toBe("phone");
+      expect(diagnostic.build).toMatch(/\/assets\/.*\.js$/);
+      expect(diagnostic.history).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: "camera.frames" }),
+          expect.objectContaining({ event: "vision" }),
+          expect.objectContaining({
+            event: "scan.transition",
+            data: expect.objectContaining({ phase: "green" }),
+          }),
+          expect.objectContaining({
+            event: "upload.saved",
+            data: expect.objectContaining({
+              id: after[0].id,
+              status: "accepted",
+            }),
+          }),
+        ]),
+      );
+      expect(
+        (await (await request.get("/api/captures")).json()).captures.length,
+      ).toBe(before + 1);
       expect(errors).toEqual([]);
     } finally {
       try {

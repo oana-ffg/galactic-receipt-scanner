@@ -7,6 +7,9 @@ import { messageOf } from "./errors";
 import type { ScanState } from "./types";
 import { CaptureLibrary } from "./library";
 import "./style.css";
+import { diagnostics, recordScanState, startDiagnostics } from "./diagnostics";
+
+startDiagnostics();
 
 const app = document.querySelector<HTMLElement>("#app")!;
 const isCamera = location.pathname === "/camera";
@@ -60,6 +63,7 @@ function renderCount(count: number): void {
 }
 
 function renderState(state: ScanState): void {
+  recordScanState(state);
   lastState = state;
   if (retakePending && state.selectedRetake && state.retakeOf === retakePending)
     retakePending = null;
@@ -141,6 +145,7 @@ function renderState(state: ScanState): void {
 }
 
 function disconnected(reason = "Connection lost. Waiting to reconnect…"): void {
+  diagnostics.record("network", { connected: false, source: "station" }, 2000);
   for (const id of [
     "start",
     "pause",
@@ -199,6 +204,7 @@ function mountCamera(): void {
       element<HTMLButtonElement>("enable").disabled = true;
       element<HTMLButtonElement>("enable").textContent = "Camera enabled";
     } catch (problem) {
+      diagnostics.record("camera.error", { stage: "start" });
       camera.stop(messageOf(problem));
     }
   };
@@ -398,11 +404,21 @@ function mountDashboard(): void {
           redirect: "error",
           signal: AbortSignal.timeout(4000),
         });
+        diagnostics.record(
+          "preview.http",
+          { status: response.status, ms: performance.now() - started },
+          2000,
+        );
         if (!response.ok) throw new Error("Waiting for a fresh phone preview.");
         const blob = await response.blob();
         if (!videoFresh()) await drawPreview(blob);
       } catch (problem) {
         if (!videoFresh()) {
+          diagnostics.record(
+            "preview.http",
+            { ok: false, ms: performance.now() - started },
+            2000,
+          );
           element("feed").hidden = true;
           element("empty-preview").hidden = false;
           element("connection-warning").textContent =

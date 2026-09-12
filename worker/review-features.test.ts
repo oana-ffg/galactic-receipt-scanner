@@ -259,11 +259,31 @@ it("saves maximum-length Unicode issue descriptions without header expansion", a
     JSON.stringify({
       title: "Danish screenshot report",
       description,
-      context: {},
+      context: { diagnostics: { history: "d".repeat(24000) } },
     }),
   );
   body.set("screenshot", new Blob([image], { type: "image/jpeg" }), "test.jpg");
   const response = await request(`/api/issues/${id}`, "POST", body);
   expect(response.status).toBe(201);
-  expect((await response.json()).description).toBe(description);
+  const saved = await response.json();
+  expect(saved.description).toBe(description);
+  expect(saved.context.diagnostics.history).toHaveLength(24000);
+  const oversized = new FormData();
+  oversized.set(
+    "metadata",
+    JSON.stringify({
+      title: "Oversized synthetic report",
+      description: "",
+      context: { history: "x".repeat(48000) },
+    }),
+  );
+  oversized.set(
+    "screenshot",
+    new Blob([image], { type: "image/jpeg" }),
+    "test.jpg",
+  );
+  expect(
+    (await request(`/api/issues/${crypto.randomUUID()}`, "POST", oversized))
+      .status,
+  ).toBe(413);
 });

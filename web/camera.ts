@@ -13,6 +13,7 @@ import { Vision } from "./vision";
 import { CameraFrames } from "./camera-frames";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import type { Capture, ScanState } from "./types";
+import { diagnostics } from "./diagnostics";
 interface PhotoCapture {
   takePhoto(settings?: {
     imageWidth?: number;
@@ -86,6 +87,7 @@ export class PhoneCamera {
     this.camera = crypto.randomUUID();
     this.stateRevision = 0;
     const generation = ++this.generation;
+    diagnostics.record("camera.start", { stage: "models" });
     this.status("Loading receipt and hand checks…");
     try {
       this.vision = new Vision();
@@ -95,6 +97,7 @@ export class PhoneCamera {
         `Image checks could not start: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    diagnostics.record("camera.start", { stage: "get-user-media" });
     this.status("Starting camera stream…");
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
@@ -105,9 +108,11 @@ export class PhoneCamera {
         frameRate: { ideal: 15, max: 30 },
       },
     });
+    diagnostics.record("camera.start", { stage: "video-play" });
     this.status("Starting camera preview…");
     this.video.srcObject = this.stream;
     await this.video.play();
+    diagnostics.record("camera.start", { stage: "claim" });
     this.status("Connecting camera to the scan station…");
     try {
       await this.claim();
@@ -165,6 +170,10 @@ export class PhoneCamera {
     }
   }
   stop(message = "Camera stopped. Tap Enable camera to reconnect.") {
+    diagnostics.record("camera.stop", {
+      running: this.running,
+      connected: this.connected,
+    });
     if (this.running)
       void api("/api/station/release", {
         method: "POST",
@@ -278,9 +287,28 @@ export class PhoneCamera {
   }
   private async detect(generation: number) {
     const frames = new CameraFrames(this.video);
+    let analyzed = 0;
+    let lastAnalyzed: number | undefined;
     try {
       while (this.running && this.generation === generation) {
         const started = performance.now();
+        diagnostics.record(
+          "camera.frames",
+          {
+            confirmedFrames: frames.confirmed,
+            analyzed,
+            sinceAnalysisMs:
+              lastAnalyzed === undefined ? null : started - lastAnalyzed,
+            mediaTime: this.video.currentTime,
+            readyState: this.video.readyState,
+            width: this.video.videoWidth,
+            height: this.video.videoHeight,
+            connected: this.connected,
+            busy: this.busy,
+            visible: document.visibilityState === "visible",
+          },
+          2000,
+        );
         try {
           if (
             this.connected &&
@@ -294,6 +322,13 @@ export class PhoneCamera {
               await createImageBitmap(this.canvas),
               { preview: this.machine.previewChecks },
             );
+            analyzed++;
+            lastAnalyzed = performance.now();
+            diagnostics.record(
+              "vision",
+              { ms: lastAnalyzed - started, analyzed },
+              2000,
+            );
             if (!this.running || this.generation !== generation) return;
             if (!this.connected) continue;
             // A media-clock fallback keeps older browsers usable, but cannot
@@ -304,6 +339,7 @@ export class PhoneCamera {
             if (id) await this.capture(id);
           }
         } catch (error) {
+          diagnostics.record("camera.error", { stage: "detect" });
           if (!this.running || this.generation !== generation) return;
           this.stop(
             `Image checks stopped. ${messageOf(error)} Tap Enable camera to restart the checks.`,
@@ -454,6 +490,7 @@ export class PhoneCamera {
       await savePending(capture);
       await this.upload(capture);
     } catch (error) {
+      diagnostics.record("camera.error", { stage: "capture", retained });
       this.machine.failed(
         `Capture needs attention: ${messageOf(error)}`,
         retained ? "upload" : "retake",
@@ -470,6 +507,7 @@ export class PhoneCamera {
     try {
       for (const capture of await pendingCaptures()) await this.upload(capture);
     } catch (error) {
+      diagnostics.record("camera.error", { stage: "recover" });
       this.machine.failed(
         `Image retained on phone: ${messageOf(error)} Use Retry upload.`,
         "upload",
@@ -481,6 +519,11 @@ export class PhoneCamera {
   }
   private async upload(capture: PendingCapture) {
     const started = performance.now();
+    diagnostics.record("upload.start", {
+      id: capture.id,
+      bytes: capture.blob.size,
+      method: capture.method,
+    });
     this.machine.value.stage = "uploading";
     this.machine.value.needsAttention = false;
     this.machine.value.phase = "amber";
@@ -526,6 +569,11 @@ export class PhoneCamera {
     if (!["accepted", "rejected", "manual-review"].includes(final.status))
       throw new Error("Storage acknowledgement incomplete.");
     await acknowledge(capture.id);
+    diagnostics.record("upload.saved", {
+      id: capture.id,
+      status: final.status,
+      ms: performance.now() - started,
+    });
     if (final.status === "accepted" || final.status === "manual-review") {
       this.machine.value.timings = {
         ...this.machine.value.timings,

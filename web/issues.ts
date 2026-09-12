@@ -1,6 +1,7 @@
 import { api } from "./api";
 import { messageOf } from "./errors";
 import type { ScanState } from "./types";
+import { diagnosticSnapshot } from "./diagnostics";
 
 interface Issue {
   id: string;
@@ -9,6 +10,7 @@ interface Issue {
   status: string;
   created_at: string;
   screenshot: string;
+  context?: { diagnostics?: ReturnType<typeof diagnosticSnapshot> };
   updates?: { status: string; note: string; created_at: string }[];
 }
 const button = (text: string, action: () => void) => {
@@ -71,6 +73,8 @@ async function screenshot(): Promise<Blob> {
 }
 
 export async function reportIssue(state: ScanState | undefined): Promise<void> {
+  // Freeze history before screenshot rendering or form interaction.
+  const diagnostics = diagnosticSnapshot();
   // Freeze the displayed page before adding the report form. Nothing is sent externally.
   const shot = await screenshot();
   const id = crypto.randomUUID();
@@ -82,11 +86,12 @@ export async function reportIssue(state: ScanState | undefined): Promise<void> {
     lastCapture: state?.lastCapture,
     activeId: state?.activeId,
     retakeOf: state?.retakeOf,
+    diagnostics,
   };
   const dialog = document.createElement("dialog");
   dialog.className = "issue-dialog";
   dialog.setAttribute("aria-label", "Report a private issue");
-  dialog.innerHTML = `<h2>Report an issue privately</h2><p>This scanner screenshot and your description stay in your private instance.</p><form><label>Title<input name="title" required maxlength="160"></label><label>What happened?<textarea name="description" maxlength="8000" rows="4"></textarea></label><img class="issue-screenshot" alt="Screenshot attached to this private report"><label class="toggle"><input type="checkbox" name="github"> Create GitHub issue so the developer is notified</label><p class="muted">Optional, off by default. Opens a public draft for you to review. Your private description, screenshot and receipt details are never copied to GitHub.</p><p class="issue-feedback" role="status"></p><div class="controls"><button type="submit">Save private issue</button><button type="button" class="secondary" data-close>Cancel</button></div></form>`;
+  dialog.innerHTML = `<h2>Report an issue privately</h2><p>The screenshot, your description and up to two minutes of diagnostics from this device stay in your private instance. Report before refreshing to preserve the history.</p><form><label>Title<input name="title" required maxlength="160"></label><label>What happened?<textarea name="description" maxlength="8000" rows="4"></textarea></label><img class="issue-screenshot" alt="Screenshot attached to this private report"><label class="toggle"><input type="checkbox" name="github"> Offer a public GitHub issue draft</label><p class="muted">Optional, off by default. Opens a public draft for you to review. Your private description, screenshot and receipt details are never copied to GitHub.</p><p class="issue-feedback" role="status"></p><div class="controls"><button type="submit">Save private issue</button><button type="button" class="secondary" data-close>Cancel</button></div></form>`;
   const objectUrl = URL.createObjectURL(shot);
   dialog.querySelector<HTMLImageElement>("img")!.src = objectUrl;
   dialog.querySelector<HTMLButtonElement>("[data-close]")!.onclick = () =>
@@ -223,6 +228,16 @@ export async function mountIssues(app: HTMLElement): Promise<void> {
       history,
       form,
     );
+    if (details.context?.diagnostics) {
+      const diagnostics = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Diagnostic history";
+      const data = document.createElement("pre");
+      data.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere";
+      data.textContent = JSON.stringify(details.context.diagnostics, null, 2);
+      diagnostics.append(summary, data);
+      dialog.append(diagnostics);
+    }
     dialog.onclose = () => dialog.remove();
     document.body.append(dialog);
     dialog.showModal();
