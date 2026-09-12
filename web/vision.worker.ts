@@ -5,6 +5,7 @@ import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
 import { measurePrint } from "./print-quality";
+import { hasPlausiblePaperCorners } from "./paper-geometry";
 let cv: typeof CV;
 let hands: HandLandmarker;
 let previous: Uint8Array | undefined;
@@ -299,6 +300,13 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     // Conservative: any detected hand blocks capture, including fingertips near the boundary.
     if (handPoints.length) {
       q.reason = "Hand or fingers detected. Move them out of view.";
+      return q;
+    }
+    // Check only after the multiple-region check: discarding distorted candidates
+    // earlier could hide a second sheet. Texture can pass the print checks below.
+    if (!hasPlausiblePaperCorners(points)) {
+      q.reason =
+        "Paper outline is too distorted. Flatten the paper and keep the camera above it, or use Force take for manual review.";
       return q;
     }
     const cropped = use(crop(source, q.quad));

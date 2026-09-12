@@ -468,7 +468,7 @@ export class PhoneCamera {
           manualCapture: capture.manual === true,
           sourcePixels: capture.sourcePixels,
           quality: capture.quality,
-          checks: "browser-opencv-mediapipe-v4-narrow-receipts",
+          checks: "browser-opencv-mediapipe-v5-paper-corners",
         }),
       },
     });
