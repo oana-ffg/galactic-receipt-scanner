@@ -7,6 +7,7 @@ export async function readOriginal(id: string) {
   const response = await fetch(`/api/files/${id}/raw`, {
     cache: "no-store",
     redirect: "error",
+    signal: AbortSignal.timeout(45000),
   });
   if (!response.ok) throw new Error("Could not retrieve the original.");
   const bytes = await response.arrayBuffer();

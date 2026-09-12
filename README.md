@@ -24,6 +24,7 @@ public signup, shared receipt database, pairing secret or public file bucket.
 - OpenCV paper edges, focus/print/motion checks and MediaPipe hand detection in a phone worker.
 - Direct live video and controls between owner-authenticated devices when the network allows it, with an Internet preview fallback.
 - Full-resolution original capture; crops and image PDFs are prepared by Work/Codex after scanning.
+- Recent captures compares the saved original and outline with an unsaved, downloadable PDF draft, prepared on the desktop as rows become visible.
 - Durable D1 metadata and private R2 objects; retry-safe capture IDs and versioned derivatives.
 - Retakes are numbered takes of one receipt: the latest accepted take is current, previous originals stay available, and the receipt is counted once.
 - Pending-upload recovery on the phone; green only after the original and quality metadata are durably saved and the returned checksum is verified.

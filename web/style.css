@@ -261,13 +261,51 @@ h2 {
   font-size: 13px;
   color: #91a3b2;
 }
-.capture-row {
+.capture-heading {
   display: flex;
   justify-content: space-between;
   gap: 20px;
   align-items: center;
+}
+.capture-row {
   padding: 16px 0;
   border-bottom: 1px solid #283541;
+}
+.capture-comparison {
+  display: grid;
+  min-height: 320px;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-top: 16px;
+}
+.capture-comparison figure {
+  margin: 0;
+  min-width: 0;
+  text-align: center;
+}
+.capture-comparison figcaption {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+.capture-comparison .saved-image {
+  width: fit-content;
+  margin: auto;
+  max-width: 100%;
+}
+.capture-comparison img {
+  display: block;
+  max-width: 100%;
+  max-height: 440px;
+  width: auto;
+  height: auto;
+  margin: 0 auto 10px;
+}
+.capture-comparison .saved-image img {
+  margin-bottom: 0;
+}
+.capture-comparison button {
+  display: block;
+  margin: 12px auto;
 }
 .capture-row strong {
   font-size: 14px;
@@ -424,7 +462,7 @@ dialog::backdrop {
     flex-direction: column;
     gap: 8px;
   }
-  .capture-row {
+  .capture-heading {
     align-items: flex-start;
     flex-direction: column;
     gap: 10px;

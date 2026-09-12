@@ -93,7 +93,12 @@ function crop(src: CV.Mat, quad: number[][]): CV.Mat {
     transform.delete();
   }
 }
-function analyze(bitmap: ImageBitmap, full: boolean): Quality {
+type OutputQuality = Quality & { outputQuad?: number[][] };
+function analyze(
+  bitmap: ImageBitmap,
+  full: boolean,
+  outputs = false,
+): OutputQuality {
   const scale = Math.min(1, 800 / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale);
   const height = Math.round(bitmap.height * scale);
@@ -109,7 +114,7 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     allocated.push(mat);
     return mat;
   };
-  const q: Quality = {
+  const q: OutputQuality = {
     ok: false,
     quad: null,
     hands: handPoints,
@@ -438,13 +443,37 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
       Math.max(...q.quad.map((p) => p[1])),
     ];
     q.reason = "Image checks passed.";
+    if (outputs) {
+      // Containment corners may bridge folds and must not be treated as true
+      // perspective correspondences. A rotated rectangle preserves text shape.
+      // This output-only fit cannot make a rejected camera frame pass.
+      const boundary = use(
+        cv.matFromArray(
+          papers[0].contour.length,
+          1,
+          cv.CV_32SC2,
+          papers[0].contour.flat(),
+        ),
+      );
+      q.outputQuad = ordered(
+        cv.RotatedRect.points(cv.minAreaRect(boundary)).map(({ x, y }) => [
+          x,
+          y,
+        ]),
+      ).map(([x, y]) => [x / canvas.width, y / canvas.height]);
+    }
     return q;
   } finally {
     allocated.reverse().forEach((m) => m.delete());
   }
 }
 async function process(bitmap: ImageBitmap, full: boolean, outputs: boolean) {
-  const quality = analyze(bitmap, full);
+  if (outputs) {
+    // Saved originals are independent documents, not consecutive camera frames.
+    previous = undefined;
+    paperBounds = undefined;
+  }
+  const quality = analyze(bitmap, full, outputs);
   if (!outputs || !quality.ok) return { quality };
   const frame = new OffscreenCanvas(bitmap.width, bitmap.height);
   const context = frame.getContext("2d")!;
@@ -454,7 +483,23 @@ async function process(bitmap: ImageBitmap, full: boolean, outputs: boolean) {
   );
   let cropped: CV.Mat | undefined;
   try {
-    cropped = crop(source, quality.quad!);
+    const outputQuad = quality.outputQuad!;
+    const center = outputQuad.reduce(
+      (s, p) => [s[0] + p[0] / 4, s[1] + p[1] / 4],
+      [0, 0],
+    );
+    if (
+      outputQuad.some((p) =>
+        p.some((v, i) => {
+          const edge = center[i] + (v - center[i]) * 1.025;
+          return edge < 0 || edge > 1;
+        }),
+      )
+    )
+      throw new Error(
+        "The PDF crop needs more space around the paper. Review the original.",
+      );
+    cropped = crop(source, outputQuad);
     frame.width = cropped.cols;
     frame.height = cropped.rows;
     context.putImageData(

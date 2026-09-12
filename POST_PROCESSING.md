@@ -42,6 +42,15 @@ The open dashboard must remain available during browser processing. If interrupt
 resume from saved output status and the manifest. No external OCR account or API key is
 required. The engine and pinned language models are served by the private Site.
 
+Recent captures shows the original with its saved outline beside an unsaved PDF draft.
+Visible rows are processed one at a time on the desktop, after checking the original's
+hash. The draft reruns current checks and uses a rotated crop around the detected paper;
+it does not stretch folded corners into a rectangle or flatten physical creases.
+The preview shows a thumbnail of the exact image embedded in its downloadable PDF.
+Drafts do not change saved artifacts, capture status or which retake is current. A failed
+check leaves the original available with an explanation. Review the output before using
+`prepare_receipt_outputs` to persist a derivative; old saved PDFs remain separate.
+
 The bundled engine is Tesseract.js 7 with the maintainer's best-integer Danish/English
 models. Model hashes are recorded in each extraction. See the upstream
 [language-model documentation](https://github.com/naptha/tessdata) and

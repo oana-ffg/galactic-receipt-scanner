@@ -1,3 +1,5 @@
+import { CapturePreviews } from "./capture-previews";
+import { edgeOverlay } from "./paper-overlay";
 import { api } from "./api";
 import { messageOf } from "./errors";
 import type { Capture, ScanState } from "./types";
@@ -5,34 +7,8 @@ import type { Capture, ScanState } from "./types";
 type Page = { captures: Capture[]; next: string | null };
 const rawUrl = (id: string) => `/api/files/${id}/raw`;
 
-function edgeOverlay(capture: Capture): SVGSVGElement {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 1000 1000");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("aria-hidden", "true");
-  const points = capture.metadata.quality?.quad;
-  if (
-    points?.length === 4 &&
-    points.every((p) => p.length === 2 && p.every(Number.isFinite))
-  ) {
-    const polygon = document.createElementNS(svg.namespaceURI, "polygon");
-    polygon.setAttribute(
-      "points",
-      points.map(([x, y]) => `${x * 1000},${y * 1000}`).join(" "),
-    );
-    polygon.setAttribute("fill", "none");
-    polygon.setAttribute(
-      "stroke",
-      capture.status === "accepted" ? "#64e3ac" : "#ffc568",
-    );
-    polygon.setAttribute("stroke-width", "2");
-    polygon.setAttribute("vector-effect", "non-scaling-stroke");
-    svg.append(polygon);
-  }
-  return svg;
-}
-
 export class CaptureLibrary {
+  private previews = new CapturePreviews();
   private before: (string | null)[] = [null];
   private next: string | null = null;
   private busy = false;
@@ -118,6 +94,7 @@ export class CaptureLibrary {
       )
         void this.show(this.latest);
       this.next = page.next;
+      this.previews.setPage(page.captures);
       this.list.replaceChildren();
       if (!page.captures.length)
         this.list.textContent =
@@ -206,7 +183,10 @@ export class CaptureLibrary {
       link.href = `/api/files/${capture.id}/${kind}`;
       links.append(link);
     }
-    row.append(info, links);
+    const heading = document.createElement("div");
+    heading.className = "capture-heading";
+    heading.append(info, links);
+    row.append(heading, this.previews.element(capture.id));
     return row;
   }
   private async show(capture: Capture) {
