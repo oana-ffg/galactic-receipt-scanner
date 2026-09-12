@@ -3,6 +3,7 @@ import { readOriginal } from "./original";
 import { edgeOverlay } from "./paper-overlay";
 import type { Capture } from "./types";
 import { Vision } from "./vision";
+import { imageZoomButton, inspectImage } from "./image-viewer";
 
 type Preview = {
   capture: Capture;
@@ -65,7 +66,7 @@ export class CapturePreviews {
       const original = document.createElement("figure");
       const label = document.createElement("figcaption");
       label.textContent = "Original · saved outline";
-      const stage = document.createElement("div");
+      const stage = document.createElement("span");
       stage.className = "saved-image";
       const image = document.createElement("img");
       image.alt = "Original photo with saved paper outline";
@@ -73,7 +74,21 @@ export class CapturePreviews {
         label.textContent = "Original could not load. Reload to retry.";
       };
       stage.append(image, edgeOverlay(capture));
-      original.append(label, stage);
+      original.append(
+        label,
+        imageZoomButton(stage, "Zoom original photo", () =>
+          inspectImage({
+            title: "Inspect saved original",
+            alt: "Full-resolution saved original receipt",
+            image: `/api/files/${capture.id}/raw`,
+            capture,
+            download: {
+              source: `/api/files/${capture.id}/raw`,
+              label: "Download original",
+            },
+          }),
+        ),
+      );
       const output = document.createElement("figure");
       output.textContent = "PDF preview will load when visible.";
       element.append(original, output);
@@ -138,7 +153,21 @@ export class CapturePreviews {
           const note = document.createElement("p");
           note.textContent =
             "Check straightening and all paper edges. This preview is not saved to your library.";
-          entry.output.replaceChildren(label, image, download, note);
+          const fullImage = result.image;
+          const fullPdf = result.pdf;
+          const zoom = imageZoomButton(image, "Zoom PDF draft", () =>
+            inspectImage({
+              title: "Inspect PDF draft",
+              alt: "Full-resolution image used in the PDF draft",
+              image: fullImage,
+              download: {
+                source: fullPdf,
+                label: "Download this PDF draft",
+                filename: `capture-${entry.capture.id}-draft.pdf`,
+              },
+            }),
+          );
+          entry.output.replaceChildren(label, zoom, download, note);
           entry.state = "done";
         } catch (error) {
           if (this.entries.get(entry.capture.id) !== entry) continue;

@@ -127,12 +127,45 @@ test("PDF drafts preserve baselines and recent captures show both versions witho
     row.getByText("PDF draft · recalculated from original"),
   ).toBeVisible({ timeout: 30000 });
   await expect(row.locator(".capture-comparison img")).toHaveCount(2);
+  await expect(
+    row.getByRole("button", { name: "Original", exact: true }),
+  ).toHaveCount(0);
+  await row.getByRole("button", { name: "Zoom original photo" }).focus();
+  await page.keyboard.press("Enter");
+  const originalDialog = page.getByRole("dialog", {
+    name: "Inspect saved original",
+  });
+  await expect(originalDialog).toBeVisible();
+  await expect(originalDialog.getByLabel("Detected edges")).toBeChecked();
+  await expect(originalDialog.locator("img")).toHaveJSProperty(
+    "naturalWidth",
+    2000,
+  );
+  await originalDialog.getByRole("button", { name: "Actual pixels" }).click();
+  await expect(originalDialog.locator(".saved-image")).toHaveClass(
+    /actual-size/,
+  );
+  await page.keyboard.press("Escape");
+  await expect(originalDialog).toHaveCount(0);
+  await row.getByRole("button", { name: "Zoom PDF draft" }).click();
+  const pdfDialog = page.getByRole("dialog", { name: "Inspect PDF draft" });
+  await expect(pdfDialog).toBeVisible();
+  await expect(pdfDialog.locator("img")).toHaveJSProperty("complete", true);
+  expect(
+    await pdfDialog
+      .locator("img")
+      .evaluate((img: HTMLImageElement) => img.naturalWidth),
+  ).toBeGreaterThan(600);
+  await expect(pdfDialog.getByLabel("Detected edges")).toHaveCount(0);
+  await pdfDialog.getByRole("button", { name: "Actual pixels" }).click();
+  await pdfDialog.getByRole("button", { name: "Fit image" }).click();
+  await pdfDialog.getByRole("button", { name: "Close", exact: true }).click();
   const download = await Promise.all([
     page.waitForEvent("download"),
     row.getByRole("link", { name: "Download this PDF draft" }).click(),
   ]);
   expect(download[0].suggestedFilename()).toBe(`capture-${id}-draft.pdf`);
-  expect(sourceReads).toBeLessThanOrEqual(2); // Last saved panel + one verified preview read.
+  expect(sourceReads).toBeLessThanOrEqual(3); // Saved panel, verified preview, full-size inspection.
   expect(writes).toEqual([]);
   await page.screenshot({
     path: "test-results/pdf-comparison-synthetic.png",

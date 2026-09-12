@@ -1,3 +1,4 @@
+import { inspectImage } from "./image-viewer";
 import { CapturePreviews } from "./capture-previews";
 import { edgeOverlay } from "./paper-overlay";
 import { api } from "./api";
@@ -146,14 +147,6 @@ export class CaptureLibrary {
     info.append(title, identity, detail);
     const links = document.createElement("div");
     links.className = "file-links";
-    const view = document.createElement("button");
-    view.className = "secondary";
-    view.textContent = "Original";
-    view.onclick = () => {
-      this.followLatest = false;
-      void this.show(capture);
-      this.panel.scrollIntoView({ block: "nearest" });
-    };
     const retake = document.createElement("button");
     retake.className = "secondary";
     retake.dataset.retake = capture.id;
@@ -172,7 +165,7 @@ export class CaptureLibrary {
         if (this.state) this.updateState(this.state);
       }
     };
-    links.append(view, retake);
+    links.append(retake);
     for (const [kind, label] of [
       ...(capture.outputs.image ? [["image", "Crop"]] : []),
       ...(capture.outputs.pdf ? [["pdf", "PDF"]] : []),
@@ -212,7 +205,14 @@ export class CaptureLibrary {
     zoom.textContent = "Inspect full size";
     zoom.className = "secondary";
     zoom.disabled = true;
-    zoom.onclick = () => this.inspect(capture);
+    zoom.onclick = () =>
+      inspectImage({
+        title: "Inspect saved original",
+        alt: "Full-resolution saved original receipt",
+        image: rawUrl(capture.id),
+        capture,
+        download: { source: rawUrl(capture.id), label: "Download original" },
+      });
     const edges = document.createElement("label");
     edges.className = "toggle";
     const checkbox = document.createElement("input");
@@ -245,72 +245,8 @@ export class CaptureLibrary {
     } catch {
       if (generation === this.selectionGeneration) {
         stage.remove();
-        note.textContent =
-          "Could not load this original. Choose Original again to retry.";
+        note.textContent = "Could not load this original. Reload to retry.";
       }
     }
-  }
-  private inspect(capture: Capture) {
-    const dialog = document.createElement("dialog");
-    dialog.className = "photo-dialog";
-    dialog.setAttribute("aria-label", "Inspect saved original");
-    const controls = document.createElement("div");
-    controls.className = "controls";
-    const close = document.createElement("button");
-    close.textContent = "Close";
-    close.onclick = () => dialog.close();
-    const zoom = document.createElement("button");
-    zoom.textContent = "Actual pixels";
-    zoom.className = "secondary";
-    const download = document.createElement("a");
-    download.textContent = "Download original";
-    download.href = rawUrl(capture.id);
-    controls.append(close, zoom, download);
-    const viewport = document.createElement("div");
-    viewport.className = "photo-viewport";
-    const stage = document.createElement("div");
-    stage.className = "saved-image";
-    const img = document.createElement("img");
-    img.alt = "Full-resolution saved original receipt";
-    img.src = rawUrl(capture.id);
-    const svg = edgeOverlay(capture);
-    const edges = document.createElement("label");
-    edges.className = "toggle";
-    const check = document.createElement("input");
-    check.type = "checkbox";
-    check.checked = true;
-    check.onchange = () => {
-      svg.style.visibility = check.checked ? "visible" : "hidden";
-    };
-    edges.append(check, "Detected edges");
-    controls.append(edges);
-    const fit = () => {
-      if (
-        !stage.classList.contains("actual-size") &&
-        img.naturalWidth &&
-        img.naturalHeight
-      ) {
-        stage.style.width = `${Math.min(viewport.clientWidth, (viewport.clientHeight * img.naturalWidth) / img.naturalHeight)}px`;
-      }
-    };
-    const observer = new ResizeObserver(fit);
-    img.onload = fit;
-    zoom.onclick = () => {
-      const actual = stage.classList.toggle("actual-size");
-      stage.style.width = actual ? `${img.naturalWidth}px` : "";
-      zoom.textContent = actual ? "Fit image" : "Actual pixels";
-      fit();
-    };
-    stage.append(img, svg);
-    viewport.append(stage);
-    dialog.append(controls, viewport);
-    dialog.onclose = () => {
-      observer.disconnect();
-      dialog.remove();
-    };
-    document.body.append(dialog);
-    dialog.showModal();
-    observer.observe(viewport);
-    fit();
   }
 }

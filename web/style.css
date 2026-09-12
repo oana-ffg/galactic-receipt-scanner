@@ -307,6 +307,23 @@ h2 {
   display: block;
   margin: 12px auto;
 }
+.capture-comparison .image-zoom {
+  display: block;
+  padding: 0;
+  margin: 0 auto 10px;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  cursor: zoom-in;
+  max-width: 100%;
+}
+.image-zoom:focus-visible {
+  outline: 2px solid #64e3ac;
+  outline-offset: 4px;
+}
+.capture-comparison .image-zoom img {
+  margin-bottom: 0;
+}
 .capture-row strong {
   font-size: 14px;
 }
@@ -327,6 +344,7 @@ h2 {
   margin-bottom: 24px;
 }
 .saved-image {
+  display: block;
   position: relative;
   width: 100%;
 }
