@@ -1,5 +1,12 @@
 # Galactic receipt scanner
 
+## Project skills
+
+For saved-batch processing, grouping, deduplication, handwriting, invoice checks and
+human review, read [.agents/skills/receipt-processing/SKILL.md](.agents/skills/receipt-processing/SKILL.md).
+It applies to both Codex and ChatGPT Work; the authenticated `/review` page exposes the
+document tools. Processing never runs in the camera capture loop.
+
 ## Purpose and ownership of the work
 
 Build a fast, hands-free receipt capture station. The operator mounts a phone above a

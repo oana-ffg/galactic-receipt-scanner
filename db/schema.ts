@@ -95,3 +95,39 @@ export const issueUpdates = sqliteTable(
     index("issue_updates_issue_created").on(table.issue_id, table.created_at),
   ],
 );
+
+// Processing records are independent of immutable captures and their artifact history.
+export const documentVersions = sqliteTable(
+  "document_versions",
+  {
+    document_id: text("document_id").notNull(),
+    revision: integer("revision").notNull(),
+    payload: text("payload").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("document_version").on(table.document_id, table.revision),
+  ],
+);
+export const documentHeads = sqliteTable("document_heads", {
+  id: text("id").primaryKey(),
+  revision: integer("revision").notNull(),
+});
+export const documentPages = sqliteTable("document_pages", {
+  capture_id: text("capture_id")
+    .primaryKey()
+    .references(() => captures.id),
+  document_id: text("document_id").notNull(),
+});
+export const documentFiles = sqliteTable("document_files", {
+  key: text("key").primaryKey(),
+  document_id: text("document_id").notNull(),
+  revision: integer("revision").notNull(),
+  sha256: text("sha256").notNull(),
+  filename: text("filename").notNull(),
+  created_at: text("created_at").notNull(),
+});
+export const documentNames = sqliteTable("document_names", {
+  filename: text("filename").primaryKey(),
+  document_id: text("document_id").notNull(),
+});

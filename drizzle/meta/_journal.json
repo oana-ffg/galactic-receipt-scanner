@@ -43,6 +43,13 @@
       "when": 1789231080076,
       "tag": "0005_classy_nick_fury",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789248212460,
+      "tag": "0006_true_firestar",
+      "breakpoints": true
     }
   ]
 }

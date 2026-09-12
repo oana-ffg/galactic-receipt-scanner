@@ -1,3 +1,4 @@
+import { registerDocumentTools } from "./document-tools";
 import { api } from "./api";
 import { readOriginal } from "./original";
 import { Vision } from "./vision";
@@ -10,6 +11,7 @@ interface Tool {
   annotations?: { readOnlyHint?: boolean; untrustedContentHint?: boolean };
 }
 export function registerSiteTools(refresh: () => Promise<void>) {
+  registerDocumentTools();
   const context = (
     document as unknown as {
       modelContext?: { registerTool: (tool: Tool) => void };
@@ -228,7 +230,7 @@ export function registerSiteTools(refresh: () => Promise<void>) {
           items: {
             type: "object",
             properties: {
-              kind: { enum: ["text", "logo", "unreadable"] },
+              kind: { enum: ["text", "logo", "handwriting", "unreadable"] },
               text: { type: ["string", "null"] },
               box: {
                 type: "array",
@@ -268,7 +270,9 @@ export function registerSiteTools(refresh: () => Promise<void>) {
             unknown
           >;
           return (
-            !["text", "logo", "unreadable"].includes(String(kind)) ||
+            !["text", "logo", "handwriting", "unreadable"].includes(
+              String(kind),
+            ) ||
             (text !== null && typeof text !== "string") ||
             typeof uncertain !== "boolean" ||
             !Array.isArray(box) ||

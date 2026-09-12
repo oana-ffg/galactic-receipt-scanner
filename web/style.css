@@ -570,3 +570,122 @@ header {
     flex-shrink: 0;
   }
 }
+
+.review-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: end;
+}
+.review-toolbar label {
+  display: grid;
+  gap: 0.35rem;
+}
+.review-workspace {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+#review-list {
+  display: grid;
+  gap: 0.6rem;
+  max-height: 80vh;
+  overflow: auto;
+  position: sticky;
+  top: 1rem;
+}
+.review-item {
+  display: grid;
+  gap: 0.35rem;
+  text-align: left;
+  background: #18252f;
+  color: #e4edf2;
+  border: 1px solid #3b5060;
+  padding: 1rem;
+  word-break: break-word;
+}
+.review-item small {
+  font-size: 0.875rem;
+  font-weight: 400;
+}
+.review-item[aria-current="true"] {
+  border-color: #64e3ac;
+}
+.review-item.broken {
+  border-left: 5px solid #fb8585;
+}
+.review-item.review {
+  border-left: 5px solid #f1c76b;
+}
+.review-item.ready {
+  border-left: 5px solid #64e3ac;
+}
+.review-reasons {
+  padding: 1rem 1rem 1rem 2rem;
+  background: #27303a;
+}
+.review-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+.review-sources img {
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  background: #0d1319;
+}
+.review-form {
+  display: grid;
+  gap: 1rem;
+  margin-block: 1.5rem;
+}
+.review-field {
+  display: grid;
+  gap: 0.4rem;
+}
+.review-field input,
+.review-field textarea,
+.review-field select,
+.review-toolbar input,
+.review-toolbar select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.65rem;
+  background: #101820;
+  color: #edf3f7;
+  border: 1px solid #536674;
+  border-radius: 0.35rem;
+  font: inherit;
+}
+.review-field textarea {
+  min-height: 6rem;
+}
+.review-form fieldset {
+  display: grid;
+  gap: 0.7rem;
+  border: 1px solid #536674;
+}
+.review-form details .review-field {
+  margin-block: 1rem;
+}
+#review-detail {
+  min-width: 0;
+}
+#review-detail > details {
+  margin-block: 1rem;
+}
+#review-message {
+  color: #f1c76b;
+  min-height: 1.5em;
+}
+@media (max-width: 760px) {
+  .review-workspace {
+    grid-template-columns: 1fr;
+  }
+  #review-list {
+    position: static;
+    max-height: 35vh;
+  }
+}

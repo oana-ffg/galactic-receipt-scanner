@@ -149,10 +149,15 @@ export class ReceiptOcr {
         { segmentation: "SINGLE_BLOCK", text: data.text, lines: bodyLines },
       ],
       uncertainties: uncertainWords,
+      handwriting: {
+        status: "unchecked",
+        method: "requires visual inspection",
+      },
       review: {
         required: true,
         notes: [
           "Compare text and amounts against the original. Confidence is a heuristic, not verification.",
+          "Inspect the entire original for handwriting and OCR omissions, including outside the OCR region. Printed-text OCR cannot rule out handwriting.",
           "Inspect logos and graphics visually. OCR does not identify brands or guarantee detection of stylized lettering.",
           ...(data.text.trim() ? [] : ["No readable text was recognized."]),
         ],

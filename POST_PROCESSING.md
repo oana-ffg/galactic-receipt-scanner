@@ -1,5 +1,12 @@
 # Processing a saved batch
 
+For document grouping, deduplication, named multi-page PDFs, handwriting and invoice
+checks, use the project [receipt-processing skill](.agents/skills/receipt-processing/SKILL.md).
+The owner-only **Review receipts** tab at `/review` shows Ready, Needs review, Broken and
+Duplicate records, with source images, editable decisions and history. The instructions
+below describe the underlying capture/OCR artifacts; document processing adds a separate
+versioned layer and never rewrites scan timestamps or source metadata.
+
 This workflow belongs to the owner's Work/Codex session after scanning. The operator
 does not need to sort receipts, transcribe text or create PDFs while feeding the camera.
 
@@ -32,7 +39,7 @@ does not need to sort receipts, transcribe text or create PDFs while feeding the
 6. Save the source-backed transcription with `save_receipt_transcription`. Include
    provenance, explicit uncertainties, and regions `{kind, text, box, uncertain}`.
    `box` is `[left, top, right, bottom]` in original pixels; `kind` is `text`, `logo`
-   or `unreadable`. Use null text where it cannot be read. Originals and earlier OCR
+   `handwriting` or `unreadable`. Use null text where it cannot be read. Originals and earlier OCR
    versions remain intact. Transcription remains unverified for accounting purposes.
 7. Use `prepare_receipt_outputs` for crops and image PDFs only when wanted. Failures
    leave the original intact. Reconcile the final manifest against all captured IDs:

@@ -13,6 +13,7 @@ import {
 } from "./http";
 import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
+import { documentRoute } from "./documents";
 import { isControlCommand, retakeTarget } from "../web/control-command";
 export interface Env {
   RETIRED_CAPTURE_IDS?: string;
@@ -194,6 +195,13 @@ function requireQuality(metadata: Record<string, unknown>) {
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  const documentResponse = await documentRoute(request, env, async () => {
+    const rows = await env.DB.prepare(
+      `${captureSelection} FROM captures ORDER BY created_at,id`,
+    ).all<CaptureRow>();
+    return rows.results.map(publicCapture) as import("../web/types").Capture[];
+  });
+  if (documentResponse) return documentResponse;
   const method = request.method;
   const issueResponse = await issueRoute(request, env);
   if (issueResponse) return issueResponse;
@@ -754,7 +762,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   // Assets are fetched only after owner authorisation; no public bucket or asset routes.
   return env.ASSETS.fetch(
     new Request(
-      new URL(["/camera", "/issues"].includes(path) ? "/" : path, url.origin),
+      new URL(
+        ["/camera", "/issues", "/review"].includes(path) ? "/" : path,
+        url.origin,
+      ),
       request,
     ),
   );
@@ -774,7 +785,9 @@ export default {
         error instanceof HttpError &&
         [401, 403].includes(error.status) &&
         request.method === "GET" &&
-        ["/", "/camera", "/issues"].includes(new URL(request.url).pathname)
+        ["/", "/camera", "/issues", "/review"].includes(
+          new URL(request.url).pathname,
+        )
       ) {
         const response = secure(accessPage(error.status));
         const nonce = crypto.randomUUID().replaceAll("-", "");

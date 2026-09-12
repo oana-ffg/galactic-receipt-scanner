@@ -1,0 +1,315 @@
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
+import { newDocument } from "../web/documents";
+let mf: Awaited<ReturnType<typeof runtime>>;
+beforeAll(async () => {
+  mf = await runtime();
+}, 30000);
+afterAll(async () => {
+  await mf?.dispose();
+});
+async function request(
+  path: string,
+  method = "GET",
+  body?: BodyInit,
+  headers = {},
+) {
+  return mf.dispatchFetch(origin + path, {
+    method,
+    body,
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      ...headers,
+    },
+  });
+}
+async function capture() {
+  const id = crypto.randomUUID();
+  const r = await request(
+    `/api/captures/${id}`,
+    "POST",
+    new Uint8Array([255, 216, 255, Math.floor(Math.random() * 255)]),
+    {
+      "X-Capture-Status": "accepted",
+      "X-Capture-Metadata": JSON.stringify({
+        sourcePixels: [1400, 2200],
+        quality: { ok: true, receiptPixels: [1400, 2200] },
+      }),
+    },
+  );
+  expect(r.status).toBe(200);
+  return r.json();
+}
+const save = (documents: unknown[]) =>
+  request("/api/documents", "POST", JSON.stringify({ documents }));
+it("preserves scan times and sources through non-adjacent grouping, splitting and optimistic revisions", async () => {
+  const a = await capture(),
+    middle = await capture(),
+    b = await capture();
+  const one = newDocument(a),
+    two = newDocument(b);
+  one.vendor = two.vendor = "Synthetic shop";
+  one.receiptDate = two.receiptDate = "2026-02-01";
+  expect((await save([one, two])).status).toBe(200);
+  const first = await (await request("/api/documents")).json();
+  const savedA = first.documents.find((d: any) => d.id === a.id),
+    savedB = first.documents.find((d: any) => d.id === b.id);
+  expect(savedA.filename).toBe("2026-02-01-synthetic_shop.pdf");
+  expect(savedB.filename).toBe("2026-02-01-synthetic_shop_2.pdf");
+  expect(savedA.scannedAt).toEqual([a.created_at]);
+  savedA.pages.push(...savedB.pages);
+  savedA.evidence = "Same synthetic invoice number and pages 1/2, 2/2.";
+  savedB.pages = [];
+  savedB.mergedInto = a.id;
+  savedB.evidence = savedA.evidence;
+  expect((await save([savedA, savedB])).status).toBe(200);
+  expect((await save([savedA, savedB])).status).toBe(409);
+  const second = await (await request("/api/documents")).json();
+  const grouped = second.documents.find((d: any) => d.id === a.id);
+  expect(grouped.pages.map((p: any) => p.captureId)).toEqual([a.id, b.id]);
+  expect(second.documents.some((d: any) => d.id === middle.id)).toBe(true);
+  expect((await request(`/api/files/${b.id}/raw`)).status).toBe(200);
+  const drop = { ...grouped, pages: [grouped.pages[0]] };
+  expect((await save([drop])).status).toBe(400);
+  const separate = { ...newDocument(b), id: crypto.randomUUID() };
+  expect((await save([drop, separate])).status).toBe(200);
+  expect(
+    (await (await request(`/api/documents/${a.id}/history`)).json()).length,
+  ).toBe(3);
+});
+it("rejects spoofed sources, missing fields, cyclic duplicates and invalid money", async () => {
+  const c = await capture(),
+    d = newDocument(c);
+  expect((await save([{}])).status).toBe(400);
+  expect(
+    (await save([{ ...d, pages: [{ ...d.pages[0], sha256: "f".repeat(64) }] }]))
+      .status,
+  ).toBe(400);
+  const another = newDocument(await capture());
+  d.duplicateOf = another.id;
+  another.duplicateOf = d.id;
+  d.evidence = another.evidence = "Synthetic duplicate evidence";
+  expect((await save([d, another])).status).toBe(400);
+  d.duplicateOf = null;
+  expect(
+    (
+      await save([
+        {
+          ...d,
+          invoice: {
+            currency: "DKK",
+            lines: [1.5],
+            adjustments: [],
+            total: 1.5,
+            basis: "gross",
+            evidence: "Test",
+          },
+        },
+      ])
+    ).status,
+  ).toBe(400);
+});
+it("never hides an unassigned current original on its first processing save", async () => {
+  const a = newDocument(await capture()),
+    b = newDocument(await capture());
+  expect(
+    (
+      await save([
+        {
+          ...a,
+          pages: [],
+          mergedInto: b.id,
+          evidence: "Attempted virtual merge",
+        },
+      ])
+    ).status,
+  ).toBe(400);
+  expect((await save([{ ...a, pages: b.pages }])).status).toBe(400);
+  const catalog = await (await request("/api/documents")).json();
+  expect(
+    catalog.documents.some((d: any) =>
+      d.pages.some((p: any) => p.captureId === a.id),
+    ),
+  ).toBe(true);
+  expect(
+    (
+      await save([
+        {
+          ...a,
+          checks: { ...a.checks, pdf: true },
+          evidence: "Premature PDF check",
+        },
+      ])
+    ).status,
+  ).toBe(400);
+  a.duplicateOf = b.id;
+  a.broken = ["OCR failed on synthetic source"];
+  a.evidence = "Proposed duplicate";
+  expect((await save([a])).status).toBe(200);
+  const updated = await (await request("/api/documents")).json();
+  expect(updated.documents.find((d: any) => d.id === a.id).status).toBe(
+    "broken",
+  );
+});
+it("keeps broken totals broken and invalidates output after page changes", async () => {
+  const c = await capture(),
+    d = newDocument(c);
+  d.vendor = "Invoice test";
+  d.receiptDate = "2026-02-02";
+  d.kind = "invoice";
+  d.evidence = "Synthetic invoice";
+  d.invoice = {
+    currency: "DKK",
+    lines: [100, 200],
+    adjustments: [],
+    total: 301,
+    basis: "gross",
+    evidence: "Source lines",
+  };
+  expect((await save([d])).status).toBe(200);
+  let catalog = await (await request("/api/documents")).json();
+  let current = catalog.documents.find((x: any) => x.id === c.id);
+  expect(current.status).toBe("broken");
+  const uploaded = await request(
+    `/api/documents/${d.id}/pdf?revision=1`,
+    "POST",
+    "%PDF-1.7\nsynthetic test envelope",
+  );
+  expect(uploaded.status).toBe(200);
+  const pdf = await uploaded.json();
+  const pinned = `/api/documents/${d.id}/pdf?revision=1&version=${pdf.sha256}`;
+  expect((await request(pinned)).status).toBe(200);
+  current.pages[0].rotation = 90;
+  expect((await save([current])).status).toBe(200);
+  catalog = await (await request("/api/documents")).json();
+  current = catalog.documents.find((x: any) => x.id === c.id);
+  expect(current.pdf).toBeNull();
+  expect((await request(pinned)).status).toBe(200);
+  expect(
+    (
+      await request(
+        `/api/documents/${d.id}/pdf?revision=1`,
+        "POST",
+        "%PDF-stale",
+      )
+    ).status,
+  ).toBe(409);
+});
+it("allows only one concurrent revision and keeps access owner-only", async () => {
+  const d = newDocument(await capture());
+  expect((await save([d])).status).toBe(200);
+  d.revision = 1;
+  const results = await Promise.all([
+    save([{ ...d, vendor: "Choice A" }]),
+    save([{ ...d, vendor: "Choice B" }]),
+  ]);
+  expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+  expect((await mf.dispatchFetch(origin + "/api/documents")).status).toBe(401);
+  expect(
+    (
+      await request("/api/documents", "GET", undefined, {
+        "oai-authenticated-user-email": "other@example.test",
+      })
+    ).status,
+  ).toBe(403);
+  expect((await request("/review")).status).toBe(200);
+});
+it("paginates compact summaries and returns individual sources without all batch text", async () => {
+  const a = newDocument(await capture()),
+    b = newDocument(await capture());
+  a.vendor = "Synthetic Orchard";
+  a.text = "unique distant continuation ZX123";
+  b.text = "another document";
+  expect((await save([a, b])).status).toBe(200);
+  const first = await (
+    await request("/api/documents?summary=1&limit=1")
+  ).json();
+  expect(first.documents).toHaveLength(1);
+  expect(first.next).toBeTruthy();
+  expect(first.documents[0]).not.toHaveProperty("text");
+  const second = await (
+    await request(`/api/documents?summary=1&limit=1&after=${first.next}`)
+  ).json();
+  expect(second.documents[0].id).not.toBe(first.documents[0].id);
+  const search = await (
+    await request("/api/documents?summary=1&q=ZX123")
+  ).json();
+  expect(search.documents.map((d: any) => d.id)).toEqual([a.id]);
+  const detail = await (await request(`/api/documents/${a.id}`)).json();
+  expect(detail.document.text).toBe(a.text);
+  expect(detail.captures.map((c: any) => c.id)).toEqual([a.id]);
+  const lookup = await (
+    await request(`/api/documents?captureId=${a.id}`)
+  ).json();
+  expect(lookup.document.id).toBe(a.id);
+});
+it("keeps unresolved reasons on retained documents during agent-driven merges", async () => {
+  const a = newDocument(await capture()),
+    b = newDocument(await capture());
+  a.broken = ["OCR failed on a synthetic source"];
+  expect((await save([a, b])).status).toBe(200);
+  a.revision = b.revision = 1;
+  b.pages.push(...a.pages);
+  a.pages = [];
+  a.mergedInto = b.id;
+  a.evidence = "Synthetic merge";
+  expect((await save([a, b])).status).toBe(400);
+  b.broken = [...a.broken];
+  expect((await save([a, b])).status).toBe(200);
+  expect(
+    (await (await request(`/api/documents/${b.id}`)).json()).document.status,
+  ).toBe("broken");
+});
+it("pins visual approval to a stored PDF hash and requires review after regeneration", async () => {
+  const d = newDocument(await capture());
+  d.vendor = "Synthetic approved";
+  d.receiptDate = "2026-01-01";
+  d.kind = "receipt";
+  d.handwriting = "absent";
+  d.evidence = "Synthetic originals inspected";
+  d.checks = { visual: true, transcription: true, grouping: true, pdf: false };
+  expect((await save([d])).status).toBe(200);
+  const first = await (
+    await request(
+      `/api/documents/${d.id}/pdf?revision=1`,
+      "POST",
+      "%PDF-first synthetic output",
+    )
+  ).json();
+  d.revision = 1;
+  d.checks.pdf = true;
+  d.reviewedPdfSha256 = first.sha256;
+  expect((await save([d])).status).toBe(200);
+  expect(
+    (await (await request(`/api/documents/${d.id}`)).json()).document.status,
+  ).toBe("ready");
+  const incoming = newDocument(await capture());
+  expect(
+    (
+      await save([
+        {
+          ...d,
+          revision: 2,
+          pages: [...d.pages, ...incoming.pages],
+          checks: { ...d.checks, pdf: false },
+        },
+      ])
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await request(
+        `/api/documents/${d.id}/pdf?revision=2`,
+        "POST",
+        "%PDF-second synthetic output",
+      )
+    ).status,
+  ).toBe(200);
+  const changed = await (await request(`/api/documents/${d.id}`)).json();
+  expect(changed.document.status).toBe("review");
+  expect(changed.document.reasons.join(" ")).toContain(
+    "visually reviewed version",
+  );
+});

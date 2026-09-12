@@ -18,12 +18,14 @@ let library: CaptureLibrary | undefined;
 let lastState: ScanState | undefined;
 let retakePending: string | null = null;
 
-if (location.pathname === "/issues") {
+if (location.pathname === "/review") {
+  void import("./review").then((module) => module.mountReview(app));
+} else if (location.pathname === "/issues") {
   void import("./issues").then((module) => module.mountIssues(app));
 } else {
   app.classList.toggle("camera-page", isCamera);
   app.innerHTML = `
-    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/issues">Private issues</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
+    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/review">Review receipts</a><a href="/issues">Private issues</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
     ${isCamera ? '<div class="camera-start"><button id="enable">Enable camera</button><p>Scanning starts automatically once the camera is ready.</p></div>' : ""}
     ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
@@ -563,4 +565,5 @@ async function refreshLibrary(): Promise<void> {
 }
 
 import { registerSiteTools } from "./site-tools";
-if (!isCamera) registerSiteTools(refreshLibrary);
+if (!isCamera && location.pathname !== "/review")
+  registerSiteTools(refreshLibrary);
