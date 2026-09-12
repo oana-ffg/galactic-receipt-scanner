@@ -8,8 +8,14 @@ afterAll(async () => {
   await mf?.dispose();
 });
 const image = new Uint8Array([255, 216, 255, 1, 2, 3]);
-const request = (path: string, method = "GET", body?: BodyInit, headers = {}) =>
-  mf.dispatchFetch(origin + path, {
+async function request(
+  path: string,
+  method = "GET",
+  body?: BodyInit,
+  headers = {},
+) {
+  // Serialize with the same FormData/Request implementation before crossing into Miniflare.
+  const incoming = new Request(origin + path, {
     method,
     body,
     headers: {
@@ -19,6 +25,12 @@ const request = (path: string, method = "GET", body?: BodyInit, headers = {}) =>
       ...headers,
     },
   });
+  return mf.dispatchFetch(incoming.url, {
+    method,
+    headers: Object.fromEntries(incoming.headers),
+    body: incoming.body ? await incoming.arrayBuffer() : undefined,
+  });
+}
 const upload = (id: string, status: string, parent?: string) =>
   request(`/api/captures/${id}`, "POST", image, {
     "X-Capture-Status": status,
@@ -89,28 +101,35 @@ it("paginates without missing or repeating captures and validates limits", async
 });
 it("keeps private issue screenshot and original report immutable across retries and status updates", async () => {
   const id = crypto.randomUUID();
-  const headers = {
-    "X-Issue-Metadata": encodeURIComponent(
+  const report = (pixels = image) => {
+    const body = new FormData();
+    body.set(
+      "metadata",
       JSON.stringify({
         title: "Synthetic glare report",
         description: "Only synthetic test data",
         context: { phase: "red" },
       }),
-    ),
+    );
+    body.set(
+      "screenshot",
+      new Blob([pixels], { type: "image/jpeg" }),
+      "test.jpg",
+    );
+    return body;
   };
-  expect(
-    (await request(`/api/issues/${id}`, "POST", image, headers)).status,
-  ).toBe(201);
-  expect(
-    (await request(`/api/issues/${id}`, "POST", image, headers)).status,
-  ).toBe(200);
+  expect((await request(`/api/issues/${id}`, "POST", report())).status).toBe(
+    201,
+  );
+  expect((await request(`/api/issues/${id}`, "POST", report())).status).toBe(
+    200,
+  );
   expect(
     (
       await request(
         `/api/issues/${id}`,
         "POST",
-        new Uint8Array([255, 216, 255, 9]),
-        headers,
+        report(new Uint8Array([255, 216, 255, 9])),
       )
     ).status,
   ).toBe(409);
@@ -228,4 +247,23 @@ it("queues targeted retakes when a saved acknowledgement is newer than the store
   expect(
     await db.prepare("SELECT command FROM station WHERE id=1").first(),
   ).toEqual({ command: `retake:${id}` });
+});
+
+it("saves maximum-length Unicode issue descriptions without header expansion", async () => {
+  const id = crypto.randomUUID();
+  const description = "æøå😀".repeat(1600);
+  expect(description.length).toBe(8000);
+  const body = new FormData();
+  body.set(
+    "metadata",
+    JSON.stringify({
+      title: "Danish screenshot report",
+      description,
+      context: {},
+    }),
+  );
+  body.set("screenshot", new Blob([image], { type: "image/jpeg" }), "test.jpg");
+  const response = await request(`/api/issues/${id}`, "POST", body);
+  expect(response.status).toBe(201);
+  expect((await response.json()).description).toBe(description);
 });

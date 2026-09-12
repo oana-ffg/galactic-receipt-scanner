@@ -60,11 +60,37 @@ export async function issueRoute(
   const [, id, screenshot] = match;
   requireThat(UUID.test(id), 400, "Invalid issue ID.");
   if (request.method === "POST" && !screenshot) {
-    const header = request.headers.get("x-issue-metadata") ?? "";
-    requireThat(header.length <= 24000, 413, "Issue description is too large.");
+    const contentType = request.headers.get("content-type") ?? "";
+    requireThat(
+      contentType.toLowerCase().startsWith("multipart/form-data;"),
+      415,
+      "Use a multipart issue report.",
+    );
+    const envelope = await bytes(request, 12 * 1024 * 1024 + 64 * 1024);
+    let form: FormData;
+    try {
+      form = await new Response(envelope, {
+        headers: { "Content-Type": contentType },
+      }).formData();
+    } catch {
+      return json({ detail: "Invalid issue upload." }, 400);
+    }
+    requireThat(
+      [...form.keys()].length === 2 &&
+        form.getAll("metadata").length === 1 &&
+        form.getAll("screenshot").length === 1,
+      400,
+      "Provide issue details and one screenshot.",
+    );
+    const metadataText = form.get("metadata");
+    requireThat(
+      typeof metadataText === "string" && metadataText.length <= 64000,
+      400,
+      "Invalid issue details.",
+    );
     let metadata: Record<string, unknown>;
     try {
-      metadata = JSON.parse(decodeURIComponent(header));
+      metadata = JSON.parse(metadataText);
     } catch {
       return json({ detail: "Invalid issue details." }, 400);
     }
@@ -88,7 +114,15 @@ export async function issueRoute(
     );
     const contextJson = JSON.stringify(context);
     requireThat(contextJson.length <= 4000, 413, "Issue context is too large.");
-    const data = await bytes(request, 12 * 1024 * 1024);
+    const screenshotFile = form.get("screenshot");
+    requireThat(
+      screenshotFile instanceof File &&
+        screenshotFile.size > 0 &&
+        screenshotFile.size <= 12 * 1024 * 1024,
+      400,
+      "Provide a screenshot of up to 12 MB.",
+    );
+    const data = new Uint8Array(await screenshotFile.arrayBuffer());
     const type = imageType(data);
     const sha = await digest(data);
     const fingerprint = await digest(

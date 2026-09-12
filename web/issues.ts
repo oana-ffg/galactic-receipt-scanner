@@ -121,14 +121,10 @@ export async function reportIssue(state: ScanState | undefined): Promise<void> {
     const feedback = form.querySelector<HTMLElement>(".issue-feedback")!;
     feedback.textContent = "Saving screenshot privately…";
     try {
-      await api(`/api/issues/${id}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "image/png",
-          "X-Issue-Metadata": encodeURIComponent(JSON.stringify(submitted)),
-        },
-        body: shot,
-      });
+      const upload = new FormData();
+      upload.set("metadata", JSON.stringify(submitted));
+      upload.set("screenshot", shot, "scanner-screen.png");
+      await api(`/api/issues/${id}`, { method: "POST", body: upload });
       feedback.textContent = "Private issue saved.";
       const link = document.createElement("a");
       link.href = `/issues#${id}`;
