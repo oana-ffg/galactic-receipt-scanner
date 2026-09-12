@@ -176,6 +176,31 @@ it("forces a retained review take without green and cannot override an upload", 
     armed: false,
     count: 1,
   });
+  for (const now of [100, 1000, 2000])
+    state.observe(
+      {
+        ok: false,
+        empty: true,
+        quad: null,
+        hands: [],
+        reason: "Odd shape is invisible to detector",
+      },
+      now,
+    );
+  expect(state.value).toMatchObject({
+    lastCapture: forced,
+    armed: false,
+    paused: true,
+    manualReview: true,
+  });
+  state.control("start");
+  expect(state.value).toMatchObject({
+    lastCapture: null,
+    retakeOf: null,
+    armed: true,
+    paused: false,
+    manualReview: false,
+  });
   state.failed("Upload pending", "upload");
   expect(state.force()).toBeNull();
 });
@@ -201,5 +226,22 @@ it("keeps an explicitly selected old retake across an empty desk until started",
     retakeOf: null,
     paused: true,
     selectedRetake: false,
+  });
+});
+
+it("an explicit retake of a forced shape retains identity when no outline is detectable", () => {
+  const state = new CaptureState();
+  const id = crypto.randomUUID();
+  state.saved(id, 1, true);
+  state.control("retry");
+  for (const now of [100, 1000, 2000])
+    state.observe(
+      { ok: false, empty: true, quad: null, hands: [], reason: "No outline" },
+      now,
+    );
+  expect(state.value).toMatchObject({
+    retakeOf: id,
+    selectedRetake: true,
+    paused: true,
   });
 });

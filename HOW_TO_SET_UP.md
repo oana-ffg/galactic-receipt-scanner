@@ -81,7 +81,9 @@ is needed; both devices need Internet access.
   the phone to acknowledge the selection, place the same physical receipt in view, then
   choose **Start scanning**. **Cancel retake** returns to normal scanning.
 - **Force take** saves a full-resolution original even when automatic checks reject an
-  unusual shape. It is explicitly **Saved for review**, never green. It links to a selected
+  unusual shape. It is explicitly **Saved for review**, never green, and pauses automatic
+  scanning because an unusual shape may also confuse removal detection. Force again to
+  retake the same receipt, or replace it and choose **Start scanning** for the next. It links to a selected
   retake or the receipt still in view. Remove the previous receipt completely before forcing
   a different one. Forced receipts count once; a forced retake does not supersede an
   accepted take. Review forced photos in capture history before downstream processing.

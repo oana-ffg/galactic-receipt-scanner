@@ -49,8 +49,16 @@ export class CaptureState {
   control(action: string) {
     this.feedback = null;
     if (this.value.activeId) return;
+    const afterManual = this.value.manualReview === true;
     this.value.manualReview = false;
-    const target = retakeTarget(action);
+    if (action === "start" && afterManual) {
+      this.value.lastCapture = null;
+      this.value.retakeOf = null;
+      this.value.armed = true;
+    }
+    const target =
+      retakeTarget(action) ??
+      (action === "retry" && afterManual ? this.value.lastCapture : null);
     if (target || action === "cancel-retake") {
       if (this.value.recovery === "upload") return;
       this.reset();
@@ -124,7 +132,10 @@ export class CaptureState {
     if (this.value.activeId) return null;
     // Removal also clears retake intent while paused or waiting after a failed check.
     // A later receipt must never inherit the previous receipt's identity.
-    if (this.value.lastCapture || !this.value.armed) {
+    if (
+      !this.value.manualReview &&
+      (this.value.lastCapture || !this.value.armed)
+    ) {
       if (q.empty && !q.hands.length) {
         this.absent ||= now;
         if (now - this.absent >= 450) {
@@ -184,9 +195,10 @@ export class CaptureState {
     this.absent = 0;
     this.latched = false;
     this.value.manualReview = manual;
+    if (manual) this.value.paused = true;
     this.value.phase = manual ? "amber" : "green";
     this.value.message = manual
-      ? "Saved for review. Quality checks were overridden. Remove the receipt, then next."
+      ? "Saved for review. Force take again to retake this receipt, or replace it and choose Start scanning for the next."
       : "Saved privately. Remove the receipt, then next.";
     this.reset();
   }
