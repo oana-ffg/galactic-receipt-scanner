@@ -1,3 +1,17 @@
+import {
+  UUID,
+  MAX_IMAGE,
+  json,
+  HttpError,
+  requireThat,
+  bytes,
+  digest,
+  imageType,
+  bodyJson,
+} from "./http";
+import { accessPage } from "./access-page";
+import { issueRoute } from "./issues";
+import { isControlCommand, retakeTarget } from "../web/control-command";
 /// <reference types="@cloudflare/workers-types" />
 export interface Env {
   RETIRED_CAPTURE_IDS?: string;
@@ -6,29 +20,6 @@ export interface Env {
   ASSETS: Fetcher;
   OWNER_EMAIL: string;
   APP_ORIGIN: string;
-}
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const MAX_IMAGE = 24 * 1024 * 1024;
-const json = (value: unknown, status = 200) =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-class HttpError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-function requireThat(
-  condition: unknown,
-  status: number,
-  message: string,
-): asserts condition {
-  if (!condition) throw new HttpError(status, message);
 }
 export function authorize(
   request: Request,
@@ -108,70 +99,6 @@ function secure(response: Response, imageWorker = false): Response {
     headers,
   });
 }
-async function bytes(
-  request: Request,
-  limit: number,
-): Promise<Uint8Array<ArrayBuffer>> {
-  requireThat(
-    Number(request.headers.get("content-length") || 0) <= limit,
-    413,
-    "Upload too large.",
-  );
-  const reader = request.body?.getReader();
-  requireThat(reader, 400, "Missing body.");
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      size += part.value.length;
-      requireThat(size <= limit, 413, "Upload too large.");
-      chunks.push(part.value);
-    }
-  } catch (error) {
-    await reader.cancel();
-    throw error;
-  }
-  const data = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    data.set(chunk, offset);
-    offset += chunk.length;
-  }
-  requireThat(size > 0, 400, "Empty upload.");
-  return data;
-}
-const digest = async (data: Uint8Array<ArrayBuffer>) =>
-  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data)))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-function imageType(data: Uint8Array): string {
-  if (data[0] === 255 && data[1] === 216 && data[2] === 255)
-    return "image/jpeg";
-  if ([137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => data[i] === v))
-    return "image/png";
-  throw new HttpError(415, "Use JPEG or PNG images.");
-}
-async function bodyJson(
-  request: Request,
-  limit = 24000,
-): Promise<Record<string, unknown>> {
-  try {
-    const value: unknown = JSON.parse(
-      new TextDecoder().decode(await bytes(request, limit)),
-    );
-    requireThat(
-      value && typeof value === "object" && !Array.isArray(value),
-      400,
-      "Expected an object.",
-    );
-    return value as Record<string, unknown>;
-  } catch (e) {
-    if (e instanceof HttpError) throw e;
-    throw new HttpError(400, "Invalid JSON.");
-  }
-}
 interface CaptureRow {
   id: string;
   receipt_id: string | null;
@@ -215,11 +142,11 @@ function publicCapture(row: CaptureRow) {
 // Selection is derived from immutable take numbers, so retries and rejected retakes
 // cannot demote an accepted source. One accepted take represents each receipt.
 const currentTake =
-  "captures.status='accepted' AND NOT EXISTS (SELECT 1 FROM captures newer WHERE (newer.receipt_id=COALESCE(captures.receipt_id,captures.id) OR newer.id=COALESCE(captures.receipt_id,captures.id)) AND newer.status='accepted' AND newer.take_number>captures.take_number)";
+  "captures.status IN ('accepted','manual-review') AND NOT EXISTS (SELECT 1 FROM captures newer WHERE (newer.receipt_id=COALESCE(captures.receipt_id,captures.id) OR newer.id=COALESCE(captures.receipt_id,captures.id)) AND newer.status IN ('accepted','manual-review') AND ((newer.status='accepted' AND captures.status='manual-review') OR (newer.status=captures.status AND newer.take_number>captures.take_number)))";
 const receiptCount =
-  "SELECT COUNT(DISTINCT COALESCE(receipt_id,id)) FROM captures WHERE status='accepted'";
+  "SELECT COUNT(DISTINCT COALESCE(receipt_id,id)) FROM captures WHERE status IN ('accepted','manual-review')";
 const captureSelection = `SELECT captures.*, (${currentTake}) AS is_current,
-  (SELECT id FROM captures accepted WHERE (accepted.receipt_id=COALESCE(captures.receipt_id,captures.id) OR accepted.id=COALESCE(captures.receipt_id,captures.id)) AND accepted.status='accepted' ORDER BY accepted.take_number DESC LIMIT 1) AS current_capture_id,
+  (SELECT id FROM captures accepted WHERE (accepted.receipt_id=COALESCE(captures.receipt_id,captures.id) OR accepted.id=COALESCE(captures.receipt_id,captures.id)) AND accepted.status IN ('accepted','manual-review') ORDER BY (accepted.status='accepted') DESC,accepted.take_number DESC LIMIT 1) AS current_capture_id,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available`;
@@ -271,21 +198,30 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
+  const issueResponse = await issueRoute(request, env);
+  if (issueResponse) return issueResponse;
   if (path === "/api/me" && method === "GET")
     return json({ email: env.OWNER_EMAIL });
   if (path === "/api/captures" && method === "GET") {
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    requireThat(
+      Number.isInteger(limit) && limit >= 1 && limit <= 100,
+      400,
+      "Invalid page size.",
+    );
     const cursor = (url.searchParams.get("before") ?? "9999|").split("|");
     requireThat(cursor.length === 2, 400, "Invalid cursor.");
     const rows = await env.DB.prepare(
-      `${captureSelection} FROM captures WHERE (created_at,id) < (?,?) ${url.searchParams.get("current") === "1" ? `AND (${currentTake})` : ""} ORDER BY created_at DESC,id DESC LIMIT 100`,
+      `${captureSelection} FROM captures WHERE (created_at,id) < (?,?) ${url.searchParams.get("current") === "1" ? `AND (${currentTake})` : ""} ORDER BY created_at DESC,id DESC LIMIT ?`,
     )
-      .bind(cursor[0], cursor[1])
+      .bind(cursor[0], cursor[1], limit + 1)
       .all<CaptureRow>();
+    const page = rows.results.slice(0, limit);
     return json({
-      captures: rows.results.map(publicCapture),
+      captures: page.map(publicCapture),
       next:
-        rows.results.length === 100
-          ? `${rows.results.at(-1)!.created_at}|${rows.results.at(-1)!.id}`
+        rows.results.length > limit
+          ? `${page.at(-1)!.created_at}|${page.at(-1)!.id}`
           : null,
     });
   }
@@ -328,11 +264,18 @@ async function route(request: Request, env: Env): Promise<Response> {
       requireThat(
         completed === null ||
           completed === "accepted" ||
-          completed === "rejected",
+          completed === "rejected" ||
+          completed === "manual-review",
         400,
         "Invalid capture result.",
       );
       if (completed === "accepted") requireQuality(metadata);
+      if (completed === "manual-review")
+        requireThat(
+          metadata.manualCapture === true,
+          400,
+          "Manual capture intent is required.",
+        );
       const retakeOf = request.headers.get("x-retake-of");
       requireThat(
         retakeOf === null || (UUID.test(retakeOf) && retakeOf !== id),
@@ -457,7 +400,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     const row = await captureRow(env, id);
     const info = await bodyJson(request);
     requireThat(
-      ["accepted", "rejected"].includes(String(info.status)),
+      ["accepted", "rejected", "manual-review"].includes(String(info.status)),
       400,
       "Invalid result.",
     );
@@ -469,6 +412,12 @@ async function route(request: Request, env: Env): Promise<Response> {
       );
       return json(publicCapture(row));
     }
+    if (info.status === "manual-review")
+      requireThat(
+        JSON.parse(row.metadata).manualCapture === true,
+        400,
+        "Manual capture intent is required.",
+      );
     if (info.status === "accepted") {
       const metadata = JSON.parse(row.metadata);
       requireQuality(metadata);
@@ -724,13 +673,46 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
   }
   if (path.startsWith("/api/control/") && method === "POST") {
-    const command = path.slice("/api/control/".length);
-    requireThat(
-      ["start", "pause", "retry", "retry-upload"].includes(command),
-      400,
-      "Unknown command.",
-    );
-    await stationRow(env);
+    let command = path.slice("/api/control/".length);
+    requireThat(!command.includes(":"), 400, "Unknown command.");
+    if (command === "retake") {
+      const { captureId } = await bodyJson(request);
+      requireThat(
+        typeof captureId === "string" && UUID.test(captureId),
+        400,
+        "Invalid retake source.",
+      );
+      const capture = await captureRow(env, captureId);
+      requireThat(
+        capture.status !== "checking",
+        409,
+        "Wait for the original upload to finish before retaking.",
+      );
+      command = `retake:${captureId}`;
+    }
+    requireThat(isControlCommand(command), 400, "Unknown command.");
+    const station = await stationRow(env);
+    if (
+      retakeTarget(command) ||
+      command === "cancel-retake" ||
+      command === "force"
+    ) {
+      const state = station.state ? JSON.parse(station.state) : null;
+      requireThat(
+        station.expires > Date.now() &&
+          station.updated > Date.now() - 5000 &&
+          (command === "force"
+            ? state?.supportsForce
+            : state?.supportsTargetedRetake) === true,
+        409,
+        "Enable or reload the phone camera before selecting a retake.",
+      );
+      requireThat(
+        !state.activeId && state.recovery !== "upload",
+        409,
+        "Finish the pending photo upload before selecting a retake.",
+      );
+    }
     await env.DB.prepare(
       "UPDATE station SET command=?,sequence=sequence+1 WHERE id=1",
     )
@@ -742,7 +724,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   requireThat(["GET", "HEAD"].includes(method), 405, "Method not allowed.");
   // Assets are fetched only after owner authorisation; no public bucket or asset routes.
   return env.ASSETS.fetch(
-    new Request(new URL(path === "/camera" ? "/" : path, url.origin), request),
+    new Request(
+      new URL(["/camera", "/issues"].includes(path) ? "/" : path, url.origin),
+      request,
+    ),
   );
 }
 export default {
@@ -756,6 +741,29 @@ export default {
         ),
       );
     } catch (error) {
+      if (
+        error instanceof HttpError &&
+        [401, 403].includes(error.status) &&
+        request.method === "GET" &&
+        ["/", "/camera", "/issues"].includes(new URL(request.url).pathname)
+      ) {
+        const response = secure(accessPage(error.status));
+        const nonce = crypto.randomUUID().replaceAll("-", "");
+        const css =
+          "body{margin:0;background:#10181f;color:#e4edf2;font:17px/1.6 system-ui,sans-serif}main{max-width:660px;margin:10vh auto;padding:32px}h1{color:#64e3ac;font-size:18px}h2{line-height:1.2;margin-top:32px}a{color:#8ccfff}p{color:#bdcbd5}";
+        const html = (await response.text()).replace(
+          "</head>",
+          `<style nonce="${nonce}">${css}</style></head>`,
+        );
+        const headers = new Headers(response.headers);
+        headers.set(
+          "Content-Security-Policy",
+          headers
+            .get("Content-Security-Policy")!
+            .replace("style-src 'self'", `style-src 'self' 'nonce-${nonce}'`),
+        );
+        return new Response(html, { status: response.status, headers });
+      }
       return secure(
         json(
           {

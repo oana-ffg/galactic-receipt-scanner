@@ -100,7 +100,7 @@ header p {
 }
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 250px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
   gap: 24px;
 }
 .capture-panel {
@@ -282,6 +282,92 @@ h2 {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.saved-photo {
+  margin-bottom: 24px;
+}
+.saved-image {
+  position: relative;
+  width: 100%;
+}
+.saved-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.saved-photo .saved-image {
+  width: fit-content;
+  max-width: 100%;
+  margin: auto;
+}
+.saved-photo .saved-image img {
+  width: auto;
+  max-width: 100%;
+  max-height: 42vh;
+}
+.saved-image svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.saved-controls {
+  margin-top: 12px;
+}
+.saved-controls button {
+  min-height: 34px;
+  padding: 6px 10px;
+}
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 20px;
+}
+.pagination span {
+  font-size: 13px;
+}
+dialog {
+  color: #e5edf2;
+  background: #111820;
+  border: 1px solid #3a4856;
+  border-radius: 10px;
+  padding: 20px;
+}
+dialog::backdrop {
+  background: #000b;
+}
+.photo-dialog {
+  width: 94vw;
+  height: 94vh;
+  max-width: 1600px;
+}
+.photo-viewport {
+  overflow: auto;
+  height: calc(100% - 60px);
+  margin-top: 16px;
+  background: #080d12;
+}
+.photo-viewport .saved-image {
+  max-width: 100%;
+  margin: auto;
+}
+.photo-viewport .saved-image:not(.actual-size) {
+  width: fit-content;
+  height: auto;
+}
+.photo-viewport .saved-image:not(.actual-size) img {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  object-fit: contain;
+}
+.photo-viewport .saved-image.actual-size {
+  max-width: none;
 }
 .file-links button {
   min-height: 34px;
@@ -359,4 +445,39 @@ h2 {
   h1 {
     font-size: 1.3rem;
   }
+}
+
+.issue-dialog {
+  width: min(800px, 94vw);
+  max-height: 92vh;
+  overflow: auto;
+}
+.issue-dialog form > label {
+  display: block;
+  margin: 16px 0;
+}
+.issue-dialog input:not([type="checkbox"]),
+.issue-dialog textarea,
+.issue-dialog select {
+  display: block;
+  width: 100%;
+  background: #18252f;
+  color: inherit;
+  border: 1px solid #607788;
+  border-radius: 4px;
+  padding: 8px;
+  font: inherit;
+}
+.issue-screenshot {
+  display: block;
+  max-width: 100%;
+  max-height: 50vh;
+  object-fit: contain;
+}
+.issue-feedback {
+  overflow-wrap: anywhere;
+}
+header {
+  flex-wrap: wrap;
+  gap: 16px;
 }

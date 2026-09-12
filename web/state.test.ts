@@ -160,3 +160,46 @@ it("ignores Retake when there is no current receipt or failed photo", () => {
   expect(s.value.paused).toBe(true);
   expect(s.value.retakeOf).toBeNull();
 });
+
+it("forces a retained review take without green and cannot override an upload", () => {
+  const state = new CaptureState();
+  state.value.detectorReady = true;
+  const first = crypto.randomUUID();
+  state.saved(first, 1);
+  const forced = state.force();
+  expect(forced).toBeTruthy();
+  expect(state.value.retakeOf).toBe(first);
+  state.saved(forced!, 1, true);
+  expect(state.value).toMatchObject({
+    phase: "amber",
+    manualReview: true,
+    armed: false,
+    count: 1,
+  });
+  state.failed("Upload pending", "upload");
+  expect(state.force()).toBeNull();
+});
+
+it("keeps an explicitly selected old retake across an empty desk until started", () => {
+  const state = new CaptureState();
+  const target = crypto.randomUUID();
+  state.control(`retake:${target}`);
+  for (const now of [100, 500, 1000])
+    state.observe(
+      { ok: false, empty: true, quad: null, hands: [], reason: "Empty" },
+      now,
+    );
+  expect(state.value).toMatchObject({
+    retakeOf: target,
+    paused: true,
+    selectedRetake: true,
+  });
+  state.control("start");
+  expect(state.value.retakeOf).toBe(target);
+  state.control("cancel-retake");
+  expect(state.value).toMatchObject({
+    retakeOf: null,
+    paused: true,
+    selectedRetake: false,
+  });
+});

@@ -60,3 +60,35 @@ export const station = sqliteTable("station", {
   preview_session: text("preview_session"),
   updated: integer("updated").notNull().default(0),
 });
+
+export const issues = sqliteTable(
+  "issues",
+  {
+    id: text("id").primaryKey(),
+    created_at: text("created_at").notNull(),
+    updated_at: text("updated_at").notNull(),
+    status: text("status").notNull(),
+    title: text("title").notNull(),
+    description: text("description").notNull(),
+    context: text("context").notNull(),
+    screenshot_key: text("screenshot_key").notNull(),
+    sha256: text("sha256").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+  },
+  (table) => [index("issues_created_id").on(table.created_at, table.id)],
+);
+export const issueUpdates = sqliteTable(
+  "issue_updates",
+  {
+    id: text("id").primaryKey(),
+    issue_id: text("issue_id")
+      .notNull()
+      .references(() => issues.id),
+    status: text("status").notNull(),
+    note: text("note").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    index("issue_updates_issue_created").on(table.issue_id, table.created_at),
+  ],
+);

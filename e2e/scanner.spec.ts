@@ -506,6 +506,31 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
   expect(
     currentTakes.some((capture: { id: string }) => capture.id === current.id),
   ).toBe(false);
+  // Selecting an old capture pauses the phone and requires a deliberate restart.
+  await page.locator(`[data-retake="${retake.id}"]`).click();
+  await expect(phone.locator("#status")).toContainText("Retake selected");
+  await expect(page.locator("#start")).toBeEnabled();
+  await phone.evaluate(() =>
+    Object.assign(
+      (window as unknown as { scannerFixture: object }).scannerFixture,
+      { blankPhoto: true },
+    ),
+  );
+  await page.getByRole("button", { name: "Force take", exact: true }).click();
+  await expect(phone.locator("#phase")).toHaveText("SAVED FOR REVIEW");
+  await expect(page.locator("#phase")).toHaveText("SAVED FOR REVIEW");
+  const forced = (await (await request.get("/api/captures")).json())
+    .captures[0];
+  expect(forced).toMatchObject({
+    status: "manual-review",
+    receipt_id: retake.receipt_id,
+    retake_of: retake.id,
+    is_current: false,
+    current_capture_id: retake.id,
+    metadata: { manualCapture: true },
+  });
+  await expect(phone.locator("#count")).toHaveText("4");
+  expect((await request.get(`/api/files/${forced.id}/raw`)).status()).toBe(200);
   await phone.close();
   // Crops and PDFs are an explicit downstream action on an existing original.
   const prepared = (await page.evaluate(async (id) => {

@@ -40,6 +40,7 @@ export class PhoneCamera {
     (command) => {
       if (!this.running || !this.connected || this.busy) return;
       if (command === "retry-upload") void this.recover();
+      else if (command === "force") void this.force();
       else this.machine.control(command);
       this.emitState();
     },
@@ -219,6 +220,7 @@ export class PhoneCamera {
         if (result.sequence !== this.sequence && !this.busy) {
           this.sequence = result.sequence;
           if (result.command === "retry-upload") void this.recover();
+          else if (result.command === "force") void this.force();
           else this.machine.control(result.command);
         }
       } catch (error) {
@@ -353,7 +355,12 @@ export class PhoneCamera {
       method: "full-resolution-video-frame",
     };
   }
-  private async capture(id: string) {
+  async force() {
+    if (!this.running || !this.connected || this.busy) return;
+    const id = this.machine.force();
+    if (id) await this.capture(id, true);
+  }
+  private async capture(id: string, manual = false) {
     if (this.busy) return;
     this.busy = true;
     const started = performance.now();
@@ -371,6 +378,7 @@ export class PhoneCamera {
       const capture: PendingCapture = {
         id,
         retakeOf: this.machine.value.retakeOf,
+        manual,
         blob,
         method,
         sourcePixels: [this.video.videoWidth, this.video.videoHeight],
@@ -433,7 +441,7 @@ export class PhoneCamera {
     this.machine.value.stage = "uploading";
     this.machine.value.needsAttention = false;
     this.machine.value.phase = "amber";
-    this.machine.value.message = `Saving original (${(capture.blob.size / 1048576).toFixed(1)} MB). Wait for green.`;
+    this.machine.value.message = `Saving original (${(capture.blob.size / 1048576).toFixed(1)} MB). Wait for the saved acknowledgement.`;
     this.machine.value.activeId = capture.id;
     this.emitState();
     const result = await api<Capture>(`/api/captures/${capture.id}`, {
@@ -441,10 +449,15 @@ export class PhoneCamera {
       body: capture.blob,
       headers: {
         "Content-Type": capture.blob.type,
-        "X-Capture-Status": capture.quality.ok ? "accepted" : "rejected",
+        "X-Capture-Status": capture.manual
+          ? "manual-review"
+          : capture.quality.ok
+            ? "accepted"
+            : "rejected",
         ...(capture.retakeOf ? { "X-Retake-Of": capture.retakeOf } : {}),
         "X-Capture-Metadata": JSON.stringify({
           captureMethod: capture.method,
+          manualCapture: capture.manual === true,
           sourcePixels: capture.sourcePixels,
           quality: capture.quality,
           checks: "browser-opencv-mediapipe-v3-local-print",
@@ -459,19 +472,27 @@ export class PhoneCamera {
         ? await api<Capture>(`/api/captures/${capture.id}/finalize`, {
             method: "POST",
             body: JSON.stringify({
-              status: capture.quality.ok ? "accepted" : "rejected",
+              status: capture.manual
+                ? "manual-review"
+                : capture.quality.ok
+                  ? "accepted"
+                  : "rejected",
             }),
           })
         : result;
-    if (!["accepted", "rejected"].includes(final.status))
+    if (!["accepted", "rejected", "manual-review"].includes(final.status))
       throw new Error("Storage acknowledgement incomplete.");
     await acknowledge(capture.id);
-    if (final.status === "accepted") {
+    if (final.status === "accepted" || final.status === "manual-review") {
       this.machine.value.timings = {
         ...this.machine.value.timings,
         saveMs: performance.now() - started,
       };
-      this.machine.saved(capture.id, final.acceptedCount);
+      this.machine.saved(
+        capture.id,
+        final.acceptedCount,
+        final.status === "manual-review",
+      );
     } else
       this.machine.failed(
         `Previous photo needs retaking: ${capture.quality.reason} The image is kept; tap Retake photo to try again.`,

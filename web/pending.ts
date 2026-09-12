@@ -1,6 +1,7 @@
 export interface PendingCapture {
   id: string;
   retakeOf?: string | null;
+  manual?: boolean;
   blob: Blob;
   method: string;
   quality: import("./types").Quality;

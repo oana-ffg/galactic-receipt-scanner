@@ -74,6 +74,23 @@ is needed; both devices need Internet access.
 - Amber: the label distinguishes stability checks, taking the photo, checking the captured image, and saving the original. Crops and PDFs do not run during capture.
 - Green: the original and quality metadata are durably saved and its checksum verified; remove the receipt completely before inserting the next.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
+- The desktop shows the latest saved original with the outline detected in that photo.
+  Use **Inspect full size** and **Actual pixels** to check fine print; the outline is an
+  overlay and never changes the original. Recent captures show ten per page.
+- **Retake** beside an older capture selects that receipt and pauses the phone. Wait for
+  the phone to acknowledge the selection, place the same physical receipt in view, then
+  choose **Start scanning**. **Cancel retake** returns to normal scanning.
+- **Force take** saves a full-resolution original even when automatic checks reject an
+  unusual shape. It is explicitly **Saved for review**, never green. It links to a selected
+  retake or the receipt still in view. Remove the previous receipt completely before forcing
+  a different one. Forced receipts count once; a forced retake does not supersede an
+  accepted take. Review forced photos in capture history before downstream processing.
+- Audio starts enabled and remembers the last choice in browser storage. A click or tap
+  unlocks browser audio. Success uses one high ding; failure uses three low descending buzzes.
+- **Report issue** attaches a screenshot of the visible scanner page to a private report.
+  Reports and screenshots stay in the instance's D1/R2 storage and can be reviewed under
+  **Private issues**. The optional GitHub checkbox starts off and only opens a public draft
+  for review; private report details and screenshots are never copied into it.
 - **Retake photo** creates a linked, numbered take of the receipt still in view. The latest accepted take is current and counts once; previous originals and derivatives remain available. A rejected retake leaves the previous accepted take current. Remove the receipt completely to start a different receipt.
 
 Inspect the first few originals at full size to calibrate lighting, height, small print
@@ -137,3 +154,9 @@ Retake tracking applies to new captures after this update. Existing captures ret
 own receipt IDs because their earlier retake relationships were never recorded. Review
 possible earlier duplicates against the originals before accounting; never merge them by
 timestamp alone. Reload the dashboard and camera after updating so both use linked retakes.
+
+Updates keep existing clients running; reload the desktop and phone after a saved acknowledgement
+when ready to activate new controls. Do not reload during an upload. The issue-report migration
+only adds separate tables; it does not rewrite receipts. The friendlier wrong-account page
+applies when the application handles access denial. The Sites sign-in/access gateway may
+intercept a visitor before the application can display its page.

@@ -23,6 +23,10 @@ export interface ScanState {
   lastSaved: string | null;
   lastCapture: string | null;
   retakeOf: string | null;
+  supportsTargetedRetake?: boolean;
+  selectedRetake?: boolean;
+  supportsForce?: boolean;
+  manualReview?: boolean;
   armed: boolean;
   cameraConnected: boolean;
   streamFresh: boolean;
@@ -45,7 +49,7 @@ export interface Capture {
   current_capture_id: string | null;
   created_at: string;
   sha256: string;
-  status: "checking" | "accepted" | "rejected";
+  status: "checking" | "accepted" | "rejected" | "manual-review";
   ocr_status: string;
   ocr_error: string | null;
   outputs: { image: boolean; pdf: boolean };

@@ -1,4 +1,5 @@
 import type { Quality, ScanState } from "./types";
+import { retakeTarget } from "./control-command";
 export class CaptureState {
   value: ScanState = {
     type: "state",
@@ -9,6 +10,9 @@ export class CaptureState {
     lastSaved: null,
     lastCapture: null,
     retakeOf: null,
+    supportsTargetedRetake: true,
+    supportsForce: true,
+    selectedRetake: false,
     armed: true,
     cameraConnected: true,
     streamFresh: true,
@@ -45,6 +49,26 @@ export class CaptureState {
   control(action: string) {
     this.feedback = null;
     if (this.value.activeId) return;
+    this.value.manualReview = false;
+    const target = retakeTarget(action);
+    if (target || action === "cancel-retake") {
+      if (this.value.recovery === "upload") return;
+      this.reset();
+      this.absent = 0;
+      this.latched = false;
+      this.value.lastCapture = null;
+      this.value.retakeOf = target;
+      this.value.selectedRetake = Boolean(target);
+      this.value.armed = true;
+      this.value.paused = true;
+      this.value.recovery = undefined;
+      this.value.needsAttention = false;
+      this.value.phase = "red";
+      this.value.message = target
+        ? "Retake selected. Place that same receipt under the camera, then choose Start scanning."
+        : "Retake cancelled. Choose Start scanning for a new receipt.";
+      return;
+    }
     if (
       (action === "start" || action === "retry") &&
       this.value.recovery === "upload"
@@ -77,6 +101,24 @@ export class CaptureState {
         : "Place one receipt on the dark background.";
     }
   }
+  force(): string | null {
+    if (
+      this.value.activeId ||
+      this.value.recovery === "upload" ||
+      !this.value.cameraConnected ||
+      !this.value.detectorReady
+    )
+      return null;
+    this.reset();
+    this.feedback = null;
+    this.value.retakeOf ??= this.value.lastCapture;
+    this.value.activeId = crypto.randomUUID();
+    this.value.manualReview = false;
+    this.value.needsAttention = false;
+    this.value.phase = "amber";
+    this.value.message = "Taking a photo for manual review…";
+    return this.value.activeId;
+  }
   observe(q: Quality, now: number): string | null {
     this.value.quality = q;
     if (this.value.activeId) return null;
@@ -87,6 +129,7 @@ export class CaptureState {
         this.absent ||= now;
         if (now - this.absent >= 450) {
           this.value.lastCapture = null;
+          if (!this.value.paused) this.value.manualReview = false;
           this.value.retakeOf = null;
           this.value.armed = true;
           this.reset();
@@ -125,7 +168,7 @@ export class CaptureState {
     }
     return null;
   }
-  saved(id: string, count?: number) {
+  saved(id: string, count?: number, manual = false) {
     this.feedback = null;
     if (count !== undefined) this.value.count = count;
     else if (this.value.lastSaved !== id) this.value.count++;
@@ -135,12 +178,16 @@ export class CaptureState {
     this.value.lastSaved = id;
     this.value.lastCapture = id;
     this.value.retakeOf = null;
+    this.value.selectedRetake = false;
     this.value.recovery = undefined;
     this.value.armed = false;
     this.absent = 0;
     this.latched = false;
-    this.value.phase = "green";
-    this.value.message = "Saved privately. Remove the receipt, then next.";
+    this.value.manualReview = manual;
+    this.value.phase = manual ? "amber" : "green";
+    this.value.message = manual
+      ? "Saved for review. Quality checks were overridden. Remove the receipt, then next."
+      : "Saved privately. Remove the receipt, then next.";
     this.reset();
   }
   failed(message: string, recovery?: "retake" | "upload", retainedId?: string) {
@@ -150,6 +197,8 @@ export class CaptureState {
       this.value.armed = false;
       this.absent = 0;
     }
+    this.value.selectedRetake = Boolean(this.value.retakeOf);
+    this.value.manualReview = false;
     this.value.recovery = recovery;
     this.feedback = null;
     this.value.stage = undefined;

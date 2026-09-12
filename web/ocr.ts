@@ -42,7 +42,7 @@ export class ReceiptOcr {
   }
   async transcribe(id: string) {
     const { capture, blob } = await readOriginal(id);
-    if (!capture.is_current)
+    if (!capture.is_current || capture.status !== "accepted")
       throw new Error("Choose the current accepted take before transcription.");
     const bitmap = await createImageBitmap(blob);
     const dimensions = [bitmap.width, bitmap.height];

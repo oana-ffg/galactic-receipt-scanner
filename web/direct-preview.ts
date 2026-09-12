@@ -1,5 +1,6 @@
 import { api } from "./api";
 import type { ScanState } from "./types";
+import { isControlCommand } from "./control-command";
 
 export interface PreviewSession {
   id: string;
@@ -76,9 +77,7 @@ export class DirectPreview {
         const message = JSON.parse(event.data);
         this.lastMessage = performance.now();
         if (message.state?.type === "state") this.receiveState(message.state);
-        if (
-          ["start", "pause", "retry", "retry-upload"].includes(message.command)
-        )
+        if (isControlCommand(message.command))
           this.receiveCommand(message.command);
       } catch {
         /* Ignore malformed messages; the HTTP path remains available. */

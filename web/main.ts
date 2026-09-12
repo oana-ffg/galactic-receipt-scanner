@@ -3,27 +3,41 @@ import { api } from "./api";
 import { PhoneCamera } from "./camera";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import { messageOf } from "./errors";
-import type { Capture, ScanState } from "./types";
+import type { ScanState } from "./types";
+import { CaptureLibrary } from "./library";
 import "./style.css";
 
 const app = document.querySelector<HTMLElement>("#app")!;
 const isCamera = location.pathname === "/camera";
-let libraryBusy = false;
-let libraryDirty = false;
+let library: CaptureLibrary | undefined;
 let lastState: ScanState | undefined;
+let retakePending: string | null = null;
 
-{
+if (location.pathname === "/issues") {
+  void import("./issues").then((module) => module.mountIssues(app));
+} else {
   app.innerHTML = `
-    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter"><strong id="count">0</strong><span>saved receipts</span></div><a href="/signout-with-chatgpt">Sign out</a></header>
+    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter"><strong id="count">0</strong><span>saved receipts</span></div><a href="/issues">Private issues</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
     <p id="connection-warning" class="connection-warning" role="status"></p>
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}</div>
+    <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}<button id="force" class="secondary" disabled>Force take</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
     <p id="error" class="error" role="alert"></p></section>
-    ${isCamera ? "" : '<aside><details open><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
+    ${isCamera ? "" : '<aside><section id="saved-photo" class="saved-photo"><h2>Last photo saved</h2><p>No photo saved yet.</p></section><details><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
     </div>
-    ${isCamera ? "" : '<section class="library"><div class="library-heading"><h2>Recent captures</h2><span>Originals stay intact · OCR is unverified</span></div><div id="captures"><p class="muted">No captures yet.</p></div></section>'}`;
+    ${isCamera ? "" : '<section class="library"><div class="library-heading"><h2>Recent captures</h2><span>Originals stay intact · OCR is unverified</span></div><div id="captures"><p class="muted">No captures yet.</p></div><nav class="pagination" aria-label="Capture pages"><button id="captures-previous" class="secondary" disabled>Newer</button><span id="captures-page">Page 1</span><button id="captures-next" class="secondary" disabled>Older</button></nav></section>'}`;
+  element("report-issue").onclick = async () => {
+    const button = element<HTMLButtonElement>("report-issue");
+    button.disabled = true;
+    try {
+      await (await import("./issues")).reportIssue(lastState);
+    } catch (problem) {
+      error(`Could not prepare the screenshot: ${messageOf(problem)}`);
+    } finally {
+      button.disabled = false;
+    }
+  };
   if (isCamera) mountCamera();
   else mountDashboard();
 }
@@ -40,28 +54,46 @@ function error(message: string): void {
 
 function renderState(state: ScanState): void {
   lastState = state;
+  if (retakePending && state.selectedRetake && state.retakeOf === retakePending)
+    retakePending = null;
+  library?.updateState(state);
+  element<HTMLButtonElement>("force").disabled =
+    !state.supportsForce ||
+    !state.detectorReady ||
+    !state.cameraConnected ||
+    Boolean(state.activeId) ||
+    state.recovery === "upload" ||
+    Boolean(retakePending);
+  element<HTMLButtonElement>("cancel-retake").hidden = !state.selectedRetake;
+  element<HTMLButtonElement>("cancel-retake").disabled =
+    Boolean(state.activeId) || state.recovery === "upload";
+
   element("signal").className = `signal ${state.phase}`;
   element("connection-warning").textContent = state.previewWarning ?? "";
   element("phase").textContent = !state.cameraConnected
     ? state.detectorReady
       ? "RECONNECTING"
       : "CAMERA STOPPED"
-    : state.needsAttention
-      ? "NEEDS ATTENTION"
-      : state.phase === "green"
-        ? "SAVED · NEXT"
-        : state.phase === "amber"
-          ? state.stage === "uploading"
-            ? "SAVING ORIGINAL"
-            : state.stage === "photo"
-              ? "TAKING PHOTO"
-              : state.stage === "checking"
-                ? "CHECKING PHOTO"
-                : "CHECKING STABILITY"
-          : state.paused
-            ? "PAUSED"
-            : "WAIT";
-  element("status").textContent = state.message;
+    : state.manualReview && !state.activeId
+      ? "SAVED FOR REVIEW"
+      : state.needsAttention
+        ? "NEEDS ATTENTION"
+        : state.phase === "green"
+          ? "SAVED · NEXT"
+          : state.phase === "amber"
+            ? state.stage === "uploading"
+              ? "SAVING ORIGINAL"
+              : state.stage === "photo"
+                ? "TAKING PHOTO"
+                : state.stage === "checking"
+                  ? "CHECKING PHOTO"
+                  : "CHECKING STABILITY"
+            : state.paused
+              ? "PAUSED"
+              : "WAIT";
+  element("status").textContent = retakePending
+    ? "Waiting for the phone to select this retake. Do not start scanning yet."
+    : state.message;
   element("count").textContent = String(state.count);
   if (state.phase === "green" && state.timings) {
     const seconds =
@@ -83,7 +115,9 @@ function renderState(state: ScanState): void {
   if (!isCamera) {
     for (const id of ["start", "pause", "retry"]) {
       element<HTMLButtonElement>(id).disabled =
-        Boolean(state.activeId) || !state.detectorReady;
+        Boolean(state.activeId) ||
+        !state.detectorReady ||
+        Boolean(retakePending);
     }
     element<HTMLButtonElement>("retry").disabled ||=
       state.recovery === "upload" ||
@@ -94,12 +128,24 @@ function renderState(state: ScanState): void {
     element<HTMLButtonElement>("pause").disabled ||= state.paused;
     if (state.phase !== "green")
       element("detail").textContent = state.activeId
-        ? "Wait for green before removing this receipt."
+        ? "Wait for the saved acknowledgement before removing this receipt."
         : "Keep all paper edges visible. Remove each saved receipt completely before the next.";
   }
 }
 
 function disconnected(reason = "Connection lost. Waiting to reconnect…"): void {
+  for (const id of [
+    "start",
+    "pause",
+    "retry",
+    "recover",
+    "force",
+    "cancel-retake",
+  ]) {
+    const button = document.getElementById(id) as HTMLButtonElement | null;
+    if (button) button.disabled = true;
+  }
+  if (lastState) library?.updateState({ ...lastState, cameraConnected: false });
   element("signal").className = "signal red";
   element("connection-warning").textContent = "";
   element("feed").hidden = true;
@@ -139,9 +185,30 @@ function mountCamera(): void {
   };
   element("recover").onclick = () => void camera.recover();
   element("retake").onclick = () => camera.retake();
+  element("force").onclick = () => void camera.force();
+  element("cancel-retake").onclick = () =>
+    void api("/api/control/cancel-retake", { method: "POST" }).catch(
+      (problem) => error(messageOf(problem)),
+    );
 }
 
 function mountDashboard(): void {
+  library = new CaptureLibrary(async (id) => {
+    if (retakePending)
+      throw new Error("Wait for the phone to acknowledge the selected retake.");
+    retakePending = id;
+    if (lastState) renderState(lastState);
+    try {
+      await api("/api/control/retake", {
+        method: "POST",
+        body: JSON.stringify({ captureId: id }),
+      });
+    } catch (problem) {
+      retakePending = null;
+      if (lastState) renderState(lastState);
+      throw problem;
+    }
+  });
   const phone = new URL("/camera", location.origin);
   element<HTMLAnchorElement>("phone-link").href = phone.href;
   void QRCode.toCanvas(element<HTMLCanvasElement>("qr"), phone.href, {
@@ -185,36 +252,58 @@ function mountDashboard(): void {
     },
   );
   const audioToggle = input("audio");
-  audioToggle.onchange = () => {
+  try {
+    audioToggle.checked = localStorage.getItem("scanner-audio") !== "off";
+  } catch {
+    audioToggle.checked = true;
+  }
+  function enableAudio() {
     if (audioToggle.checked) {
       audio ??= new AudioContext();
-      void audio.resume();
+      void audio.resume().catch(() => {});
     }
+  }
+  document.addEventListener("pointerdown", enableAudio, { once: true });
+  document.addEventListener("keydown", enableAudio, { once: true });
+  audioToggle.onchange = () => {
+    try {
+      localStorage.setItem("scanner-audio", audioToggle.checked ? "on" : "off");
+    } catch {
+      /* Keep the current choice when browser storage is unavailable. */
+    }
+    enableAudio();
   };
   function sound(success: boolean): void {
     if (!audioToggle.checked || !audio) return;
-    const oscillator = audio.createOscillator();
-    const gain = audio.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = success ? 880 : 220;
-    gain.gain.setValueAtTime(0.12, audio.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.2);
-    oscillator.connect(gain);
-    gain.connect(audio.destination);
-    oscillator.start();
-    oscillator.stop(audio.currentTime + 0.22);
+    for (let i = 0; i < (success ? 1 : 3); i++) {
+      const oscillator = audio.createOscillator();
+      const gain = audio.createGain();
+      const start = audio.currentTime + i * 0.3;
+      oscillator.type = success ? "sine" : "sawtooth";
+      oscillator.frequency.setValueAtTime(success ? 880 : 180, start);
+      if (!success)
+        oscillator.frequency.exponentialRampToValueAtTime(80, start + 0.22);
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.linearRampToValueAtTime(success ? 0.12 : 0.09, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.22);
+      oscillator.connect(gain);
+      gain.connect(audio.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.24);
+    }
   }
   function acceptState(state: ScanState) {
     if (state.needsAttention && !needsAttention) void refreshLibrary();
     needsAttention = !!state.needsAttention;
     if (state.lastSaved && state.lastSaved !== lastSaved) {
-      if (lastState) sound(true);
+      if (lastState) sound(!state.manualReview);
       void refreshLibrary();
     }
     if (
       state.phase === "red" &&
       state.message !== lastError &&
-      lastState?.phase === "amber"
+      lastState?.phase === "amber" &&
+      !lastState.manualReview
     )
       sound(false);
     lastSaved = state.lastSaved;
@@ -279,7 +368,14 @@ function mountDashboard(): void {
     );
   }
   void preview();
-  for (const id of ["start", "pause", "retry", "recover"]) {
+  for (const id of [
+    "start",
+    "pause",
+    "retry",
+    "recover",
+    "force",
+    "cancel-retake",
+  ]) {
     element(id).onclick = async () => {
       error("");
       try {
@@ -326,94 +422,7 @@ async function drawPreview(blob: Blob): Promise<void> {
 }
 
 async function refreshLibrary(): Promise<void> {
-  if (libraryBusy) {
-    libraryDirty = true;
-    return;
-  }
-  libraryBusy = true;
-  try {
-    const result = await api<{ captures: Capture[] }>("/api/captures");
-    const container = element("captures");
-    if (!result.captures.length) {
-      container.textContent = "No captures yet.";
-      return;
-    }
-    container.replaceChildren();
-    for (const capture of result.captures) {
-      const row = document.createElement("article");
-      row.className = "capture-row";
-      const info = document.createElement("div");
-      const title = document.createElement("strong");
-      let label = "Interrupted check";
-      if (capture.status === "accepted")
-        label = capture.is_current
-          ? "Saved · Current take"
-          : "Previous take · Not counted";
-      else if (capture.status === "rejected")
-        label = capture.current_capture_id
-          ? "Rejected take · Not counted"
-          : "Retake needed";
-      title.textContent = `${new Date(capture.created_at).toLocaleTimeString()} · ${label}`;
-      const detail = document.createElement("p");
-      detail.textContent =
-        capture.status === "accepted"
-          ? `${capture.metadata.sourcePixels?.join(" × ") ?? ""} source · ${capture.outputs.pdf ? "PDF ready" : "PDF later"} · OCR ${capture.ocr_status}${capture.ocr_error ? ": " + capture.ocr_error : ""}`
-          : (capture.metadata.quality?.reason ??
-            "Original retained. Retry this receipt.");
-      const identity = document.createElement("p");
-      identity.textContent = `Receipt ${capture.receipt_id.slice(0, 8)} · ${capture.retake_of ? "Retake" : "Take"} ${capture.take_number}`;
-      identity.title = `Receipt ${capture.receipt_id}${capture.retake_of ? ` · Retake of ${capture.retake_of}` : ""}`;
-      info.append(title, identity, detail);
-      row.append(info);
-      const links = document.createElement("div");
-      links.className = "file-links";
-      for (const [kind, label] of [
-        ["raw", "Original"],
-        ...(capture.ocr_status === "unverified" ? [["ocr", "Extraction"]] : []),
-        ...(capture.outputs.image ? [["image", "Crop"]] : []),
-        ...(capture.outputs.pdf ? [["pdf", "PDF"]] : []),
-      ]) {
-        const button = document.createElement("button");
-        button.className = "secondary";
-        button.textContent = label;
-        button.onclick = () => void openFile(capture.id, kind);
-        links.append(button);
-      }
-      row.append(links);
-      container.append(row);
-    }
-  } catch (problem) {
-    error(messageOf(problem));
-  } finally {
-    libraryBusy = false;
-    if (libraryDirty) {
-      libraryDirty = false;
-      void refreshLibrary();
-    }
-  }
-}
-
-async function openFile(id: string, kind: string): Promise<void> {
-  const tab = window.open("", "_blank");
-  try {
-    const response = await fetch(`/api/files/${id}/${kind}`, {
-      cache: "no-store",
-      redirect: "error",
-    });
-    if (!response.ok) throw new Error("File is not available yet.");
-    const url = URL.createObjectURL(await response.blob());
-    if (tab) tab.location.href = url;
-    else {
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${id}.${kind === "pdf" ? "pdf" : "jpg"}`;
-      link.click();
-    }
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } catch (problem) {
-    tab?.close();
-    error(messageOf(problem));
-  }
+  await library?.refresh();
 }
 
 import { registerSiteTools } from "./site-tools";
