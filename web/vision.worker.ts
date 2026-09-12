@@ -282,33 +282,34 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
         "No complete paper outline. Keep the whole receipt inside the preview, away from glare.";
       return q;
     }
-    const edged = complete.filter(({ points, outline }) =>
-      hasPaperEdges(gray.data, width, height, points, outline),
-    );
-    if (!edged.length) {
-      q.empty = clearOfPaper();
-      q.reason =
-        "Paper edges look blurred or unclear. Hold steady, leave a dark gap around the receipt, and move it away from reflections or bright objects.";
-      return q;
+    complete.sort((a, b) => b.area - a.area);
+    const distinctPapers = (regions: typeof candidates) =>
+      regions.filter(
+        (candidate, i) =>
+          !regions.slice(0, i).some((other) => {
+            const bounds = (points: number[][]) => [
+              Math.min(...points.map((p) => p[0])),
+              Math.min(...points.map((p) => p[1])),
+              Math.max(...points.map((p) => p[0])),
+              Math.max(...points.map((p) => p[1])),
+            ];
+            const a = bounds(candidate.points),
+              b = bounds(other.points);
+            const overlap =
+              Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) *
+              Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+            return overlap / ((a[2] - a[0]) * (a[3] - a[1])) > 0.85;
+          }),
+      );
+    let papers = distinctPapers(complete);
+    // Preserve the existing single-paper path. Only disambiguate reflections
+    // when the original segmentation would have rejected multiple regions.
+    if (papers[1]?.area > 0.05) {
+      const edged = complete.filter(({ points, outline }) =>
+        hasPaperEdges(gray.data, width, height, points, outline),
+      );
+      if (edged.length) papers = distinctPapers(edged);
     }
-    edged.sort((a, b) => b.area - a.area);
-    const papers = edged.filter(
-      (candidate, i) =>
-        !edged.slice(0, i).some((other) => {
-          const bounds = (points: number[][]) => [
-            Math.min(...points.map((p) => p[0])),
-            Math.min(...points.map((p) => p[1])),
-            Math.max(...points.map((p) => p[0])),
-            Math.max(...points.map((p) => p[1])),
-          ];
-          const a = bounds(candidate.points),
-            b = bounds(other.points);
-          const overlap =
-            Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])) *
-            Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
-          return overlap / ((a[2] - a[0]) * (a[3] - a[1])) > 0.85;
-        }),
-    );
     const { points } = papers[0];
     q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
     if (papers[1]?.area > 0.05) {
