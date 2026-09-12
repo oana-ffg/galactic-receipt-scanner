@@ -169,6 +169,11 @@ Test persistence failures, retry conflicts, disconnections, stale frames, hand o
 capture/removal transitions and clipping. Run typechecks, build, unit/integration tests,
 browser tests and dependency audit. Distinguish synthetic checks from physical calibration.
 
+Changes to camera-frame scheduling must pass the complete capture loop in both Chromium
+and WebKit: live synthetic camera stream, real vision worker, saved original acknowledgement,
+stationary duplicate protection and removal. Include unavailable/zero playback statistics.
+Encoding-only tests or a mocked vision worker do not establish camera-loop compatibility.
+
 ## Architecture and scope
 
 - Browser-first phone camera plus desktop dashboard; a native iOS capture client is an

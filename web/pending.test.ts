@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { acknowledge, pendingCaptures, savePending } from "./pending";
 
 describe("phone upload recovery buffer", () => {
@@ -22,4 +22,32 @@ describe("phone upload recovery buffer", () => {
     await acknowledge("capture-one");
     expect(await pendingCaptures()).toHaveLength(0);
   });
+});
+
+it("reports the original request error and preserves data when a storage transaction fails", async () => {
+  const capture = {
+    id: "synthetic-conflict",
+    blob: new Blob(["original bytes"], { type: "image/jpeg" }),
+    method: "still",
+    sourcePixels: [2000, 2400],
+    quality: { ok: false, quad: null, hands: [], reason: "test" },
+  };
+  await savePending(capture);
+  // Force a real asynchronous constraint failure, before tx.error is set.
+  const put = vi
+    .spyOn(IDBObjectStore.prototype, "put")
+    .mockImplementation(function (this: IDBObjectStore, value) {
+      return this.add(value);
+    });
+  try {
+    await expect(
+      savePending({ ...capture, blob: new Blob(["different bytes"]) }),
+    ).rejects.toMatchObject({ name: "ConstraintError" });
+    expect(await (await pendingCaptures())[0].blob.text()).toBe(
+      "original bytes",
+    );
+  } finally {
+    put.mockRestore();
+    await acknowledge(capture.id);
+  }
 });

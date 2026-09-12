@@ -1,74 +1,125 @@
-import { expect, test } from "@playwright/test";
+import {
+  chromium,
+  webkit,
+  expect,
+  test,
+  type BrowserContext,
+} from "@playwright/test";
+import { startTestServer } from "../scripts/test-server.mjs";
 
-test("camera analysis waits for a new decoded frame when the video stalls", async ({
-  page,
-}) => {
-  await page.route("**/api/station", (route) =>
-    route.fulfill({ json: { count: 1 } }),
-  );
-  await page.route("**/api/station/claim", (route) =>
-    route.fulfill({ json: { count: 1, sequence: 1 } }),
-  );
-  await page.route("**/api/station/heartbeat", (route) =>
-    route.fulfill({
-      json: { sequence: 1, command: "pause", previewSession: null },
-    }),
-  );
-  await page.addInitScript(() => {
-    window.Worker = class {
-      onmessage: ((event: { data: unknown }) => void) | null = null;
-      postMessage(data: {
-        id: number;
-        preview?: unknown;
-        bitmap?: ImageBitmap;
-      }) {
-        if (data.preview) {
-          const root = document.documentElement;
-          root.dataset.analyses = String(
-            Number(root.dataset.analyses ?? 0) + 1,
-          );
-        }
-        data.bitmap?.close();
-        queueMicrotask(() =>
-          this.onmessage?.({
-            data: {
-              id: data.id,
-              quality: {
-                ok: false,
-                empty: false,
-                quad: null,
-                hands: [],
-                reason: "Synthetic frame",
-              },
-            },
-          }),
-        );
+for (const engine of ["chromium", "webkit"] as const) {
+  test(`${engine} camera captures and rearms with playback counters stuck at zero`, async () => {
+    const server = await startTestServer();
+    let context: BrowserContext | undefined;
+    try {
+      // A disposable normal profile exercises durable Blob storage; Safari
+      // private browsing is not a supported mode for pending originals.
+      context = await (
+        engine === "chromium" ? chromium : webkit
+      ).launchPersistentContext("", {
+        channel: engine === "chromium" ? "chrome" : "",
+        baseURL: server.origin,
+      });
+      const request = context.request;
+      const page = await context.newPage();
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.addInitScript(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2000;
+        canvas.height = 2400;
+        const ctx = canvas.getContext("2d")!;
+        const draw = () => {
+          ctx.fillStyle = "#181818";
+          ctx.fillRect(0, 0, 2000, 2400);
+          if (document.documentElement?.dataset.paper !== "true") return;
+          ctx.fillStyle = "#c8c8c8";
+          ctx.fillRect(380, 180, 1240, 2040);
+          ctx.fillStyle = "#232323";
+          ctx.font = "56px sans-serif";
+          [
+            "SYNTHETIC RECEIPT",
+            "Test item 123.45",
+            "Tax 24.69",
+            "Total 123.45",
+            "TEST DATA ONLY",
+          ].forEach((line, i) => ctx.fillText(line, 450, 420 + i * 210));
+        };
+        draw();
+        setInterval(draw, 70);
+        Object.defineProperty(MediaDevices.prototype, "getUserMedia", {
+          value: async () => canvas.captureStream(15),
+        });
+        Object.defineProperty(window, "ImageCapture", {
+          value: undefined,
+          configurable: true,
+        });
+        HTMLVideoElement.prototype.getVideoPlaybackQuality = function () {
+          return {
+            totalVideoFrames: 0,
+            droppedVideoFrames: 0,
+            corruptedVideoFrames: 0,
+            creationTime: 0,
+          };
+        };
+      });
+      const before = (await (await request.get("/api/captures")).json())
+        .captures.length;
+      await page.goto("/camera");
+
+      await page
+        .getByRole("button", { name: "Enable camera", exact: true })
+        .click();
+      await expect(page.locator("#phase")).not.toHaveText("STARTING CAMERA", {
+        timeout: 20000,
+      });
+      expect(
+        await page.locator("#phase").innerText(),
+        await page.locator("#detail").innerText(),
+      ).not.toBe("CAMERA STOPPED");
+      await expect(
+        page.getByRole("button", { name: "Camera enabled", exact: true }),
+      ).toBeDisabled({ timeout: 20000 });
+      const control = await request.post("/api/control/start", {
+        headers: { Origin: server.origin, "X-Scanner-Request": "1" },
+      });
+      expect(control.ok()).toBe(true);
+      await page.evaluate(() => {
+        document.documentElement.dataset.paper = "true";
+      });
+      await expect
+        .poll(
+          async () => {
+            const phase = await page.locator("#phase").innerText();
+            return phase === "SAVED · NEXT"
+              ? phase
+              : `${phase}: ${await page.locator("#status").innerText()}`;
+          },
+          { timeout: 15000 },
+        )
+        .toBe("SAVED · NEXT");
+      const after = (await (await request.get("/api/captures")).json())
+        .captures;
+      expect(after.length).toBe(before + 1);
+      expect(after[0].status).toBe("accepted");
+      expect(after[0].outputs).toEqual({ image: false, pdf: false });
+      await page.waitForTimeout(1800);
+      expect(
+        (await (await request.get("/api/captures")).json()).captures.length,
+      ).toBe(before + 1);
+      await page.evaluate(() => {
+        document.documentElement.dataset.paper = "false";
+      });
+      await expect(page.locator("#status")).toHaveText(
+        "Ready for the next receipt.",
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      try {
+        await context?.close();
+      } finally {
+        await server.close();
       }
-      terminate() {}
-    } as unknown as typeof Worker;
-    navigator.mediaDevices.getUserMedia = async () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = canvas.height = 64;
-      const stream = canvas.captureStream(10);
-      setInterval(() => canvas.getContext("2d")!.fillRect(0, 0, 64, 64), 50);
-      return stream;
-    };
-    HTMLVideoElement.prototype.getVideoPlaybackQuality = function () {
-      return {
-        totalVideoFrames: Number(document.documentElement.dataset.frames ?? 1),
-      } as VideoPlaybackQuality;
-    };
+    }
   });
-  await page.goto("/camera");
-  await page
-    .getByRole("button", { name: "Enable camera", exact: true })
-    .click();
-  await expect(page.locator("html")).toHaveAttribute("data-analyses", "1");
-  // Keep the media clock advancing while its decoded-frame count is frozen.
-  await page.waitForTimeout(600);
-  await expect(page.locator("html")).toHaveAttribute("data-analyses", "1");
-  await page.evaluate(() => {
-    document.documentElement.dataset.frames = "2";
-  });
-  await expect(page.locator("html")).toHaveAttribute("data-analyses", "2");
-});
+}

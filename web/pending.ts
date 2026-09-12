@@ -28,7 +28,11 @@ async function transaction<T>(
       const tx = db.transaction("pending", mode);
       const request = operation(tx.objectStore("pending"));
       tx.oncomplete = () => resolve(request.result);
-      tx.onerror = () => reject(tx.error);
+      // The request error bubbles before the transaction's error is populated.
+      tx.onerror = () =>
+        reject(
+          request.error ?? tx.error ?? new Error("Local image storage failed."),
+        );
       tx.onabort = () =>
         reject(tx.error ?? new Error("Local image storage failed."));
     });

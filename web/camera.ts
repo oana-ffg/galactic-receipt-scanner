@@ -10,6 +10,7 @@ import {
 import { retakeTarget } from "./control-command";
 import { CaptureState } from "./state";
 import { Vision } from "./vision";
+import { CameraFrames } from "./camera-frames";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import type { Capture, ScanState } from "./types";
 interface PhotoCapture {
@@ -86,8 +87,15 @@ export class PhoneCamera {
     this.stateRevision = 0;
     const generation = ++this.generation;
     this.status("Loading receipt and hand checks…");
-    this.vision = new Vision();
-    await this.vision.request();
+    try {
+      this.vision = new Vision();
+      await this.vision.request();
+    } catch (error) {
+      throw new Error(
+        `Image checks could not start: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.status("Starting camera stream…");
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
@@ -97,8 +105,10 @@ export class PhoneCamera {
         frameRate: { ideal: 15, max: 30 },
       },
     });
+    this.status("Starting camera preview…");
     this.video.srcObject = this.stream;
     await this.video.play();
+    this.status("Connecting camera to the scan station…");
     try {
       await this.claim();
     } catch (error) {
@@ -267,38 +277,42 @@ export class PhoneCamera {
     }
   }
   private async detect(generation: number) {
-    let lastFrame = 0;
-    while (this.running && this.generation === generation) {
-      const started = performance.now();
-      try {
-        const frame = this.video.getVideoPlaybackQuality().totalVideoFrames;
-        if (
-          this.connected &&
-          !this.busy &&
-          this.video.readyState >= 2 &&
-          frame > 0 &&
-          frame !== lastFrame &&
-          document.visibilityState === "visible"
-        ) {
-          lastFrame = frame;
-          drawFrame(this.video, this.canvas, 800);
-          const analysis = await this.vision!.request(
-            await createImageBitmap(this.canvas),
-            { preview: this.machine.previewChecks },
-          );
+    const frames = new CameraFrames(this.video);
+    try {
+      while (this.running && this.generation === generation) {
+        const started = performance.now();
+        try {
+          if (
+            this.connected &&
+            !this.busy &&
+            this.video.readyState >= 2 &&
+            document.visibilityState === "visible" &&
+            frames.take()
+          ) {
+            drawFrame(this.video, this.canvas, 800);
+            const analysis = await this.vision!.request(
+              await createImageBitmap(this.canvas),
+              { preview: this.machine.previewChecks },
+            );
+            if (!this.running || this.generation !== generation) return;
+            if (!this.connected) continue;
+            // A media-clock fallback keeps older browsers usable, but cannot
+            // justify the fast removal path without presented-frame evidence.
+            if (!frames.confirmed) analysis.quality.emptyStrong = false;
+            const id = this.machine.observe(analysis.quality, started);
+            this.emitState();
+            if (id) await this.capture(id);
+          }
+        } catch (error) {
           if (!this.running || this.generation !== generation) return;
-          if (!this.connected) continue;
-          const id = this.machine.observe(analysis.quality, started);
-          this.emitState();
-          if (id) await this.capture(id);
+          this.stop(
+            `Image checks stopped. ${messageOf(error)} Tap Enable camera to restart the checks.`,
+          );
         }
-      } catch (error) {
-        if (!this.running || this.generation !== generation) return;
-        this.stop(
-          `Image checks stopped. ${messageOf(error)} Tap Enable camera to restart the checks.`,
-        );
+        await delay(Math.max(20, 150 - (performance.now() - started)));
       }
-      await delay(Math.max(20, 150 - (performance.now() - started)));
+    } finally {
+      frames.close();
     }
   }
   private async preview(generation: number) {
