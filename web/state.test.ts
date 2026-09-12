@@ -28,11 +28,13 @@ it("requires stability, acknowledgement and clearly empty removal", () => {
   s.observe({ ...clear, ok: false, empty: true }, 2200);
   s.observe({ ...clear, ok: false, empty: true }, 2700);
   expect(s.value.armed).toBe(true);
+  s.observe({ ...clear, ok: false, empty: true }, 3100);
+  expect(s.value.message).toBe("Ready for the next receipt.");
 });
 it("failure stays red until explicit retry", () => {
   const s = new CaptureState();
   s.control("start");
-  s.failed("Storage failed");
+  s.failed("Photo failed", "retake");
   for (const t of [100, 1000, 2000, 3000])
     expect(s.observe(clear, t)).toBeNull();
   expect(s.value.phase).toBe("red");
@@ -105,4 +107,56 @@ it("dampens brief feedback flicker without allowing a failed check to capture", 
   expect(s.value.phase).toBe("red");
   expect(s.value.message).toBe("Blurred");
   expect(s.value.activeId).toBeNull();
+});
+
+it("links repeated retakes to the current paper and clears identity after removal", () => {
+  const s = new CaptureState();
+  s.control("start");
+  s.saved("first", 1);
+  s.control("retry");
+  expect(s.value.retakeOf).toBe("first");
+  for (const t of [100, 400, 700, 1100]) s.observe(clear, t);
+  expect(s.value.activeId).toBeTruthy();
+  s.saved("second", 1);
+  expect(s.value.count).toBe(1);
+  s.control("retry");
+  expect(s.value.retakeOf).toBe("second");
+  const empty = { ...clear, ok: false, empty: true };
+  s.observe(empty, 2000);
+  s.observe(empty, 2500);
+  expect(s.value.lastCapture).toBeNull();
+  expect(s.value.retakeOf).toBeNull();
+});
+
+it("retakes a rejected source and does not attach the next receipt to it", () => {
+  const s = new CaptureState();
+  s.control("start");
+  s.failed("Blurred", "retake", "rejected");
+  s.control("retry");
+  expect(s.value.retakeOf).toBe("rejected");
+  s.failed("Blurred", "retake", "rejected-again");
+  const empty = { ...clear, ok: false, empty: true };
+  s.observe(empty, 100);
+  s.observe(empty, 700);
+  s.control("retry");
+  expect(s.value.retakeOf).toBeNull();
+});
+
+it("cannot bypass a pending upload using either remote Start or Retake", () => {
+  const s = new CaptureState();
+  s.saved("first", 1);
+  s.failed("Upload interrupted", "upload");
+  for (const action of ["retry", "start"]) {
+    s.control(action);
+    expect(s.value.recovery).toBe("upload");
+    expect(s.value.armed).toBe(false);
+    expect(s.observe(clear, 2000)).toBeNull();
+  }
+});
+
+it("ignores Retake when there is no current receipt or failed photo", () => {
+  const s = new CaptureState();
+  s.control("retry");
+  expect(s.value.paused).toBe(true);
+  expect(s.value.retakeOf).toBeNull();
 });

@@ -24,18 +24,20 @@ export function registerSiteTools(refresh: () => Promise<void>) {
   context.registerTool({
     name: "list_receipts",
     description:
-      "List up to 100 private captures with source hashes, quality checks and same-origin download paths. Follow next for older captures. OCR is unverified.",
+      "List up to 100 current accepted receipt takes, one per receipt_id. Set history=true to include rejected and previous takes for reconciliation. Follow next for older captures. OCR is unverified.",
     inputSchema: {
       type: "object",
-      properties: { before: { type: "string" } },
+      properties: { before: { type: "string" }, history: { type: "boolean" } },
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, untrustedContentHint: true },
     async execute(input) {
       return api(
-        "/api/captures" +
+        (input.history === true
+          ? "/api/captures?history=1"
+          : "/api/captures?current=1") +
           (typeof input.before === "string"
-            ? `?before=${encodeURIComponent(input.before)}`
+            ? `&before=${encodeURIComponent(input.before)}`
             : ""),
       );
     },
@@ -78,9 +80,9 @@ export function registerSiteTools(refresh: () => Promise<void>) {
     async execute(input) {
       const captureId = id(input.id);
       const { capture, blob } = await readOriginal(captureId);
-      if (capture.status !== "accepted")
+      if (!capture.is_current)
         throw new Error(
-          "This original needs review before making a crop or PDF.",
+          "Choose the current accepted take before making a crop or PDF.",
         );
       const vision = new Vision();
       try {

@@ -4,6 +4,7 @@ import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
 import { measurePrint } from "./print-quality";
+import { hasPaperEdges } from "./paper-edge";
 let cv: typeof CV;
 let hands: HandLandmarker;
 let previous: Uint8Array | undefined;
@@ -157,7 +158,11 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     const kernel = use(cv.Mat.ones(7, 7, cv.CV_8U));
     const contours = use(new cv.MatVector()),
       hierarchy = use(new cv.Mat());
-    const candidates: { area: number; points: number[][] }[] = [];
+    const candidates: {
+      area: number;
+      points: number[][];
+      outline: number[][];
+    }[] = [];
     const regions: number[][] = [];
     let large = false;
     for (const cut of cuts) {
@@ -196,7 +201,14 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
                 approx.data32S[j * 2],
                 approx.data32S[j * 2 + 1],
               ]);
-              candidates.push({ area, points: ordered(pts) });
+              candidates.push({
+                area,
+                points: ordered(pts),
+                outline: Array.from({ length: contour.rows }, (_, k) => [
+                  contour.data32S[k * 2],
+                  contour.data32S[k * 2 + 1],
+                ]),
+              });
             }
           } finally {
             approx.delete();
@@ -270,10 +282,19 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
         "No complete paper outline. Keep the whole receipt inside the preview, away from glare.";
       return q;
     }
-    complete.sort((a, b) => b.area - a.area);
-    const papers = complete.filter(
+    const edged = complete.filter(({ points, outline }) =>
+      hasPaperEdges(gray.data, width, height, points, outline),
+    );
+    if (!edged.length) {
+      q.empty = clearOfPaper();
+      q.reason =
+        "Paper edges look blurred or unclear. Hold steady, leave a dark gap around the receipt, and move it away from reflections or bright objects.";
+      return q;
+    }
+    edged.sort((a, b) => b.area - a.area);
+    const papers = edged.filter(
       (candidate, i) =>
-        !complete.slice(0, i).some((other) => {
+        !edged.slice(0, i).some((other) => {
           const bounds = (points: number[][]) => [
             Math.min(...points.map((p) => p[0])),
             Math.min(...points.map((p) => p[1])),
@@ -291,7 +312,8 @@ function analyze(bitmap: ImageBitmap, full: boolean): Quality {
     const { points } = papers[0];
     q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
     if (papers[1]?.area > 0.05) {
-      q.reason = "More than one paper region detected.";
+      q.reason =
+        "More than one paper-like region detected. Separate overlapping paper and move bright objects out of view.";
       return q;
     }
     // Conservative: any detected hand blocks capture, including fingertips near the boundary.

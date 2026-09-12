@@ -73,8 +73,10 @@ function renderState(state: ScanState): void {
   if (isCamera) {
     element<HTMLButtonElement>("retake").disabled =
       !state.detectorReady ||
+      !state.cameraConnected ||
+      state.recovery === "upload" ||
       Boolean(state.activeId) ||
-      (state.recovery !== "retake" && state.phase !== "green");
+      (state.recovery !== "retake" && !state.lastCapture);
     element<HTMLButtonElement>("recover").disabled =
       Boolean(state.activeId) || state.recovery !== "upload";
   }
@@ -84,7 +86,8 @@ function renderState(state: ScanState): void {
         Boolean(state.activeId) || !state.detectorReady;
     }
     element<HTMLButtonElement>("retry").disabled ||=
-      state.recovery === "upload";
+      state.recovery === "upload" ||
+      (!state.lastCapture && state.recovery !== "retake");
     element<HTMLButtonElement>("recover").disabled =
       Boolean(state.activeId) || state.recovery !== "upload";
     element<HTMLButtonElement>("start").disabled ||= !state.paused;
@@ -341,14 +344,26 @@ async function refreshLibrary(): Promise<void> {
       row.className = "capture-row";
       const info = document.createElement("div");
       const title = document.createElement("strong");
-      title.textContent = `${new Date(capture.created_at).toLocaleTimeString()} · ${capture.status === "accepted" ? "Saved" : capture.status === "rejected" ? "Retake needed" : "Interrupted check"}`;
+      let label = "Interrupted check";
+      if (capture.status === "accepted")
+        label = capture.is_current
+          ? "Saved · Current take"
+          : "Previous take · Not counted";
+      else if (capture.status === "rejected")
+        label = capture.current_capture_id
+          ? "Rejected take · Not counted"
+          : "Retake needed";
+      title.textContent = `${new Date(capture.created_at).toLocaleTimeString()} · ${label}`;
       const detail = document.createElement("p");
       detail.textContent =
         capture.status === "accepted"
           ? `${capture.metadata.sourcePixels?.join(" × ") ?? ""} source · ${capture.outputs.pdf ? "PDF ready" : "PDF later"} · OCR ${capture.ocr_status}${capture.ocr_error ? ": " + capture.ocr_error : ""}`
           : (capture.metadata.quality?.reason ??
             "Original retained. Retry this receipt.");
-      info.append(title, detail);
+      const identity = document.createElement("p");
+      identity.textContent = `Receipt ${capture.receipt_id.slice(0, 8)} · ${capture.retake_of ? "Retake" : "Take"} ${capture.take_number}`;
+      identity.title = `Receipt ${capture.receipt_id}${capture.retake_of ? ` · Retake of ${capture.retake_of}` : ""}`;
+      info.append(title, identity, detail);
       row.append(info);
       const links = document.createElement("div");
       links.className = "file-links";

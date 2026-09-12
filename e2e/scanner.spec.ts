@@ -452,6 +452,60 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
       (capture: { status: string }) => capture.status === "accepted",
     ),
   ).toHaveLength(4);
+  const current = batch[0];
+  const rejected = batch.find(
+    (capture: { status: string }) => capture.status === "rejected",
+  );
+  expect(current.retake_of).toBe(rejected.id);
+  expect(current.receipt_id).toBe(rejected.receipt_id);
+  // A desktop retake of an accepted photo stays one receipt even if its
+  // acknowledgement is lost and the phone has to retry the original upload.
+  await phone.evaluate(() =>
+    Object.assign(
+      (window as unknown as { scannerFixture: object }).scannerFixture,
+      { failAcknowledgement: true },
+    ),
+  );
+  await page.getByRole("button", { name: "Retake photo", exact: true }).click();
+  await expect(phone.locator("#phase")).toHaveText("NEEDS ATTENTION");
+  const duringRetry = (await (await request.get("/api/captures")).json())
+    .captures;
+  const retake = duringRetry[0];
+  expect(retake).toMatchObject({
+    receipt_id: current.receipt_id,
+    retake_of: current.id,
+    take_number: 3,
+    is_current: true,
+  });
+  expect((await (await request.get("/api/station")).json()).count).toBe(4);
+  await phone.evaluate(() =>
+    Object.assign(
+      (window as unknown as { scannerFixture: object }).scannerFixture,
+      { failAcknowledgement: false },
+    ),
+  );
+  await phone
+    .getByRole("button", { name: "Retry upload", exact: true })
+    .click();
+  await expect(phone.locator("#phase")).toHaveText("SAVED · NEXT");
+  await expect(phone.locator("#count")).toHaveText("4");
+  await expect(page.locator("#captures")).toContainText(
+    "Previous take · Not counted",
+  );
+  await expect(page.locator("#captures")).toContainText("Retake 3");
+  const afterRetry = (await (await request.get("/api/captures")).json())
+    .captures;
+  expect(afterRetry).toHaveLength(duringRetry.length);
+  expect(
+    afterRetry.find((capture: { id: string }) => capture.id === current.id),
+  ).toMatchObject({ is_current: false, sha256: current.sha256 });
+  const currentTakes = (
+    await (await request.get("/api/captures?current=1")).json()
+  ).captures;
+  expect(currentTakes).toHaveLength(4);
+  expect(
+    currentTakes.some((capture: { id: string }) => capture.id === current.id),
+  ).toBe(false);
   await phone.close();
   // Crops and PDFs are an explicit downstream action on an existing original.
   const prepared = (await page.evaluate(async (id) => {

@@ -4,8 +4,13 @@ This workflow belongs to the owner's Work/Codex session after scanning. The oper
 does not need to sort receipts, transcribe text or create PDFs while feeding the camera.
 
 1. Open the private dashboard as the owner. Use `list_receipts` and follow every `next`
-   cursor. Record each capture ID, original SHA-256, acceptance status and output status.
-   Keep rejected originals in a separate review list; never silently omit them.
+   cursor for current accepted takes. Record `receipt_id`, capture ID, take number, source
+   SHA-256 and output status. Count each `receipt_id` once. Also list with `history: true`
+   to reconcile all previous and rejected takes. `is_current` identifies the accepted
+   take to process; `current_capture_id` links history to it. A receipt with no accepted
+   take stays on the review list. Recheck current selection before final reporting.
+   Older captures without recorded retake links need visual duplicate review; do not
+   infer receipt identity from matching amounts or nearby capture times.
 2. Call `transcribe_saved_receipts` with up to 20 accepted IDs at a time. This runs
    Danish/English OCR locally in the desktop browser, independently of camera capture.
    One worker is reused within each batch. Inspect every returned result: a failed item
