@@ -43,10 +43,16 @@ export class HandChecks {
       const captureDue =
         this.candidateSince !== undefined &&
         now - this.candidateSince >= HAND_CHECK_LEAD_MS;
-      if (!captureDue && !(preview.removal && empty)) return quality;
+      if (!captureDue && !(preview.removal && empty)) {
+        // Preserve empty-desk feedback after rearming without running idle ML.
+        // Removal still requires handsChecked, which remains false here.
+        quality.empty = empty;
+        return quality;
+      }
 
       if (
         this.blocked &&
+        !preview.removal &&
         now - this.blocked.at < HAND_RETRY_MS &&
         !changed(this.blocked.scene, scene())
       ) {

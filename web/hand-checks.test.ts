@@ -94,10 +94,11 @@ it("throttles stationary hand rejections but promptly retries a changed scene", 
 it("retries a blocked scene within 750ms even if tiny movements escape the thumbnail", () => {
   const checks = new HandChecks();
   const detect = vi.fn(() => hand);
-  checks.apply(empty(), removal, 0, scene, detect);
-  checks.apply(empty(), removal, 600, scene, detect);
+  checks.apply(paper(), capture, -750, scene, detect);
+  checks.apply(paper(), capture, 0, scene, detect);
+  checks.apply(paper(), capture, 600, scene, detect);
   expect(detect).toHaveBeenCalledTimes(1);
-  checks.apply(empty(), removal, 750, scene, detect);
+  checks.apply(paper(), capture, 750, scene, detect);
   expect(detect).toHaveBeenCalledTimes(2);
 });
 
@@ -114,10 +115,14 @@ it("requires fresh hand-free removal evidence and stops ML once rearmed", () => 
     );
   expect(state.value.armed).toBe(true);
   expect(detect).toHaveBeenCalledTimes(4);
-  state.observe(
-    checks.apply(empty(), state.previewChecks, 700, scene, detect),
-    700,
-  );
+  for (const now of [700, 1000, 1400]) {
+    state.observe(
+      checks.apply(empty(), state.previewChecks, now, scene, detect),
+      now,
+    );
+    expect(state.value.message).toBe("Ready for the next receipt.");
+    expect(state.value.activeId).toBeNull();
+  }
   expect(detect).toHaveBeenCalledTimes(4);
 });
 
@@ -156,14 +161,47 @@ it("blocks removal on hands and cannot borrow clear time across an obstruction",
   );
   expect(state.value.armed).toBe(false);
   state.observe(
-    checks.apply(empty(), removal, 1150, scene, () => []),
-    1150,
+    checks.apply(empty(), removal, 850, scene, () => []),
+    850,
   );
   expect(state.value.armed).toBe(false);
   state.observe(
-    checks.apply(empty(), removal, 1600, scene, () => []),
-    1600,
+    checks.apply(empty(), removal, 1000, scene, () => []),
+    1000,
   );
+  expect(state.value.armed).toBe(true);
+});
+
+it("rechecks hands on each possible removal frame, even below the scene-change threshold", () => {
+  const checks = new HandChecks();
+  const state = new CaptureState();
+  state.control("start");
+  state.saved("synthetic-capture");
+  const detect = vi.fn().mockReturnValueOnce(hand).mockReturnValue([]);
+  for (const now of [100, 250]) {
+    state.observe(
+      checks.apply(
+        { ...empty(), emptyStrong: true },
+        removal,
+        now,
+        scene,
+        detect,
+      ),
+      now,
+    );
+    expect(state.value.armed).toBe(false);
+  }
+  state.observe(
+    checks.apply(
+      { ...empty(), emptyStrong: true },
+      removal,
+      400,
+      scene,
+      detect,
+    ),
+    400,
+  );
+  expect(detect).toHaveBeenCalledTimes(3);
   expect(state.value.armed).toBe(true);
 });
 

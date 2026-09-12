@@ -52,13 +52,40 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     const ready = await analyze(scanning);
     const photo = await analyze({ full: true });
     const saved = await analyze({ preview: { capture: false, removal: true } });
+    const removal = { preview: { capture: false, removal: true } };
+    const original = document.createElement("canvas");
+    original.width = canvas.width;
+    original.height = canvas.height;
+    original.getContext("2d")!.drawImage(canvas, 0, 0);
+    ctx.fillStyle = "#181818";
+    ctx.fillRect(0, 0, 2000, 2400);
+    ctx.drawImage(original, 100, 0);
+    const moved = await analyze(removal);
+    ctx.fillStyle = "#181818";
+    ctx.fillRect(0, 0, 2000, 2400);
+    ctx.drawImage(original, -700, 0);
+    const clipped = await analyze(removal);
+    ctx.fillStyle = "#c8c8c8";
+    ctx.fillRect(0, 0, 2000, 2400);
+    const washedOut = await analyze(removal);
     ctx.fillStyle = "#181818";
     ctx.fillRect(0, 0, 2000, 2400);
     const removed = await analyze({
       preview: { capture: false, removal: true },
     });
     worker.terminate();
-    return { idle, paused, candidate, ready, photo, saved, removed };
+    return {
+      idle,
+      paused,
+      candidate,
+      ready,
+      photo,
+      saved,
+      moved,
+      clipped,
+      washedOut,
+      removed,
+    };
   }, `/assets/${workerFile}`);
   expect(result.idle).toMatchObject({ ok: false, handsChecked: false });
   expect(result.paused).toMatchObject({ ok: false, handsChecked: false });
@@ -82,8 +109,13 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     handsChecked: false,
     empty: false,
   });
+  expect(result.saved.sharpness).toBeUndefined();
+  for (const quality of [result.moved, result.clipped])
+    expect(quality.empty).toBe(false);
+  expect(result.washedOut.emptyStrong).toBe(false);
   expect(result.removed).toMatchObject({
     empty: true,
+    emptyStrong: true,
     handsChecked: true,
     hands: [],
   });

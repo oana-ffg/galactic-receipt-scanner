@@ -7,6 +7,8 @@ export interface Quality {
   candidateReady?: boolean;
   reason: string;
   empty?: boolean;
+  /** Last paper area is clear even at the most inclusive segmentation cut. */
+  emptyStrong?: boolean;
   motion?: number;
   focus?: number;
   contrast?: number;

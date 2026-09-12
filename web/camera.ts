@@ -267,15 +267,20 @@ export class PhoneCamera {
     }
   }
   private async detect(generation: number) {
+    let lastFrame = 0;
     while (this.running && this.generation === generation) {
       const started = performance.now();
       try {
+        const frame = this.video.getVideoPlaybackQuality().totalVideoFrames;
         if (
           this.connected &&
           !this.busy &&
           this.video.readyState >= 2 &&
+          frame > 0 &&
+          frame !== lastFrame &&
           document.visibilityState === "visible"
         ) {
+          lastFrame = frame;
           drawFrame(this.video, this.canvas, 800);
           const analysis = await this.vision!.request(
             await createImageBitmap(this.canvas),
@@ -283,7 +288,7 @@ export class PhoneCamera {
           );
           if (!this.running || this.generation !== generation) return;
           if (!this.connected) continue;
-          const id = this.machine.observe(analysis.quality, performance.now());
+          const id = this.machine.observe(analysis.quality, started);
           this.emitState();
           if (id) await this.capture(id);
         }

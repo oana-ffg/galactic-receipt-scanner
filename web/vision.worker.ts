@@ -19,6 +19,7 @@ const sceneContext = sceneCanvas.getContext("2d", {
 })!;
 let previous: Uint8Array | undefined;
 let paperBounds: number[] | undefined;
+let paperBrightness: number | undefined;
 const canvas = new OffscreenCanvas(1, 1);
 const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 // OpenCV's browser bundle publishes a promise on self.cv, including its WASM payload.
@@ -99,11 +100,15 @@ function crop(src: CV.Mat, quad: number[][]): CV.Mat {
     transform.delete();
   }
 }
-type OutputQuality = Quality & { outputQuad?: number[][] };
+type OutputQuality = Quality & {
+  outputQuad?: number[][];
+  paperBrightness?: number;
+};
 function analyze(
   bitmap: ImageBitmap,
   full: boolean,
   outputs = false,
+  removalOnly = false,
 ): OutputQuality {
   const scale = Math.min(1, 800 / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale);
@@ -176,9 +181,37 @@ function analyze(
     }[] = [];
     const regions: number[][] = [];
     let large = false;
+    let areaBrightness = 255;
+    const paperOccupancy = () => {
+      if (!paperBounds) return 1;
+      const [left, top, right, bottom] = paperBounds;
+      const insetX = (right - left) * 0.1;
+      const insetY = (bottom - top) * 0.1;
+      let occupied = 0,
+        brightness = 0,
+        samples = 0;
+      for (
+        let y = Math.ceil((top + insetY) * height);
+        y < (bottom - insetY) * height;
+        y++
+      )
+        for (
+          let x = Math.ceil((left + insetX) * width);
+          x < (right - insetX) * width;
+          x++
+        ) {
+          occupied += mask.data[y * width + x] > 0 ? 1 : 0;
+          brightness += gray.data[y * width + x];
+          samples++;
+        }
+      areaBrightness = samples ? brightness / samples : 255;
+      return samples ? occupied / samples : 1;
+    };
+    let inclusiveOccupancy = 1;
     for (const cut of cuts) {
       cv.threshold(smooth, mask, cut, 255, cv.THRESH_BINARY);
       cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
+      if (cut === cuts[0]) inclusiveOccupancy = paperOccupancy();
       cv.findContours(
         mask,
         contours,
@@ -245,28 +278,17 @@ function analyze(
       // A region's bounding box can cover an empty desk (glare, keyboard,
       // cables). Measure actual foreground occupancy where paper was seen.
       // Use the highest segmentation cut, which separates paper from glare.
-      const [left, top, right, bottom] = paperBounds;
-      const insetX = (right - left) * 0.1;
-      const insetY = (bottom - top) * 0.1;
-      let occupied = 0,
-        samples = 0;
-      for (
-        let y = Math.ceil((top + insetY) * height);
-        y < (bottom - insetY) * height;
-        y++
-      )
-        for (
-          let x = Math.ceil((left + insetX) * width);
-          x < (right - insetX) * width;
-          x++
-        ) {
-          occupied += mask.data[y * width + x] > 0 ? 1 : 0;
-          samples++;
-        }
-      return samples > 0 && occupied / samples < 0.3;
+      return paperOccupancy() < 0.3;
     };
+    // A uniformly bright/washed-out frame can have no segmented regions too.
+    // Fast removal also needs the old paper area to become substantially darker.
+    const stronglyClear = () =>
+      inclusiveOccupancy < 0.08 &&
+      paperBrightness !== undefined &&
+      paperBrightness - areaBrightness > Math.max(30, paperBrightness * 0.35);
     if (!candidates.length) {
       q.empty = clearOfPaper();
+      q.emptyStrong = q.empty && stronglyClear();
       if (large)
         q.reason =
           "Paper outline is unclear. Reduce glare and leave space around the paper.";
@@ -287,6 +309,7 @@ function analyze(
       // Peripheral glare must not prevent rearming after the last paper's area
       // is clear. An edge region overlapping that area still blocks removal.
       q.empty = clearOfPaper();
+      q.emptyStrong = q.empty && stronglyClear();
       q.reason =
         "No complete paper outline. Keep the whole receipt inside the preview, away from glare.";
       return q;
@@ -311,6 +334,9 @@ function analyze(
     );
     const { points } = papers[0];
     q.quad = points.map((p) => [p[0] / canvas.width, p[1] / canvas.height]);
+    // A saved receipt only needs presence checks. Print quality and aligned
+    // motion cannot unlock it; run them again after confirmed removal.
+    if (removalOnly) return q;
     if (papers[1]?.area > 0.05) {
       q.reason =
         "More than one paper-like region detected. Separate overlapping paper and move bright objects out of view.";
@@ -431,6 +457,7 @@ function analyze(
       return q;
     }
     q.ok = true;
+    q.paperBrightness = cv.mean(interior)[0];
     q.reason = "Image checks passed.";
     if (outputs) {
       // Containment corners may bridge folds and must not be treated as true
@@ -466,8 +493,14 @@ async function process(
     // Saved originals are independent documents, not consecutive camera frames.
     previous = undefined;
     paperBounds = undefined;
+    paperBrightness = undefined;
   }
-  const quality = analyze(bitmap, full, outputs);
+  const quality = analyze(
+    bitmap,
+    full,
+    outputs,
+    !full && !outputs && preview?.removal === true && !preview.capture,
+  );
   handChecks.apply(
     quality,
     full || outputs ? undefined : preview,
@@ -480,6 +513,7 @@ async function process(
       hands.detect(canvas).landmarks.map((hand) => hand.map((p) => [p.x, p.y])),
   );
   if (quality.ok && quality.quad) {
+    paperBrightness = quality.paperBrightness;
     paperBounds = [
       Math.min(...quality.quad.map((p) => p[0])),
       Math.min(...quality.quad.map((p) => p[1])),
@@ -487,6 +521,7 @@ async function process(
       Math.max(...quality.quad.map((p) => p[1])),
     ];
   }
+  delete quality.paperBrightness;
   if (!outputs || !quality.ok) return { quality };
   const frame = new OffscreenCanvas(bitmap.width, bitmap.height);
   const context = frame.getContext("2d")!;

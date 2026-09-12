@@ -24,6 +24,10 @@ public signup, shared receipt database, pairing secret or public file bucket.
 - OpenCV paper edges, focus/print/motion checks and MediaPipe hand detection in a phone worker.
   Preview hand detection runs near the end of the stability window after the other
   checks pass, and when confirming removal. Every captured photo is checked afresh.
+  Removal uses a 150 ms confirmation for consecutive hand-free frames where the last
+  paper area is clear at the most inclusive segmentation threshold and substantially
+  darker than the paper. Ambiguous backgrounds keep the 450 ms confirmation. Saved
+  paper skips print analysis; motion or outline loss alone never re-arms capture.
   Idle or paused previews skip capture ML; pause still leaves the camera and preview on.
 - Direct live video and controls between owner-authenticated devices when the network allows it, with an Internet preview fallback.
 - Full-resolution original capture; crops and image PDFs are prepared by Work/Codex after scanning.

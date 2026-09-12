@@ -73,6 +73,9 @@ is needed; both devices need Internet access.
 - Red: read the reason; move hands away, adjust focus, or retry.
 - Amber: the label distinguishes stability checks, taking the photo, checking the captured image, and saving the original. Crops and PDFs do not run during capture.
 - Green: the original and quality metadata are durably saved and its checksum verified; remove the receipt completely before inserting the next.
+  Leave a brief visible gap: clearly empty, hand-free frames can confirm removal after
+  150 ms; ambiguous backgrounds need 450 ms. Actual timing also depends on the phone's
+  processing speed. A swap without an observed clear gap stays locked to prevent duplicates.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
 - The desktop shows the latest saved original with the outline detected in that photo.
   Use **Inspect full size** and **Actual pixels** to check fine print; the outline is an

@@ -1,6 +1,7 @@
 import type { Quality, ScanState } from "./types";
 import { retakeTarget } from "./control-command";
 import type { PreviewChecks } from "./hand-checks";
+import { RemovalEvidence } from "./removal";
 export class CaptureState {
   value: ScanState = {
     type: "state",
@@ -29,7 +30,7 @@ export class CaptureState {
   };
   private stable = 0;
   private frames = 0;
-  private absent = 0;
+  private removal = new RemovalEvidence();
   private feedback: {
     phase: "red" | "amber";
     message: string;
@@ -76,7 +77,7 @@ export class CaptureState {
     if (target || action === "cancel-retake") {
       if (this.value.recovery === "upload") return;
       this.reset();
-      this.absent = 0;
+      this.removal.reset();
       this.latched = false;
       this.value.lastCapture = null;
       this.value.retakeOf = target;
@@ -150,20 +151,18 @@ export class CaptureState {
       !this.value.manualReview &&
       (this.value.lastCapture || !this.value.armed)
     ) {
-      if (q.empty && q.handsChecked === true && !q.hands.length) {
-        this.absent ||= now;
-        if (now - this.absent >= 450) {
-          this.value.lastCapture = null;
-          if (!this.value.paused) this.value.manualReview = false;
-          this.value.retakeOf = null;
-          this.value.armed = true;
-          this.reset();
-          if (!this.latched && !this.value.paused) {
-            this.value.phase = "red";
-            this.value.message = "Ready for the next receipt.";
-          }
+      if (this.removal.observe(q, now)) {
+        this.value.lastCapture = null;
+        if (!this.value.paused) this.value.manualReview = false;
+        this.value.retakeOf = null;
+        this.value.armed = true;
+        this.reset();
+        if (!this.latched && !this.value.paused) {
+          this.value.phase = "red";
+          this.value.message = "Ready for the next receipt.";
         }
-      } else this.absent = 0;
+        this.removal.reset();
+      }
     }
     if (this.value.paused || this.latched || !this.value.armed) return null;
     if (q.empty && !q.hands.length) {
@@ -217,7 +216,7 @@ export class CaptureState {
     this.value.selectedRetake = false;
     this.value.recovery = undefined;
     this.value.armed = false;
-    this.absent = 0;
+    this.removal.reset();
     this.latched = false;
     this.value.manualReview = manual;
     if (manual) this.value.paused = true;
@@ -232,7 +231,7 @@ export class CaptureState {
       this.value.lastCapture = retainedId;
       this.value.retakeOf = null;
       this.value.armed = false;
-      this.absent = 0;
+      this.removal.reset();
     }
     this.value.selectedRetake = Boolean(this.value.retakeOf);
     this.value.manualReview = false;
@@ -250,7 +249,7 @@ export class CaptureState {
   interrupt() {
     // Re-establish stability and continuous paper removal after a connection gap.
     // Keep saved/failed captures and the removal latch intact.
-    this.absent = 0;
+    this.removal.reset();
     this.reset();
   }
 }
