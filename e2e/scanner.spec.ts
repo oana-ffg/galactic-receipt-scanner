@@ -30,7 +30,7 @@ test("capture survives preview delays and a lost acknowledgement without creatin
   await expect(phone.locator("#phase")).toHaveText("ENABLE CAMERA");
   await expect(phone.locator("#status")).toContainText("Tap Enable camera");
   await phone.getByRole("button", { name: "Enable camera" }).click();
-  await expect(phone.locator("#status")).toContainText("Choose Start scanning");
+  await expect(phone.locator("#phase")).toHaveText("WAIT");
   await expect
     .poll(async () =>
       (await request.get("/api/station"))
@@ -38,9 +38,9 @@ test("capture survives preview delays and a lost acknowledgement without creatin
         .then((station) => station.fresh),
     )
     .toBe(true);
-  await page
-    .getByRole("button", { name: "Start scanning", exact: true })
-    .click();
+  await expect(
+    page.getByRole("button", { name: "Start scanning", exact: true }),
+  ).toBeDisabled();
   await expect(phone.locator("#phase")).toHaveText("WAIT");
   await phone.evaluate(() => {
     (
@@ -411,6 +411,8 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
       .getVideoPlaybackQuality;
   });
   await expect(page.locator("#live-feed")).toBeVisible({ timeout: 15000 });
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(phone.locator("#phase")).toHaveText("PAUSED", { timeout: 1500 });
   // Keep delivering an older amber RTC state after the phone saves. HTTP's
   // newer revision must turn the desktop green despite a "fresh" data channel.
   await phone.evaluate(() => {

@@ -27,3 +27,21 @@ test("status and warning messages never move the preview or controls", async ({
     expect(positions.after).toEqual(positions.before);
   }
 });
+
+test("phone start control is visible without scrolling at the reported viewport", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 393, height: 695 });
+  await page.goto("/camera");
+  const button = page.getByRole("button", {
+    name: "Enable camera",
+    exact: true,
+  });
+  await expect(button).toBeInViewport();
+  const box = await button.boundingBox();
+  const preview = await page.locator("#preview").boundingBox();
+  expect(box!.y + box!.height).toBeLessThan(preview!.y);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    393,
+  );
+});

@@ -178,3 +178,31 @@ describe("paper boundary enclosure", () => {
     ).toBeNull();
   });
 });
+
+it("fits long paper edges without letting a folded corner tip tilt the enclosure", async () => {
+  const { refinePaperEdges } = await import("./paper-geometry");
+  const contour = [
+    [0, 0],
+    [100, 0],
+    [100, 200],
+    [12, 200],
+    [0, 188],
+  ];
+  const approximate = [contour[0], contour[1], contour[2], contour[3]];
+  const enclosed = enclosePaperContour(
+    refinePaperEdges(approximate, contour),
+    contour,
+  )!;
+  expect(enclosed).not.toBeNull();
+  expect(enclosed[0][0]).toBeCloseTo(0);
+  expect(enclosed[3][0]).toBeCloseTo(0);
+  expect(enclosed[3][1]).toBeCloseTo(200);
+  for (let i = 0; i < 4; i++) {
+    const a = enclosed[i],
+      b = enclosed[(i + 1) % 4];
+    for (const [x, y] of contour)
+      expect(
+        (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]),
+      ).toBeGreaterThanOrEqual(-1e-8);
+  }
+});

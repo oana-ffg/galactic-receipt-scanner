@@ -35,6 +35,27 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         const draw = () => {
           ctx.fillStyle = "#181818";
           ctx.fillRect(0, 0, 2000, 2400);
+          if (photoApi === "unavailable") {
+            ctx.fillStyle = "#c8c8c8";
+            ctx.beginPath();
+            ctx.moveTo(60, 300);
+            ctx.lineTo(220, 1300);
+            ctx.lineTo(160, 2200);
+            ctx.lineTo(70, 2050);
+            ctx.closePath();
+            ctx.fill();
+          }
+          if (document.documentElement?.dataset.paper === "folded") {
+            ctx.fillStyle = "#c8c8c8";
+            ctx.beginPath();
+            ctx.moveTo(1740, 300);
+            ctx.lineTo(1920, 850);
+            ctx.lineTo(1780, 1300);
+            ctx.lineTo(1680, 800);
+            ctx.closePath();
+            ctx.fill();
+            return;
+          }
           if (document.documentElement?.dataset.paper !== "true") return;
           ctx.fillStyle = "#c8c8c8";
           ctx.fillRect(380, 180, 1240, 2040);
@@ -50,6 +71,28 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         };
         draw();
         setInterval(draw, 70);
+        const post = Worker.prototype.postMessage;
+        Worker.prototype.postMessage = function (message, ...rest) {
+          if (
+            message.calibrate &&
+            document.documentElement.dataset.failCalibration === "true"
+          ) {
+            delete document.documentElement.dataset.failCalibration;
+            message.bitmap?.close();
+            queueMicrotask(() =>
+              this.dispatchEvent(
+                new MessageEvent("message", {
+                  data: {
+                    id: message.id,
+                    error: "Synthetic calibration interruption",
+                  },
+                }),
+              ),
+            );
+            return;
+          }
+          return post.call(this, message, ...rest);
+        };
         Object.defineProperty(MediaDevices.prototype, "getUserMedia", {
           value: async () => canvas.captureStream(15),
         });
@@ -99,10 +142,24 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       await expect(
         page.getByRole("button", { name: "Camera enabled", exact: true }),
       ).toBeDisabled({ timeout: 20000 });
-      const control = await request.post("/api/control/start", {
-        headers: { Origin: server.origin, "X-Scanner-Request": "1" },
-      });
-      expect(control.ok()).toBe(true);
+      await expect(page.locator("#phase")).toHaveText("WAIT");
+      if (photoApi === "unavailable") {
+        await page.evaluate(() => {
+          document.documentElement.dataset.failCalibration = "true";
+        });
+        await page.locator("#set-background").click();
+        await expect(page.locator("#phase")).toHaveText("CAMERA STOPPED");
+        await page
+          .getByRole("button", { name: "Enable camera", exact: true })
+          .click();
+        await expect(page.locator("#phase")).toHaveText("WAIT", {
+          timeout: 20000,
+        });
+        await page.locator("#set-background").click();
+        await expect(page.locator("#set-background")).toHaveText(
+          "Reset empty desk",
+        );
+      }
       await page.evaluate(() => {
         document.documentElement.dataset.paper = "true";
       });
@@ -122,10 +179,30 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       expect(after.length).toBe(before + 1);
       expect(after[0].status).toBe("accepted");
       expect(after[0].outputs).toEqual({ image: false, pdf: false });
+      if (photoApi === "unavailable") {
+        await page.locator("#set-background").click();
+        await expect(page.locator("#background-status")).toContainText(
+          "Clear all paper and hands",
+        );
+      }
       await page.waitForTimeout(1800);
       expect(
         (await (await request.get("/api/captures")).json()).captures.length,
       ).toBe(before + 1);
+      if (photoApi === "unavailable") {
+        await page.evaluate(() => {
+          document.documentElement.dataset.paper = "folded";
+        });
+        await page.waitForTimeout(1200);
+        await expect(page.locator("#phase")).toHaveText("SAVED · NEXT");
+        await page.evaluate(() => {
+          document.documentElement.dataset.paper = "true";
+        });
+        await page.waitForTimeout(1500);
+        expect(
+          (await (await request.get("/api/captures")).json()).captures.length,
+        ).toBe(before + 1);
+      }
       await page.evaluate(() => {
         document.documentElement.dataset.paper = "false";
       });
@@ -142,9 +219,7 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         .getByLabel("Title", { exact: true })
         .fill("Synthetic camera diagnostics");
       await dialog.getByRole("button", { name: "Save private issue" }).click();
-      await expect(dialog.locator(".issue-feedback")).toContainText(
-        "Private issue saved.",
-      );
+      await expect(dialog).not.toBeVisible();
       const reports = await (await request.get("/api/issues")).json();
       const diagnostic = reports.issues[0].context.diagnostics;
       expect(diagnostic.device).toBe("phone");

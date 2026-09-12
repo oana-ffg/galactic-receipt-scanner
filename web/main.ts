@@ -21,14 +21,17 @@ let retakePending: string | null = null;
 if (location.pathname === "/issues") {
   void import("./issues").then((module) => module.mountIssues(app));
 } else {
+  app.classList.toggle("camera-page", isCamera);
   app.innerHTML = `
     <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/issues">Private issues</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
-    <p id="connection-warning" class="connection-warning" role="status"></p>
+    ${isCamera ? '<div class="camera-start"><button id="enable">Enable camera</button><p>Scanning starts automatically once the camera is ready.</p></div>' : ""}
+    ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="enable">Enable camera</button><button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}<button id="force" class="secondary" disabled>Force take</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
-    <p id="error" class="error" role="alert"></p></section>
+    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}<button id="force" class="secondary" disabled>Force take</button><button id="set-background" class="secondary" title="Clear all paper and hands first. Set again after moving the phone or changing the lighting." disabled>Set empty desk</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    <p id="background-status" class="detail" role="status" hidden></p>
+    <p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
     ${isCamera ? "" : '<aside><section id="saved-photo" class="saved-photo"><h2>Last photo saved</h2><p>No photo saved yet.</p></section><details><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
     </div>
     ${isCamera ? "" : '<section class="library"><div class="library-heading"><h2>Recent captures</h2><span>Originals stay intact · OCR is unverified</span></div><div id="captures"><p class="muted">No captures yet.</p></div><nav class="pagination" aria-label="Capture pages"><button id="captures-previous" class="secondary" disabled>Newer</button><span id="captures-page">Page 1</span><button id="captures-next" class="secondary" disabled>Older</button></nav></section>'}`;
@@ -76,6 +79,16 @@ function renderState(state: ScanState): void {
     Boolean(state.activeId) ||
     state.recovery === "upload" ||
     Boolean(retakePending);
+  element<HTMLButtonElement>("set-background").disabled =
+    !state.supportsBackground ||
+    !state.cameraConnected ||
+    !state.detectorReady ||
+    Boolean(state.activeId) ||
+    state.recovery === "upload";
+  element<HTMLButtonElement>("set-background").textContent =
+    state.backgroundReady ? "Reset empty desk" : "Set empty desk";
+  element("background-status").textContent = state.backgroundMessage ?? "";
+  element("background-status").hidden = !state.backgroundMessage;
   element<HTMLButtonElement>("cancel-retake").hidden = !state.selectedRetake;
   element<HTMLButtonElement>("cancel-retake").disabled =
     Boolean(state.activeId) || state.recovery === "upload";
@@ -154,6 +167,7 @@ function disconnected(reason = "Connection lost. Waiting to reconnect…"): void
     "recover",
     "force",
     "cancel-retake",
+    "set-background",
   ]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
     if (button) button.disabled = true;
@@ -210,6 +224,7 @@ function mountCamera(): void {
     }
   };
   element("recover").onclick = () => void camera.recover();
+  element("set-background").onclick = () => camera.setBackground();
   element("retake").onclick = () => camera.retake();
   element("force").onclick = () => void camera.force();
   element("cancel-retake").onclick = () =>
@@ -496,6 +511,7 @@ function mountDashboard(): void {
     "recover",
     "force",
     "cancel-retake",
+    "set-background",
   ]) {
     element(id).onclick = async () => {
       error("");

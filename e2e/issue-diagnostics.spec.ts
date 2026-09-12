@@ -50,9 +50,7 @@ test("private reports freeze diagnostic history and retry an uncertain save unch
   await dialog.getByRole("button", { name: "Save private issue" }).click();
   await expect(dialog.locator(".issue-feedback")).toContainText("Retry saving");
   await dialog.getByRole("button", { name: "Save private issue" }).click();
-  await expect(dialog.locator(".issue-feedback")).toContainText(
-    "Private issue saved.",
-  );
+  await expect(dialog).not.toBeVisible();
   expect(contexts).toHaveLength(2);
   expect(contexts[0]).toEqual(contexts[1]);
   const reports = (

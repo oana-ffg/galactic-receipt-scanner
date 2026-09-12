@@ -718,17 +718,20 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (
       retakeTarget(command) ||
       command === "cancel-retake" ||
-      command === "force"
+      command === "force" ||
+      command === "set-background"
     ) {
       const state = station.state ? JSON.parse(station.state) : null;
       requireThat(
         station.expires > Date.now() &&
           station.updated > Date.now() - 5000 &&
-          (command === "force"
-            ? state?.supportsForce
-            : state?.supportsTargetedRetake) === true,
+          (command === "set-background"
+            ? state?.supportsBackground
+            : command === "force"
+              ? state?.supportsForce
+              : state?.supportsTargetedRetake) === true,
         409,
-        "Enable or reload the phone camera before selecting a retake.",
+        "Enable or reload the phone camera before using this control.",
       );
       // Targeted retakes are queued until the phone finishes any pending upload.
       // Its live state is authoritative; the stored heartbeat can lag a save acknowledgement.

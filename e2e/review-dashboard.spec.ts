@@ -105,9 +105,7 @@ test("shows saved edges, paginates, remembers audio and stores a private screens
     .fill("Synthetic screenshot test");
   await dialog.getByLabel("What happened?").fill("Synthetic source only.");
   await dialog.getByRole("button", { name: "Save private issue" }).click();
-  await expect(dialog.locator(".issue-feedback")).toContainText(
-    "Private issue saved.",
-  );
+  await expect(dialog).not.toBeVisible();
   expect(await dialog.locator('a[href*="github.com"]').count()).toBe(0);
   const issues = await (await request.get("/api/issues")).json();
   const issue = issues.issues.find(

@@ -49,6 +49,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       "folded-corners",
       "folded-two-papers",
       "folded-near-frame",
+      "folded-clipped",
     ]) {
       ctx.filter = "none";
       ctx.fillStyle = kind === "lit-empty" ? "#727272" : "#181818";
@@ -104,6 +105,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
       if (!kind.includes("empty") && !kind.endsWith("after-removal")) {
         ctx.save();
         if (kind === "folded-near-frame") ctx.translate(0, -150);
+        if (kind === "folded-clipped") ctx.translate(0, -185);
         if (kind === "perspective") ctx.transform(0.85, 0.1, 0.15, 0.85, 0, 0);
         const paper = kind === "dim" ? 84 : kind === "white" ? 255 : 200;
         ctx.fillStyle = `rgb(${paper},${paper},${paper})`;
@@ -206,6 +208,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "thin-faint",
     "perspective",
     "folded-corners",
+    "folded-near-frame",
   ])
     expect(results[kind].ok, `${kind}: ${results[kind].reason}`).toBe(true);
   for (const kind of [
@@ -222,7 +225,7 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
     "textured-wedge-empty",
     "wedge-and-paper-empty",
     "folded-two-papers",
-    "folded-near-frame",
+    "folded-clipped",
   ])
     expect(results[kind].ok, kind).toBe(false);
   // A diffuse reflection and a blurred second sheet can look alike.
@@ -232,7 +235,11 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
   expect(results["wedge-and-paper-empty"].reason).toContain("More than one");
   expect(results["textured-wedge-empty"].reason).toContain("distorted");
   expect(results["folded-two-papers"].reason).toContain("More than one");
-  expect(results["folded-near-frame"].reason).toContain("more space");
+  expect(results["folded-clipped"].reason).toMatch(/outline|space/);
+  // The fitted boundary needs no fictitious extra space beyond the real fold.
+  expect(
+    Math.min(...results["folded-near-frame"].quad!.map((p) => p[1])),
+  ).toBeGreaterThan(5 / 800);
   // The automatic bounds must include the folds, not bridge diagonally inside
   // them. Permit only segmentation rounding (four source pixels).
   const folded = results["folded-corners"].quad!.map(([x, y]) => [

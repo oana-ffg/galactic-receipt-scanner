@@ -130,6 +130,10 @@ export async function reportIssue(state: ScanState | undefined): Promise<void> {
       upload.set("metadata", JSON.stringify(submitted));
       upload.set("screenshot", shot, "scanner-screen.png");
       await api(`/api/issues/${id}`, { method: "POST", body: upload });
+      if (!data.get("github")) {
+        dialog.close();
+        return;
+      }
       feedback.textContent = "Private issue saved.";
       const link = document.createElement("a");
       link.href = `/issues#${id}`;

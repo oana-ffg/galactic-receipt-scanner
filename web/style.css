@@ -537,3 +537,36 @@ header {
   flex-wrap: wrap;
   gap: 16px;
 }
+
+.camera-page .workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+.camera-start {
+  margin: 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.camera-start p {
+  margin: 0;
+  color: #aab8c5;
+  font-size: 14px;
+}
+.camera-page .connection-warning:empty {
+  display: none;
+}
+@media (max-width: 760px) {
+  .camera-page header {
+    gap: 10px;
+  }
+  .camera-page .signal {
+    height: 116px;
+    padding: 12px;
+  }
+  .camera-start {
+    align-items: flex-start;
+  }
+  .camera-start button {
+    flex-shrink: 0;
+  }
+}

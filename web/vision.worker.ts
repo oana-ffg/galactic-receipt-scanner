@@ -8,8 +8,13 @@ import { measurePrint } from "./print-quality";
 import { HandChecks, type PreviewChecks } from "./hand-checks";
 import {
   enclosePaperContour,
+  refinePaperEdges,
   hasPlausiblePaperCorners,
 } from "./paper-geometry";
+import { DeskReference } from "./desk-reference";
+const deskReference = new DeskReference();
+const deskCanvas = new OffscreenCanvas(128, 128);
+const deskContext = deskCanvas.getContext("2d", { willReadFrequently: true })!;
 let cv: typeof CV;
 let hands: HandLandmarker;
 const handChecks = new HandChecks();
@@ -349,7 +354,10 @@ function analyze(
         "Paper outline is too distorted. Flatten the paper and keep the camera above it, or use Force take for manual review.";
       return q;
     }
-    const enclosed = enclosePaperContour(points, papers[0].contour);
+    const enclosed = enclosePaperContour(
+      refinePaperEdges(points, papers[0].contour),
+      papers[0].contour,
+    );
     if (!enclosed) {
       q.reason =
         "Paper boundary is too irregular to enclose safely. Flatten the paper or use Force take for manual review.";
@@ -488,6 +496,7 @@ async function process(
   full: boolean,
   outputs: boolean,
   preview?: PreviewChecks,
+  calibrate = false,
 ) {
   if (outputs) {
     // Saved originals are independent documents, not consecutive camera frames.
@@ -501,9 +510,23 @@ async function process(
     outputs,
     !full && !outputs && preview?.removal === true && !preview.capture,
   );
+  deskContext.drawImage(bitmap, 0, 0, 128, 128);
+  const deskPixels = deskContext.getImageData(0, 0, 128, 128).data;
+  if (!full && !outputs && !calibrate) {
+    const matches = deskReference.matches(deskPixels, 128);
+    if (matches !== undefined) {
+      quality.empty = matches;
+      quality.emptyStrong = matches;
+      if (matches) {
+        quality.ok = false;
+        quality.quad = null;
+        quality.reason = "Ready for the next receipt.";
+      }
+    }
+  }
   handChecks.apply(
     quality,
-    full || outputs ? undefined : preview,
+    full || outputs || calibrate ? undefined : preview,
     performance.now(),
     () => {
       sceneContext.drawImage(canvas, 0, 0, 32, 32);
@@ -512,6 +535,22 @@ async function process(
     () =>
       hands.detect(canvas).landmarks.map((hand) => hand.map((p) => [p.x, p.y])),
   );
+  if (calibrate) {
+    const plausible =
+      quality.quad &&
+      hasPlausiblePaperCorners(
+        quality.quad.map(([x, y]) => [x * canvas.width, y * canvas.height]),
+      );
+    if (quality.hands.length || plausible)
+      return {
+        quality,
+        backgroundError:
+          "Clear all paper and hands from the desk, then choose Set empty desk again.",
+      };
+    deskReference.set(deskPixels);
+    previous = undefined;
+    return { quality, backgroundSet: true };
+  }
   if (quality.ok && quality.quad) {
     paperBrightness = quality.paperBrightness;
     paperBounds = [
@@ -594,10 +633,11 @@ self.onmessage = async (
     full?: boolean;
     outputs?: boolean;
     encode?: boolean;
+    calibrate?: boolean;
     preview?: PreviewChecks;
   }>,
 ) => {
-  const { id, bitmap, full, outputs, encode, preview } = event.data;
+  const { id, bitmap, full, outputs, encode, preview, calibrate } = event.data;
   try {
     if (encode && bitmap) {
       const photo = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -618,7 +658,7 @@ self.onmessage = async (
     ready ??= initialize();
     await ready;
     const result = bitmap
-      ? await process(bitmap, !!full, !!outputs, preview)
+      ? await process(bitmap, !!full, !!outputs, preview, calibrate)
       : {};
     self.postMessage({ id, ...result });
   } catch (error) {

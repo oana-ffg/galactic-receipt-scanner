@@ -9,7 +9,7 @@ import {
 } from "./pending";
 import { retakeTarget } from "./control-command";
 import { CaptureState } from "./state";
-import { Vision } from "./vision";
+import { Vision, type Analysis } from "./vision";
 import { CameraFrames } from "./camera-frames";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import type { Capture, ScanState } from "./types";
@@ -32,6 +32,7 @@ export class PhoneCamera {
   private vision: Vision | null = null;
   private running = false;
   private busy = false;
+  private calibrationPending = false;
   private connected = false;
   private previewRequestedUntil = 0;
   private camera = crypto.randomUUID();
@@ -47,6 +48,7 @@ export class PhoneCamera {
       if (!this.running || !this.connected || this.busy) return;
       if (command === "retry-upload") void this.recover();
       else if (command === "force") void this.force();
+      else if (command === "set-background") this.setBackground();
       else this.machine.control(command);
       this.emitState();
     },
@@ -85,6 +87,8 @@ export class PhoneCamera {
       throw new Error(
         "Camera access requires HTTPS. Open the private Site in Safari.",
       );
+    this.calibrationPending = false;
+    this.busy = false;
     this.machine = new CaptureState();
     this.camera = crypto.randomUUID();
     this.stateRevision = 0;
@@ -138,6 +142,12 @@ export class PhoneCamera {
     void this.preview(generation);
     await this.recover();
     if (!this.running) throw new Error(this.machine.value.message);
+    // Recovery keeps its acknowledgement or required operator decision. Only a
+    // fresh camera session starts without a second desktop action.
+    if (!this.machine.value.lastCapture && !this.machine.value.needsAttention) {
+      this.machine.control("start");
+      this.emitState();
+    }
   }
   private async claim() {
     const claim = await api<{ sequence: number; count: number }>(
@@ -162,6 +172,20 @@ export class PhoneCamera {
     )
       return;
     this.machine.control("retry");
+    this.emitState();
+  }
+  setBackground() {
+    if (
+      !this.running ||
+      !this.connected ||
+      this.busy ||
+      this.machine.value.activeId ||
+      this.machine.value.recovery === "upload"
+    )
+      return;
+    this.calibrationPending = true;
+    this.machine.value.backgroundMessage = "Checking the empty desk…";
+    this.machine.interrupt();
     this.emitState();
   }
   private async keepAwake() {
@@ -194,6 +218,8 @@ export class PhoneCamera {
     void this.wakeLock?.release();
     this.machine.value.cameraConnected = false;
     this.machine.value.detectorReady = false;
+    this.machine.value.backgroundMessage = undefined;
+    this.machine.value.backgroundReady = false;
     this.machine.failed(message);
     this.emitState();
     this.onStopped();
@@ -264,6 +290,7 @@ export class PhoneCamera {
           this.sequence = result.sequence;
           if (result.command === "retry-upload") void this.recover();
           else if (result.command === "force") void this.force();
+          else if (result.command === "set-background") this.setBackground();
           else this.machine.control(result.command);
         }
       } catch (error) {
@@ -346,10 +373,19 @@ export class PhoneCamera {
             frames.take()
           ) {
             drawFrame(this.video, this.canvas, 800);
-            const analysis = await this.vision!.request(
-              await createImageBitmap(this.canvas),
-              { preview: this.machine.previewChecks },
-            );
+            const calibrate = this.calibrationPending;
+            this.calibrationPending = false;
+            if (calibrate) this.busy = true;
+            let analysis: Analysis;
+            try {
+              analysis = await this.vision!.request(
+                await createImageBitmap(this.canvas),
+                { preview: this.machine.previewChecks, calibrate },
+              );
+            } finally {
+              if (calibrate && this.generation === generation)
+                this.busy = false;
+            }
             analyzed++;
             lastAnalyzed = performance.now();
             diagnostics.record(
@@ -358,7 +394,17 @@ export class PhoneCamera {
               2000,
             );
             if (!this.running || this.generation !== generation) return;
-            if (!this.connected) continue;
+            if (!this.connected || this.calibrationPending) continue;
+            if (calibrate) {
+              if (analysis.backgroundSet)
+                this.machine.value.backgroundReady = true;
+              this.machine.value.backgroundMessage =
+                analysis.backgroundError ??
+                "Empty desk set. Keep the phone and lighting in the same position.";
+              this.machine.interrupt();
+              this.emitState();
+              continue;
+            }
             // A media-clock fallback keeps older browsers usable, but cannot
             // justify the fast removal path without presented-frame evidence.
             if (!frames.confirmed) analysis.quality.emptyStrong = false;

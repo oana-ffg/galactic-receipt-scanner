@@ -33,6 +33,9 @@ export interface ScanState {
   supportsTargetedRetake?: boolean;
   selectedRetake?: boolean;
   supportsForce?: boolean;
+  supportsBackground?: boolean;
+  backgroundReady?: boolean;
+  backgroundMessage?: string;
   manualReview?: boolean;
   armed: boolean;
   cameraConnected: boolean;

@@ -67,7 +67,7 @@ headers is not authentication. The exact-origin check is defense in depth, not a
 
 Open the private Site on the Mac. Scan its QR code with the phone, sign in using the
 same owner account, and tap **Enable camera**. Mount the phone over a dark, matte surface.
-Keep Safari visible. On the Mac choose **Start scanning**. No LAN or certificate setup
+Keep Safari visible. Scanning starts automatically after **Enable camera**; use **Pause** and **Start scanning** on the Mac when needed. No LAN or certificate setup
 is needed; both devices need Internet access.
 
 - Red: read the reason; move hands away, adjust focus, or retry.
@@ -76,6 +76,12 @@ is needed; both devices need Internet access.
   Leave a brief visible gap: clearly empty, hand-free frames can confirm removal after
   150 ms; ambiguous backgrounds need 450 ms. Actual timing also depends on the phone's
   processing speed. A swap without an observed clear gap stays locked to prevent duplicates.
+- On reflective desks, clear all paper and hands and choose **Set empty desk**.
+  The reference remains in memory on that phone for the current camera session.
+  Matching desk frames still require fresh hand checks and continuous removal evidence.
+  Keep a visible clear gap between receipts; swapping without a clear gap remains locked.
+  Use **Reset empty desk** after moving the phone or changing lighting. If setup detects
+  paper or hands, clear the desk and try again.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
 - The desktop shows the latest saved original with the outline detected in that photo.
   Use **Inspect full size** and **Actual pixels** to check fine print; the outline is an
