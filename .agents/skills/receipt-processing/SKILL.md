@@ -14,6 +14,24 @@ Open `/review` in the authenticated Site; it does not claim the camera. Discover
 when editing records or using the equivalent owner-only API routes. Follow the compact
 list cursor and read individual documents instead of loading every transcription at once.
 
+## Extraction and review workload
+
+Read [the local extraction workflow](../../../EXTRACTION.md) for a resumable SQLite
+workspace, strict structured results and native private-Ollama scripting. Use bounded
+managed Codex workers when the user’s processing request authorizes them. Retain raw OCR/model answers separately
+from corrections. Compare representative vendors against pixels before bulk use.
+OCR should extract the printed purchase total and line amounts for receipts as well
+as invoices. Check charged totals separately when fees or rounding follow the purchase.
+A failed model reading calls for a bounded retry or another engine; it does not prove
+that a receipt is broken. Do not turn an unprocessed batch into human review work.
+
+Keep pending extraction, pages awaiting a match, unresolved human questions and actual
+source/processing failures distinct in private run reports. The current Site review
+fields do not replace this processing ledger. Never bulk-add a broken reason merely
+because vendor/date have not yet been extracted. After bounded automatic attempts,
+flag concrete unresolved readings for review and confirmed failures as broken. Revisit
+page matches as new scans arrive. Preserve all prior source and derivative history.
+
 ## Process and reconcile
 
 - Enumerate complete capture history and current takes. Keep capture ID, receipt ID, take,
@@ -44,18 +62,21 @@ list cursor and read individual documents instead of loading every transcription
   matching totals or OCR strings do not suffice. Set `duplicateOf` to the retained canonical
   document, preserving every source/history. Keep unique handwriting or backs as evidence.
 - Use source-supported receipt date and vendor only; unknowns remain null. Filename allocation
-  is `YYYY-MM-DD-vendor_name.pdf`, then `_2`, `_3`, etc. Reservations prevent overwrites and
+  is `YYYY-MM-DD_vendor_name.pdf`, then `_2`, `_3`, etc. Reservations prevent overwrites and
   remain stable. Never invent fields or substitute scan time just to produce a filename.
 
 ## Invoice arithmetic
 
-For invoices and credit notes, record printed line amounts after line discounts in signed
-integer minor units. Add explicitly labeled document discounts, tax, shipping, fees and
-printed rounding. Specify currency and net-plus-tax versus gross basis. Never add included
+For receipts, invoices and credit notes, record displayed line amounts in signed
+integer minor units. Separately applied item-discount rows are signed line items;
+do not subtract informational discounts again when the displayed amount includes them. Add explicitly labeled document discounts, tax, shipping and other adjustments that
+contribute to the printed purchase total. Card fees or cash rounding applied after that
+total belong in a separate charged-total check; never count them twice. Specify currency and net-plus-tax versus gross basis. Never add included
 VAT again. A subtotal is a cross-check, not an extra line item. Keep credit signs from the
 source. If currency minor-unit semantics or accounting basis are unclear, flag review.
 
-Compare lines plus signed adjustments with the printed total exactly. A mismatch is broken.
+Compare lines plus signed adjustments with the printed total exactly. A mismatch confirmed against the complete original is broken; an unverified extraction
+mismatch first needs another reading.
 Never invent a rounding adjustment or alter an OCR digit to force balance. Arithmetic success
 supports the reading but does not prove it: inspect printed quantities, unit prices, discounts
 and tax breakdown too.
@@ -69,8 +90,8 @@ resolution and avoid destructive or generative cleanup. Distant pages use the sa
 Retrieve the stored PDF, verify its SHA-256, render and inspect every page for clipping,
 order and small-print legibility before checking `pdf`. Keep earlier PDFs addressable.
 
-Record generation/upload failures in `broken` with a useful recovery action. If an unknown
-vendor/date blocks a named PDF, flag it explicitly rather than silently skipping output.
+Record generation/upload failures in `broken` with a useful recovery action. If vendor/date remain unknown after extraction attempts, retain a concrete unresolved
+reason rather than silently skipping output.
 `uncertainties` holds exact unresolved human questions; `broken` holds failures, incomplete
 sources or inconsistent totals. Anything short of full confidence remains reviewable. Checks
 are scoped attestations, not accounting certification. Record evidence resolving each issue,

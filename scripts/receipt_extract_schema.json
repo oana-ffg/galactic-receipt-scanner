@@ -1,0 +1,165 @@
+{
+  "type": "object",
+  "properties": {
+    "document_type": {
+      "type": "string",
+      "enum": [
+        "receipt",
+        "invoice",
+        "credit_note",
+        "payment_slip",
+        "voucher",
+        "other",
+        "unknown"
+      ]
+    },
+    "not_invoice": {
+      "type": ["boolean", "null"]
+    },
+    "vendor": {
+      "type": ["string", "null"]
+    },
+    "receipt_date": {
+      "type": ["string", "null"],
+      "description": "Source-supported YYYY-MM-DD transaction date, never scan time or voucher expiry"
+    },
+    "currency": {
+      "type": ["string", "null"]
+    },
+    "reference": {
+      "type": ["string", "null"]
+    },
+    "printed_total_minor": {
+      "type": ["integer", "null"]
+    },
+    "charged_total_minor": {
+      "type": ["integer", "null"]
+    },
+    "included_tax_minor": {
+      "type": ["integer", "null"]
+    },
+    "line_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": ["number", "null"]
+          },
+          "unit_price_minor": {
+            "type": ["integer", "null"]
+          },
+          "amount_minor": {
+            "type": ["integer", "null"]
+          }
+        },
+        "required": [
+          "description",
+          "quantity",
+          "unit_price_minor",
+          "amount_minor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "adjustments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer"
+          }
+        },
+        "required": ["label", "amount_minor"],
+        "additionalProperties": false
+      }
+    },
+    "payment_adjustments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer"
+          }
+        },
+        "required": ["label", "amount_minor"],
+        "additionalProperties": false
+      }
+    },
+    "arithmetic_basis": {
+      "type": "string",
+      "enum": ["gross", "net-plus-tax", "unknown"]
+    },
+    "has_handwriting": {
+      "type": ["boolean", "null"]
+    },
+    "handwritten_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": ["string", "null"]
+          },
+          "uncertain": {
+            "type": "boolean"
+          },
+          "box": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "integer"
+            },
+            "description": "Original pixel [left,top,right,bottom], null only when location uncertain"
+          }
+        },
+        "required": ["text", "uncertain", "box"],
+        "additionalProperties": false
+      }
+    },
+    "completeness": {
+      "type": "string",
+      "enum": ["complete", "fragment", "uncertain"]
+    },
+    "uncertainties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "document_type",
+    "not_invoice",
+    "vendor",
+    "receipt_date",
+    "currency",
+    "reference",
+    "printed_total_minor",
+    "charged_total_minor",
+    "included_tax_minor",
+    "line_items",
+    "adjustments",
+    "payment_adjustments",
+    "arithmetic_basis",
+    "has_handwriting",
+    "handwritten_notes",
+    "completeness",
+    "uncertainties",
+    "evidence"
+  ],
+  "additionalProperties": false
+}
