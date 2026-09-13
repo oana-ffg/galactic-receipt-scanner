@@ -18,6 +18,7 @@ import uuid
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import receipt_qwen
 from receipt_api import ScannerClient, ClientError, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
@@ -25,9 +26,9 @@ WINDOWS_REPLACE_ATTEMPTS = 7
 WINDOWS_TRANSIENT_REPLACE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EBUSY}
 WINDOWS_TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
 OPERATIONS = {
-    "status", "claim", "context", "document", "originals", "previews", "draft", "prepare", "categories",
+    "status", "claim", "context", "document", "originals", "previews", "draft", "prepare", "confirm", "assess", "categories",
     "category", "validate", "submit", "pdf", "render", "attest", "renew", "release",
-    "retry-submit", "retry-pdf", "reconcile", "quit",
+    "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit",
 }
 CHECKS = '''
 import {extractionErrors,arithmetic} from "./web/extraction.ts";
@@ -237,7 +238,7 @@ class Worker:
                 "pages": len((document or {}).get("pages", [])), "status": (document or {}).get("status"),
                 "claim_active": self.state["phase"] in {"claimed", "drafted"},
                 "claim_state": ("active" if self.state["phase"] in {"claimed", "drafted"} else "possibly-active"
-                    if self.state["phase"] in {"claim-uncertain", "submit-uncertain"} else "closed"),
+                    if self.state["phase"] in {"claim-uncertain", "draft-uncertain", "confirmation-uncertain", "submit-uncertain"} else "closed"),
                 "claim_expires": (claim or {}).get("expires"), "failure": self.state.get("failed"),
                 "viewer_preflight": str(self.work / "viewer-preflight.png")}
 
@@ -382,25 +383,57 @@ class Worker:
         verify(pixel_pdf["pages"] == len(pages) and pixel_pdf["layouts"] == [layouts[cid] for cid in retained],
                "Frozen pixel layout differs from the reviewed previews.")
         rendered = self.render_file(pixel_pdf["path"], pixel_pdf["pages"], 300, "draft-page")
-        layout_changed = target["pages"] != claim["document"]["pages"]
         frozen = {"extraction": extraction, "grouping": deepcopy(message.get("grouping")),
                   "target": deepcopy(target),
-                  "documents": documents if message.get("grouping") or layout_changed else None,
-                  "layouts": [layouts[cid] for cid in retained], "pixel_pdf": pixel_pdf, "rendered": rendered}
+                  "documents": documents,
+                  "layouts": [layouts[cid] for cid in retained], "pixel_pdf": pixel_pdf, "rendered": rendered, "images": receipt_qwen.describe_images(rendered)}
         self.state["draft_file"] = self.record("luna-draft", frozen)
         self.state["draft"] = frozen
-        self.state["phase"] = "drafted"
         self.checkpoint()
-        return {"drafted": True, "document_id": target["id"], "pages": len(retained),
-                "pixel_pdf_sha256": pixel_pdf["sha256"], "rendered": rendered, "layouts": frozen["layouts"]}
+        return self.database_checkpoint("draft", {"token":claim["token"], "model":"gpt-5.6-luna", "extraction":extraction,
+             "documents":deepcopy(documents), "pixel_pdf_sha256":pixel_pdf["sha256"], "images":frozen["images"]})
+
+    def database_checkpoint(self, endpoint, body):
+        previous_state = deepcopy(self.state)
+        try:
+            self.state["checkpoint_request"] = self.record(endpoint+"-request", body)
+            require((self.work/self.state["checkpoint_request"]).stat().st_size <= MAX_INPUT, "Processing request exceeds 512 KiB.")
+            self.state["phase"] = endpoint+"-uncertain"
+            self.checkpoint_intent(previous_state)
+        except OSError as error:
+            self.rollback_pre_request_state(previous_state)
+            if isinstance(error, JournalCheckpointError):
+                raise
+            raise JournalCheckpointError(error) from None
+        return self.retry_checkpoint()
+
+    def retry_checkpoint(self):
+        endpoint = self.state["phase"].removesuffix("-uncertain")
+        verify(endpoint in {"draft", "confirmation"}, "No database checkpoint to retry.")
+        response = json.loads(self.client.request("/api/processing/"+endpoint, (self.work/self.state["checkpoint_request"]).read_bytes()))
+        verify(response.get("saved") is True, "Database checkpoint was not acknowledged.")
+        if endpoint == "draft":
+            self.state["draft_saved"] = True
+            frozen = self.state["draft"]
+            result = {"drafted":True, "document_id":frozen["target"]["id"], "pages":len(frozen["layouts"]),
+                "pixel_pdf_sha256":frozen["pixel_pdf"]["sha256"], "rendered":frozen["rendered"], "layouts":frozen["layouts"]}
+        else:
+            self.state["confirmation"] = response
+            result = response
+        self.state["phase"] = "drafted"
+        self.state.pop("failed", None)
+        self.checkpoint()
+        return result
 
     def submit(self, message):
         claim = self.active()
         require(self.state["phase"] == "drafted" and self.state.get("draft"), "Freeze and inspect the Luna draft before submission.")
         require(set(message) == {"op"}, "Submit reuses the frozen Luna draft without changing its reading or grouping.")
         frozen = self.state["draft"]
-        extraction = deepcopy(frozen["extraction"])
+        require(self.state.get("confirmation") and self.state.get("assessment"), "Complete Qwen confirmation and Luna reassessment before submission.")
+        extraction = deepcopy(self.state["assessment"]["extraction"])
         body = {"token": claim["token"], "model": "gpt-5.6-luna", "extraction": extraction}
+        body["assessment"] = deepcopy(self.state["assessment"]["assessment"])
         if frozen["documents"] is not None:
             body["documents"] = deepcopy(frozen["documents"])
         result = self.check("validate", extraction=extraction)
@@ -485,13 +518,16 @@ class Worker:
         require(isinstance(message, dict) and message.get("op") in OPERATIONS, "Unknown receipt operation.")
         op = message["op"]
         if self.state.get("failed"):
-            require(op in {"status", "release", "retry-submit", "retry-pdf", "reconcile", "quit"}, "Worker stopped after failure; owner direction is required to resume.")
+            require(op in {"status", "release", "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit"}, "Worker stopped after failure; owner direction is required to resume.")
         if op == "status":
             return self.summary()
         if op == "quit":
             return self.release()
         if op == "release":
             return self.release()
+        if op == "retry-checkpoint":
+            require(self.resumed and self.state["phase"] in {"draft-uncertain", "confirmation-uncertain"}, "Exact checkpoint recovery needs an explicitly resumed uncertain run.")
+            return self.retry_checkpoint()
         if op == "retry-submit":
             require(self.resumed and self.state["phase"] == "submit-uncertain", "Exact submit recovery needs an explicitly resumed uncertain run.")
             body = self.load(self.state["submit_request"])
@@ -563,7 +599,7 @@ class Worker:
             if self.state["phase"] in {"claimed", "drafted"}:
                 self.renew_if_needed()
             return clean(self.get_document(message["document_id"]))
-        if op in {"context", "originals", "previews", "draft", "prepare", "categories", "category", "submit", "renew"}:
+        if op in {"context", "originals", "previews", "draft", "prepare", "confirm", "assess", "categories", "category", "submit", "renew"}:
             self.renew_if_needed()
         if op == "renew":
             claim = self.active()
@@ -690,6 +726,30 @@ class Worker:
             return self.check("validate", extraction=message["extraction"])
         if op == "draft":
             return self.draft(message)
+        if op == "confirm":
+            require(set(message)=={"op"} and self.state.get("draft_saved") and not self.state.get("confirmation"), "Confirm one saved initial reading.")
+            frozen=self.state["draft"]
+            retained={p["captureId"] for p in frozen["target"]["pages"]}
+            require(retained <= self.state["prepared"].keys(), "Prepare Tesseract for every retained page first.")
+            output=self.work/("qwen-raw-"+uuid.uuid4().hex+".json")
+            qwen=receipt_qwen.extract(frozen["rendered"], frozen["images"], frozen["pixel_pdf"]["sha256"], output)
+            validation=self.check("validate",extraction=qwen["extraction"])
+            verify(not validation["errors"],"Qwen extraction is invalid; raw response retained.")
+            self.state["qwen_file"]=self.record("qwen-reading",qwen)
+            return self.database_checkpoint("confirmation", {"token":self.active()["token"],**qwen})
+        if op == "assess":
+            require(set(message)=={"op","extraction","rationale"} and self.state.get("confirmation") and not self.state.get("assessment"),"Assess the saved findings once, preserving both earlier readings.")
+            validation=self.check("validate",extraction=message["extraction"])
+            if validation["errors"]: return {"assessed":False,"validation":validation}
+            rationale=message["rationale"]
+            require(isinstance(rationale,str) and 0<len(rationale.strip())<=20000,"Explain corrections, retained values and unresolved disagreements.")
+            initial=self.state["draft"]["extraction"]
+            changed=[key for key in initial if initial[key]!=message["extraction"][key]]
+            result={"extraction":deepcopy(message["extraction"]),"assessment":{"confirmation_sha256":self.state["confirmation"]["sha256"],"rationale":rationale,"changed_fields":changed}}
+            self.state["assessment_file"]=self.record("luna-reassessment",result)
+            self.state["assessment"]=result
+            self.checkpoint()
+            return {"assessed":True,"changed_fields":changed,"validation":validation}
         if op == "submit":
             return self.submit(message)
         if op == "pdf":
@@ -750,6 +810,8 @@ class Worker:
     def preflight(self):
         access = self.client.get("/api/processing/access")
         require(access.get("version") == 2 and access.get("queueClaims") is True, "Scanner processing API v2 is required.")
+        require(access.get("lunaReassessment") is True, "Deploy the Luna reassessment API before running this workflow.")
+        receipt_qwen.preflight()
         self.check("validate", extraction={})
         # Verify prepared packages and model assets without fetching/installing anything.
         program = '''import {readFileSync} from "node:fs"; import {createHash} from "node:crypto";
@@ -779,7 +841,7 @@ class Worker:
             return {"ok": False, "blocking": True, "op": op, "error": diagnostic, **self.summary()}
         except InputError as error:
             # If a write was already attempted, this is a workflow failure, not an editable input.
-            if self.state["phase"] not in {"submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:
+            if self.state["phase"] not in {"draft-uncertain", "confirmation-uncertain", "submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:
                 return {"ok": False, "input_error": str(error), "op": op}
             return self.failure(op, str(error))
         except ClientError as error:

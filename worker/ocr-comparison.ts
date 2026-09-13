@@ -144,8 +144,12 @@ export async function compareStoredOcr(
   env: Env,
   doc: ReceiptDocument,
   e: Extraction,
+  options?: {
+    strictRegion?: boolean;
+    pins?: { capture_id: string; sha256: string }[];
+  },
 ): Promise<OcrComparison> {
-  if (!financialTypes.includes(e.type))
+  if (!financialTypes.includes(e.type) && !options?.strictRegion)
     return {
       status: "not-applicable",
       disagreements: [],
@@ -163,6 +167,13 @@ export async function compareStoredOcr(
       .all<{ key: string; sha256: string }>();
     let found = false;
     for (const row of rows.results) {
+      if (
+        options?.pins &&
+        !options.pins.some(
+          (p) => p.capture_id === page.captureId && p.sha256 === row.sha256,
+        )
+      )
+        continue;
       const object = await env.BUCKET.get(row.key);
       if (!object) continue;
       const value = await object.json<OcrArtifact>();
@@ -174,6 +185,19 @@ export async function compareStoredOcr(
         typeof value.text !== "string"
       )
         continue;
+      if (options?.strictRegion) {
+        const crop = page.crop;
+        const region = value.source.region;
+        if (
+          !crop ||
+          !region ||
+          region.left !== crop[0] ||
+          region.top !== crop[1] ||
+          region.width !== crop[2] - crop[0] ||
+          region.height !== crop[3] - crop[1]
+        )
+          continue;
+      }
       texts.push(value.text);
       artifacts.push({ capture_id: page.captureId, sha256: row.sha256 });
       found = true;

@@ -45,7 +45,7 @@ scan timestamp, source hash, retake and derivative revision.
 
 For Luna on a host with the configured bounded worker, use [the Luna protocol](references/luna-protocol.md).
 It supplies the full approved workflow without ad hoc shell scripts. The older runbook remains
-for Astra and hosts without that helper; do not mix its inline scripts into a bounded Luna run.
+for Astra. Its legacy Luna examples do not implement reassessment; do not use them for new Luna runs.
 
 ## Document flow
 
@@ -58,21 +58,33 @@ for Astra and hosts without that helper; do not mix its inline scripts into a bo
    **image-only PDF before ordinary OCR**. Inspect all retained pages. This fixes which
    pixels belong to the document before later comparison; a single first-page preview
    is insufficient for a multipage document.
-3. Run/reuse prepared Tesseract for those finalized page regions, compare its numeric
-   observations with Luna, and embed its invisible searchable layer in the same visible
-   PDF layout. Save grouping, crops and extraction to the database, then upload and attest
-   the searchable PDF using server hash/revision acknowledgement.
-4. Independent model review reads **all finalized pages without the Tesseract layer**:
-   use the saved image-only PDF if supported, otherwise its ordered page images. Do not
-   provide Luna's extraction or Tesseract text before saving the independent reading.
-   Astra can inspect raw originals if the crops leave a question unresolved. Compare only
-   after the independent checkpoint, preserving each reading and explicit disagreements.
+3. Persist the initial Luna reading and frozen layout in the database. Then prepare
+   Tesseract on every finalized region and run the already installed local
+   `qwen3-vl:8b-instruct` on **all pixel-only PDF page images**, with no Luna values,
+   Tesseract text, categories or arithmetic findings in Qwen's prompt.
+4. Save Qwen's independent extraction and provenance separately. The server pins the
+   matching OCR artifacts and computes arithmetic for both readings and their field
+   disagreements. Return this evidence to the **same Luna worker**.
+5. Luna reopens the relevant pixels and assesses the findings. It may correct its
+   extraction, retain its original answer, or leave uncertainty. It must explain why;
+   model agreement or balanced arithmetic alone is not proof. Save the updated full
+   extraction and rationale separately, preserving the original Luna and Qwen records.
+6. Submit the reassessed reading, then generate/upload/inspect the searchable PDF with
+   Tesseract's invisible text in the same frozen layout. Saved review flags still let
+   the coordinator continue the next document; actual execution failures stop the batch.
 
-Local model confirmation is currently an owner-requested experiment, **not a required
-production stage**. Do not install, select or invoke a local model during normal Luna
-processing. Experimental results do not silently replace saved Luna/Astra results.
-For a full-flow test, claim the next unprocessed small-stage document; reusing already
-processed documents is a separate comparison experiment, not a fresh Luna test.
+Use the bounded [Luna protocol](references/luna-protocol.md) for this flow. The host
+must already have the local Qwen vision model and prepared Tesseract/PDF runtimes;
+preflight checks them before claiming. Missing local inference is a setup blocker,
+not permission to install a model, use a paid/cloud API or silently skip confirmation.
+This local-host flow is not yet verified in cloud Work.
+
+For a full-flow test, use the next unprocessed small-stage documents so saved values
+cannot influence the first reading. After the requested pilot, an independent Astra
+worker reviews the same finalized pixels and saves confidence separately. Keep Astra's
+answers out of Luna's initial/reassessment context. When the owner requests reviews of
+all inspected documents, use `review_all:true` for the large-stage claim; normal daily
+Astra processing still prioritizes the exception queue. Preserve all original attempts.
 
 ## Coordinator
 
@@ -108,7 +120,7 @@ questions routed to Astra. Do not ask the owner to approve individual review fla
 The daily Astra stage handles its review queue separately. In reports, distinguish
 "saved; queued for Astra" from a failed or uncertain network/journal operation.
 
-Check `/api/processing/access`: version 2 must advertise queueClaims. Use the shared
+Check `/api/processing/access`: version 2 must advertise queueClaims and lunaReassessment. Use the shared
 20-minute renewable lease, one document per fresh worker. Use 10-document batches as checkpoints. An explicitly requested continuous/day/overnight
 run continues with further batches within its execution budget; 10 is not a daily quota.
 The daily Astra run likewise drains eligible exceptions within its budget. Stop a run when the
@@ -127,8 +139,8 @@ install or download OCR packages, engines or models, or add another OCR pipeline
 prepared runtime is missing or broken, report the setup failure to the coordinator.
 The ordinary OCR pass still runs before model submission; its output is unverified
 comparison evidence. **Original pixels are the source of truth.** Luna must flag OCR
-disagreements with at most medium certainty. Astra rereads the originals and records
-why either reading is wrong; unresolved disagreements remain low/medium for a human.
+disagreements with at most medium certainty. Luna can revise its separate final reading from pixel evidence;
+Astra independently rereads the originals and records why either reading is wrong; unresolved disagreements remain low/medium for a human.
 
 ## Grouping and originals
 

@@ -1,15 +1,23 @@
+import {
+  lunaDraft,
+  checkQwen,
+  confirmationEvidence,
+  checkAssessment,
+  type LunaDraft,
+} from "./processing-confirmation";
 import { compareStoredOcr } from "./ocr-comparison";
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
 import { newDocument, type ReceiptDocument } from "../web/documents";
 import {
+  arithmetic,
   extractionErrors,
   financialTypes,
   processingDisposition,
   type Extraction,
   type ProcessingState,
 } from "../web/extraction";
-import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
+import { bodyJson, digest, HttpError, json, requireThat, UUID } from "./http";
 import { documentRoute, storedDocuments } from "./documents";
 
 type Lock = {
@@ -32,10 +40,17 @@ export async function protectBlindParse(request: Request, env: Env) {
   const path = new URL(request.url).pathname;
   if (
     !path.startsWith("/api/documents") &&
+    path !== "/api/processing/readings" &&
     !/^\/api\/files\/[^/]+\/ocr$/.test(path)
   )
     return;
   const lock = await activeLock(env);
+  if (path === "/api/processing/readings")
+    requireThat(
+      lock?.stage === "large" && lock.draft !== null,
+      409,
+      "Reading history requires an active Astra review with a saved independent draft.",
+    );
   requireThat(
     !lock || request.method !== "POST",
     409,
@@ -155,6 +170,34 @@ export async function processingRoute(
     path = url.pathname,
     method = request.method;
   if (!path.startsWith("/api/processing/")) return null;
+  if (path === "/api/processing/readings" && method === "GET") {
+    const id = url.searchParams.get("document_id");
+    requireThat(id && UUID.test(id), 400, "Choose a document.");
+    const rows = await env.DB.prepare(
+      `SELECT d.revision,d.model,d.payload AS initial,d.created_at,c.payload AS confirmation,c.sha256 AS confirmation_sha256,a.payload AS updated
+      FROM processing_drafts d LEFT JOIN processing_confirmations c ON c.token=d.token LEFT JOIN processing_attempts a ON a.token=d.token
+      WHERE d.document_id=? ORDER BY d.created_at DESC LIMIT 20`,
+    )
+      .bind(id)
+      .all<any>();
+    return json({
+      readings: rows.results.map((row) => ({
+        revision: row.revision,
+        model: row.model,
+        created_at: row.created_at,
+        initial: JSON.parse(row.initial),
+        confirmation: row.confirmation ? JSON.parse(row.confirmation) : null,
+        confirmation_sha256: row.confirmation_sha256,
+        updated: row.updated
+          ? ((v: any) => ({
+              model: v.request.model,
+              extraction: v.request.extraction,
+              assessment: v.request.assessment ?? null,
+            }))(JSON.parse(row.updated))
+          : null,
+      })),
+    });
+  }
   if (path === "/api/processing/categories") {
     if (method === "GET")
       return json(
@@ -234,9 +277,10 @@ export async function processingRoute(
               !d.processing.needs_reparse &&
               d.processing.large_model_confidence === null &&
               !d.processing.has_human_review &&
-              ["model-review", "broken"].includes(
-                processingDisposition(d.processing),
-              )),
+              (input.review_all === true
+                ? ["extracted", "model-review", "broken"]
+                : ["model-review", "broken"]
+              ).includes(processingDisposition(d.processing))),
       )
       .sort(
         (a, b) =>
@@ -477,14 +521,22 @@ export async function processingRoute(
     return json({ released: true });
   }
   if (path === "/api/processing/draft" && method === "POST") {
-    requireThat(
-      lock.stage === "large",
-      400,
-      "Independent checkpoints are for Astra.",
-    );
     validateExtraction(input.extraction);
     await categoryCheck(env, input.extraction);
-    const draft = JSON.stringify(input.extraction);
+    const frozen =
+      lock.stage === "small"
+        ? await (async () => {
+            const captures = await load();
+            return lunaDraft(
+              input,
+              lock.document_id,
+              lock.revision,
+              await records(env, captures),
+              captures,
+            );
+          })()
+        : input.extraction;
+    const draft = JSON.stringify(frozen);
     requireThat(
       input.model === STAGE_MODEL[lock.stage],
       400,
@@ -525,6 +577,79 @@ export async function processingRoute(
       throw error;
     }
     return json({ saved: true });
+  }
+  if (path === "/api/processing/confirmation" && method === "POST") {
+    requireThat(
+      lock.stage === "small" && lock.draft !== null,
+      409,
+      "Save Luna's initial reading before confirmation.",
+    );
+    const frozen = JSON.parse(lock.draft!) as LunaDraft;
+    requireThat(frozen.version === 1, 409, "Unsupported Luna draft.");
+    const checked = checkQwen(input, frozen, lock.document_id);
+    const encoded = JSON.stringify(checked);
+    const prior = await env.DB.prepare(
+      "SELECT request,payload,sha256 FROM processing_confirmations WHERE token=?",
+    )
+      .bind(lock.token)
+      .first<any>();
+    if (prior) {
+      requireThat(prior.request === encoded, 409, "Confirmation is immutable.");
+      return json({
+        saved: true,
+        sha256: prior.sha256,
+        ...JSON.parse(prior.payload),
+      });
+    }
+    const evidence = await confirmationEvidence(
+      env,
+      frozen,
+      lock.document_id,
+      input.extraction as Extraction,
+    );
+    const payload = JSON.stringify({ qwen: checked, evidence });
+    requireThat(
+      new TextEncoder().encode(payload).length <= 512 * 1024,
+      400,
+      "Confirmation exceeds the evidence limit.",
+    );
+    const hash = await digest(
+      new Uint8Array(new TextEncoder().encode(payload)),
+    );
+    try {
+      await env.DB.batch([
+        leaseGuard(env, lock, ":confirmation"),
+        env.DB.prepare(
+          "INSERT INTO processing_confirmations(token,document_id,revision,request,payload,sha256,created_at) VALUES(?,?,?,?,?,?,?)",
+        ).bind(
+          lock.token,
+          lock.document_id,
+          lock.revision,
+          encoded,
+          payload,
+          hash,
+          new Date().toISOString(),
+        ),
+      ]);
+    } catch (error) {
+      if (!/constraint/i.test(String(error))) throw error;
+      const replay = await env.DB.prepare(
+        "SELECT request,payload,sha256 FROM processing_confirmations WHERE token=?",
+      )
+        .bind(lock.token)
+        .first<any>();
+      requireThat(
+        replay && replay.request === encoded,
+        409,
+        "Confirmation changed or the claim expired.",
+      );
+      return json({
+        saved: true,
+        sha256: replay.sha256,
+        ...JSON.parse(replay.payload),
+      });
+    }
+    return json({ saved: true, sha256: hash, ...JSON.parse(payload) });
   }
   if (path === "/api/processing/context" && method === "GET") {
     requireThat(
@@ -592,7 +717,11 @@ export async function processingRoute(
       rejected_associations_truncated: rejected.length > 100,
       document: doc,
       ocr_comparison: doc.processing?.ocr_comparison ?? null,
-      independent_parse: lock.draft ? JSON.parse(lock.draft) : null,
+      independent_parse: lock.draft
+        ? lock.stage === "small"
+          ? JSON.parse(lock.draft).extraction
+          : JSON.parse(lock.draft)
+        : null,
       next_images: ordered.slice(last + 1, last + 3).map((c) => ({
         id: c.id,
         sha256: c.sha256,
@@ -639,6 +768,44 @@ export async function processingRoute(
       409,
       "The claimed document changed.",
     );
+    let confirmation: any = null;
+    if (lock.stage === "small" && lock.draft !== null) {
+      const frozen = JSON.parse(lock.draft) as LunaDraft;
+      requireThat(
+        frozen.version === 1 &&
+          JSON.stringify(input.documents) === JSON.stringify(frozen.documents),
+        409,
+        "Final reassessment must keep the frozen documents and page layout.",
+      );
+      confirmation = await env.DB.prepare(
+        "SELECT payload,sha256 FROM processing_confirmations WHERE token=?",
+      )
+        .bind(lock.token)
+        .first<any>();
+      requireThat(
+        confirmation,
+        409,
+        "Save independent Qwen confirmation before reassessment.",
+      );
+      checkAssessment(input.assessment, confirmation.sha256);
+      const finalExtraction = input.extraction;
+      const changedFields = Object.keys(frozen.extraction).filter(
+        (k) =>
+          JSON.stringify(frozen.extraction[k as keyof Extraction]) !==
+          JSON.stringify(finalExtraction[k as keyof Extraction]),
+      );
+      requireThat(
+        JSON.stringify([...input.assessment.changed_fields].sort()) ===
+          JSON.stringify(changedFields.sort()),
+        400,
+        "Report every changed extraction field exactly once.",
+      );
+    } else
+      requireThat(
+        input.assessment === undefined,
+        400,
+        "Reassessment requires a saved Luna draft and confirmation.",
+      );
     const changed =
       input.documents === undefined
         ? [structuredClone(previous)]
@@ -687,7 +854,18 @@ export async function processingRoute(
         "This page association was rejected; keep it detached for another match.",
       );
     }
-    const comparison = await compareStoredOcr(env, d, input.extraction);
+    const comparison = await compareStoredOcr(
+      env,
+      d,
+      input.extraction,
+      confirmation
+        ? {
+            strictRegion: true,
+            pins: JSON.parse(confirmation.payload).evidence.initial_ocr
+              .artifacts,
+          }
+        : undefined,
+    );
     const extracted = structuredClone(input.extraction);
     const conflict =
       comparison.status === "missing" || comparison.status === "disagreement";
@@ -711,6 +889,8 @@ export async function processingRoute(
     const payload = JSON.stringify({
       request: input,
       independent_draft_token: lock.draft ? lock.token : null,
+      confirmation_sha256: confirmation?.sha256 ?? null,
+      arithmetic: arithmetic(input.extraction),
       sources: d.pages.map((p) => ({
         capture_id: p.captureId,
         sha256: p.sha256,

@@ -1,3 +1,8 @@
+> **New Luna runs use [the bounded Luna protocol](luna-protocol.md).** The legacy Luna
+> recipes below are compatibility documentation and do not implement the required Qwen
+> confirmation/reassessment. Use this runbook for Astra; never silently fall back to an
+> old Luna submit when local Qwen is unavailable.
+
 # Worker runbook
 
 For Luna with a configured bounded worker and standing approval, use [the Luna protocol](luna-protocol.md)

@@ -100,6 +100,11 @@ class FakeScanner:
             return json.dumps({"expires": time.time()*1000+1200000}).encode()
         if path.endswith("/release"):
             return b'{"released":true}'
+        if path.endswith("/draft"):
+            self.initial_draft=deepcopy(body)
+            return b'{"saved":true}'
+        if path.endswith("/confirmation"):
+            return json.dumps({"saved":True,"sha256":"b"*64,"qwen":body,"evidence":{"initial_arithmetic":{},"qwen_arithmetic":{}}}).encode()
         if path.endswith("/submit"):
             self.submit_bytes.append(data)
             if not self.submitted:
@@ -179,7 +184,9 @@ class WorkerTests(unittest.TestCase):
         self.fake = FakeScanner()
         self.patches = [patch.object(module, "__file__", str(self.repo / "scripts" / "receipt_worker.py")),
             patch.object(module, "credentials", return_value={}),
-            patch.object(module, "ScannerClient", return_value=self.fake)]
+            patch.object(module, "ScannerClient", return_value=self.fake),
+            patch.object(module.receipt_qwen, "describe_images", side_effect=lambda paths:[{"sha256":"a"*64,"pixels":[10,20]} for p in paths]),
+            patch.object(module.receipt_qwen, "extract", side_effect=lambda paths,images,pdf_hash,output: {"extraction":extraction(),"images":images,"pixel_pdf_sha256":pdf_hash})]
         self.cwd = Path.cwd()
         self.addCleanup(module.os.chdir, self.cwd)
         for p in self.patches:
@@ -220,6 +227,52 @@ class WorkerTests(unittest.TestCase):
         self.send("previews", capture_ids=list(ids), **({"layouts": layouts} if layouts else {}))
         self.send("draft", extraction=value or extraction(), **({"grouping": grouping} if grouping else {}))
         self.send("prepare", capture_ids=list(ids))
+        self.send("confirm")
+        self.send("assess", extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
+
+    def test_checkpoint_lost_acknowledgements_replay_exactly_without_new_qwen(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        original_request = self.fake.request
+        for endpoint in ["draft", "confirmation"]:
+            if endpoint == "confirmation":
+                self.send("prepare", capture_ids=[DID])
+            writes=[]
+            def lose_once(path, data=None, content_type=None):
+                result=original_request(path,data,content_type)
+                if path.endswith("/"+endpoint):
+                    writes.append(data)
+                    if len(writes)==1: raise ClientError("Synthetic lost acknowledgement")
+                return result
+            with patch.object(self.fake,"request",side_effect=lose_once):
+                message={"op":"draft","extraction":extraction()} if endpoint=="draft" else {"op":"confirm"}
+                failed=self.worker.handle(message)
+                self.assertTrue(failed["blocking"])
+                self.assertEqual(self.worker.state["phase"],endpoint+"-uncertain")
+                self.assertFalse(self.send("release")["released"])
+                self.worker.lock.close()
+                self.worker=self.make_worker(self.worker.state["run_id"])
+                with patch.object(module.receipt_qwen,"extract",side_effect=AssertionError("Must not rerun inference")):
+                    self.send("retry-checkpoint")
+                self.assertEqual(writes[0],writes[1])
+                self.assertEqual(self.worker.state["phase"],"drafted")
+
+    def test_reassessment_preserves_initial_and_requires_confirmation(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        self.send("draft",extraction=extraction())
+        self.assertIn("input_error",self.worker.handle({"op":"submit"}))
+        self.send("prepare",capture_ids=[DID])
+        self.send("confirm")
+        final=extraction()
+        final["vendor"]="Synthetic corrected shop"
+        self.send("assess",extraction=final,rationale="Synthetic correction grounded in pixels.")
+        self.assertEqual(self.worker.state["draft"]["extraction"]["vendor"],"Synthetic Shop")
+        self.assertEqual(self.fake.initial_draft["extraction"]["vendor"],"Synthetic Shop")
+        self.send("submit")
+        saved=json.loads(self.fake.submit_bytes[0])
+        self.assertEqual(saved["extraction"]["vendor"],"Synthetic corrected shop")
+        self.assertEqual(saved["assessment"]["changed_fields"],["vendor"])
 
     def test_complete_one_document_protocol(self):
         self.prepared()
@@ -249,6 +302,8 @@ class WorkerTests(unittest.TestCase):
         self.send("draft", extraction=extraction())
         self.send("prepare", capture_ids=[DID])
         self.assertEqual(self.worker.state["prepared"][DID]["crop"], [0, 0, 10, 20])
+        self.send("confirm")
+        self.send("assess", extraction=extraction(), rationale="Synthetic reviewed crop.")
         self.send("submit")
         self.assertEqual(self.fake.documents[DID]["pages"][0]["crop"], [0, 0, 10, 20])
         self.assertEqual(self.fake.documents[DID]["pages"][0]["rotation"], 90)

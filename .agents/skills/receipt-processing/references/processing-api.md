@@ -12,14 +12,16 @@ uploads handled by the client. Never print claim tokens; build query strings in 
 
 | Method and route | Request | Response / handling |
 | --- | --- | --- |
-| GET /api/processing/access | none | Version 2 must advertise queueClaims. |
+| GET /api/processing/access | none | Version 2 must advertise queueClaims and lunaReassessment for the new Luna flow. |
 | POST /api/processing/claim | `{stage:"small"}` or `{stage:"large"}` | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Stop on null. |
 | POST /api/processing/renew | `{token}` | `{expires}`, epoch milliseconds. |
 | POST /api/processing/release | `{token}` | `{released:true}`. Only for an active claim being abandoned. |
-| GET /api/processing/context?token=… | Optional after_capture, date, total_minor, currency | `{document,ocr_comparison,independent_parse,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`. |
+| GET /api/processing/context?token=â€¦ | Optional after_capture, date, total_minor, currency | `{document,ocr_comparison,independent_parse,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`. |
 | GET /api/processing/categories | none | Array of `{id,name,description}`, **no categories wrapper**. |
-| POST /api/processing/categories | `{name,description}` | `{id,name,description}`. Name 1–150 characters; description 1–2000. |
-| POST /api/processing/draft | `{token,model:"gpt-6-astra",extraction}` | `{saved:true}`; immutable independent checkpoint. |
+| POST /api/processing/categories | `{name,description}` | `{id,name,description}`. Name 1â€“150 characters; description 1â€“2000. |
+| POST /api/processing/draft | `{token,model,extraction}`; small stage also requires frozen `documents,pixel_pdf_sha256,images` | `{saved:true}`; immutable independent checkpoint. |
+| POST /api/processing/confirmation | `token` plus independent Qwen extraction/provenance from the bounded helper | Immutable `{saved:true,sha256,qwen,evidence}`; initial checkpoint and exact-region OCR required. |
+| GET /api/processing/readings?document_id=ID | Claimed document ID for review | Up to 20 latest initial/confirmation/updated records, with models, revisions and timestamps; no claim tokens. Astra must first checkpoint. |
 | POST /api/processing/submit | See Submit below | `{saved:[{id,revision},...],warnings?}`; exact replay may add `replayed:true`. |
 | GET /api/documents/ID | none | `{document,captures}`; read `response["document"]`. |
 | POST /api/processing/pdf-review | `{document_id,revision,sha256,evidence}` | Read the document back and verify its PDF check/hash; see Outputs. |
@@ -29,7 +31,7 @@ A token assigns ONE document. Claim pages use `captureId`; context `next_images`
 `id`, with `sha256`, `created_at` and `document_id`. Fetching lookahead does not attach it.
 
 Context returns two next images; continue with `after_capture`. Historical candidates use
-source-read date, total_minor and currency with a ±3-day and max(2%,100 minor units) window.
+source-read date, total_minor and currency with a Â±3-day and max(2%,100 minor units) window.
 This searches previously extracted documents, not every unprocessed scan. Empty results
 do not establish no match. At most 50 candidates are returned; respect truncation and
 rejected associations, and confirm attachments visually.
@@ -56,14 +58,14 @@ at most 1,000,000. Never use decimal currency amounts.
 | has_handwriting, has_payment_slip, confirmed_arithmetic_mismatch | Booleans |
 | payment_status | approved, declined, unknown, not-applicable |
 | card_last_four | null or exactly four digits as a string |
-| line_items | At most 1000 objects with description (nonempty string ≤2000), quantity (number or null), unit_price_minor and amount_minor (money or null) |
-| adjustments, payment_adjustments | At most 100 objects each, with description (nonempty string ≤2000) and amount_minor (**non-null** money) |
+| line_items | At most 1000 objects with description (nonempty string â‰¤2000), quantity (number or null), unit_price_minor and amount_minor (money or null) |
+| adjustments, payment_adjustments | At most 100 objects each, with description (nonempty string â‰¤2000) and amount_minor (**non-null** money) |
 | total_minor, charged_total_minor, vat_minor | Money or null |
 | tax_basis | gross, net-plus-tax, unknown |
 | completeness | complete, fragment, uncertain |
 | category_id | Existing category UUID or null; copy from the registry |
 | certainty | low, medium, high |
-| uncertainties, broken_reasons | At most 100 nonempty strings each, each ≤2000 characters |
+| uncertainties, broken_reasons | At most 100 nonempty strings each, each â‰¤2000 characters |
 | evidence | Nonempty string, at most 20,000 characters |
 
 `not_invoice` is **server-derived processing state, not an extraction input**.
@@ -83,7 +85,13 @@ printed components of a complete financial document and confirming an actual dis
 
 ## Submit
 
-POST `/api/processing/submit` with `{token,model,extraction,documents?,ocr_resolution?}`.
+POST `/api/processing/submit` with `{token,model,extraction,documents?,ocr_resolution?,assessment?}`.
+After a small-stage draft, confirmation is mandatory and `documents` must exactly match
+the frozen snapshot. `assessment` contains the saved `confirmation_sha256`, a nonempty
+`rationale` (≤20,000 characters), and `changed_fields` listing every changed top-level
+extraction field exactly once. Submit stores the updated reading in `processing_attempts`;
+initial Luna remains in `processing_drafts`, Qwen/evidence in `processing_confirmations`.
+Legacy no-draft clients remain compatible but are not the new skill flow.
 Use the actual model: gpt-5.6-luna for small, gpt-6-astra for large. **Omit documents when
 grouping and page layout are unchanged**; include copied document records when saving
 new crop/rotation bounds. Extraction is not a legacy document record.

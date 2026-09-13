@@ -196,3 +196,13 @@ export const processingDrafts = sqliteTable("processing_drafts", {
   payload: text("payload").notNull(),
   created_at: text("created_at").notNull(),
 });
+
+export const processingConfirmations = sqliteTable("processing_confirmations", {
+  token: text("token").primaryKey(),
+  document_id: text("document_id").notNull(),
+  revision: integer("revision").notNull(),
+  request: text("request").notNull(),
+  payload: text("payload").notNull(),
+  sha256: text("sha256").notNull(),
+  created_at: text("created_at").notNull(),
+});

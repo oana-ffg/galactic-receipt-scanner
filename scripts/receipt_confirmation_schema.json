@@ -1,0 +1,226 @@
+{
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "receipt",
+        "invoice",
+        "credit-note",
+        "payment-slip",
+        "atm",
+        "note",
+        "other"
+      ]
+    },
+    "vendor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receipt_date": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reference": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "currency": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "has_handwriting": {
+      "type": "boolean"
+    },
+    "has_payment_slip": {
+      "type": "boolean"
+    },
+    "payment_status": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "declined",
+        "unknown",
+        "not-applicable"
+      ]
+    },
+    "card_last_four": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "line_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "unit_price_minor": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "amount_minor": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "description",
+          "quantity",
+          "unit_price_minor",
+          "amount_minor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "adjustments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "amount_minor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "total_minor": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "charged_total_minor": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "payment_adjustments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "amount_minor": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "amount_minor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "vat_minor": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "tax_basis": {
+      "type": "string",
+      "enum": [
+        "gross",
+        "net-plus-tax",
+        "unknown"
+      ]
+    },
+    "completeness": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "fragment",
+        "uncertain"
+      ]
+    },
+    "category_id": {
+      "type": "null"
+    },
+    "certainty": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "uncertainties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "broken_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "confirmed_arithmetic_mismatch": {
+      "type": "boolean"
+    },
+    "evidence": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "vendor",
+    "receipt_date",
+    "reference",
+    "currency",
+    "has_handwriting",
+    "has_payment_slip",
+    "payment_status",
+    "card_last_four",
+    "line_items",
+    "adjustments",
+    "total_minor",
+    "charged_total_minor",
+    "payment_adjustments",
+    "vat_minor",
+    "tax_basis",
+    "completeness",
+    "category_id",
+    "certainty",
+    "uncertainties",
+    "broken_reasons",
+    "confirmed_arithmetic_mismatch",
+    "evidence"
+  ],
+  "additionalProperties": false
+}

@@ -256,6 +256,7 @@ async function route(
       ],
       captureWrites: false,
       queueClaims: true,
+      lunaReassessment: true,
       categories: true,
       independentReview: true,
     });

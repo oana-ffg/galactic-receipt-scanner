@@ -10,6 +10,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
         "/api/processing/access",
         "/api/processing/categories",
         "/api/processing/context",
+        "/api/processing/readings",
         "/api/captures",
         "/api/documents",
       ].includes(path) ||
@@ -24,6 +25,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/processing/renew",
       "/api/processing/release",
       "/api/processing/draft",
+      "/api/processing/confirmation",
       "/api/processing/submit",
       "/api/processing/detach",
       "/api/processing/categories",
