@@ -6,6 +6,8 @@ import { StateOrder } from "./state-order";
 import { PhoneCamera } from "./camera";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import { messageOf } from "./errors";
+// Reporting must stay available when a deployment replaces lazy asset URLs.
+import { mountIssues, reportIssue } from "./issues";
 import type { ScanState } from "./types";
 import { CaptureLibrary } from "./library";
 import "./style.css";
@@ -32,11 +34,11 @@ if (location.pathname === "/agent-access") {
 } else if (location.pathname === "/review") {
   void import("./review").then((module) => module.mountReview(app));
 } else if (location.pathname === "/issues") {
-  void import("./issues").then((module) => module.mountIssues(app));
+  void mountIssues(app);
 } else {
   app.classList.toggle("camera-page", isCamera);
   app.innerHTML = `
-    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/review">Review receipts</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
+    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/review">Review receipts</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a><div class="report-control"><button id="report-issue" class="secondary">Report issue</button><p id="report-error" class="error" role="alert" hidden></p></div><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
     ${isCamera ? '<div class="camera-start"><button id="enable">Enable camera</button><p>Scanning starts automatically once the camera is ready.</p></div>' : ""}
     ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
@@ -51,13 +53,19 @@ if (location.pathname === "/agent-access") {
     ${isCamera ? "" : '<section class="library"><div class="library-heading"><h2>Recent captures</h2><span>Originals stay intact · OCR is unverified</span></div><div id="captures"><p class="muted">No captures yet.</p></div><nav class="pagination" aria-label="Capture pages"><button id="captures-previous" class="secondary" disabled>Newer</button><span id="captures-page">Page 1</span><button id="captures-next" class="secondary" disabled>Older</button></nav></section>'}`;
   element("report-issue").onclick = async () => {
     const button = element<HTMLButtonElement>("report-issue");
+    const feedback = element("report-error");
+    feedback.hidden = true;
+    feedback.textContent = "";
     button.disabled = true;
+    button.textContent = "Preparing report…";
     try {
-      await (await import("./issues")).reportIssue(lastState);
+      await reportIssue(lastState);
     } catch (problem) {
-      error(`Could not prepare the screenshot: ${messageOf(problem)}`);
+      feedback.textContent = `Could not prepare the report: ${messageOf(problem)} Tap Report issue to try again.`;
+      feedback.hidden = false;
     } finally {
       button.disabled = false;
+      button.textContent = "Report issue";
     }
   };
   if (isCamera) mountCamera();

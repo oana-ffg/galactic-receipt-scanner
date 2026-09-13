@@ -723,3 +723,11 @@ header {
   flex: 1;
   overflow-wrap: anywhere;
 }
+
+.report-control {
+  max-width: 100%;
+}
+.report-control .error {
+  max-width: 28rem;
+  white-space: normal;
+}

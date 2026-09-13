@@ -1,3 +1,5 @@
+// Load with the camera page, before an update can retire this asset URL.
+import render from "html2canvas";
 import { api } from "./api";
 import { messageOf } from "./errors";
 import type { ScanState } from "./types";
@@ -22,15 +24,6 @@ const button = (text: string, action: () => void) => {
 };
 
 async function screenshot(): Promise<Blob> {
-  const { default: render } = await import("html2canvas");
-  const videos = [...document.querySelectorAll("video")].map((video) => {
-    const frame = document.createElement("canvas");
-    frame.width = video.videoWidth;
-    frame.height = video.videoHeight;
-    if (frame.width && frame.height)
-      frame.getContext("2d")!.drawImage(video, 0, 0);
-    return frame;
-  });
   const canvas = await render(document.body, {
     logging: false,
     scale: 1,
@@ -46,18 +39,6 @@ async function screenshot(): Promise<Blob> {
       doc.querySelectorAll("details:not([open])").forEach((details) => {
         for (const child of [...details.children])
           if (child.tagName !== "SUMMARY") child.remove();
-      });
-      doc.querySelectorAll("video").forEach((video, index) => {
-        const source = videos[index];
-        if (!source?.width) return;
-        const frame = doc.createElement("canvas");
-        frame.width = source.width;
-        frame.height = source.height;
-        frame.getContext("2d")!.drawImage(source, 0, 0);
-        frame.className = video.className;
-        frame.id = video.id;
-        frame.hidden = video.hidden;
-        video.replaceWith(frame);
       });
     },
   });
