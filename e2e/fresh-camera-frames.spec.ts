@@ -291,6 +291,44 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       const diagnostic = reports.issues[0].context.diagnostics;
       expect(diagnostic.device).toBe("phone");
       expect(diagnostic.build).toMatch(/\/assets\/.*\.js$/);
+      expect(diagnostic.saveHistory).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "save.timing",
+            data: expect.objectContaining({
+              kind: "capture",
+              outcome: "complete",
+              initialPersistMs: expect.any(Number),
+              qualityPersistMs: expect.any(Number),
+              requestHeadersMs: expect.any(Number),
+              serverBodyMs: expect.any(Number),
+              serverObjectMs: expect.any(Number),
+              serverInsertMs: expect.any(Number),
+              serverTotalMs: expect.any(Number),
+              ackPersistMs: expect.any(Number),
+              inventoryMs: expect.any(Number),
+              saveMs: expect.any(Number),
+            }),
+          }),
+          expect.objectContaining({
+            event: "save.timing",
+            data: expect.objectContaining({
+              kind: "verification",
+              outcome: "complete",
+              localDeleteMs: expect.any(Number),
+            }),
+          }),
+        ]),
+      );
+      expect(JSON.stringify(diagnostic).length).toBeLessThan(46000);
+      expect(diagnostic.removalTransitions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "scan.removal.change",
+            data: expect.objectContaining({ gate: "removed" }),
+          }),
+        ]),
+      );
       expect(diagnostic.removalHistory).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

@@ -1,3 +1,4 @@
+import { Timing } from "./save-timing";
 import { uploadCapture } from "./capture-upload";
 import { SaveRecovery } from "./save-recovery";
 import { api } from "./api";
@@ -247,6 +248,7 @@ export class PhoneCamera {
     this.onStopped();
   }
   private emitState() {
+    this.machine.value.emittedAt = performance.timeOrigin + performance.now();
     this.machine.value.cameraId = this.camera;
     this.machine.value.stateRevision = ++this.stateRevision;
     const state: ScanState =
@@ -581,16 +583,21 @@ export class PhoneCamera {
     if (this.busy) return;
     this.busy = true;
     const started = performance.now();
+    const timing = new Timing("capture");
+    this.machine.value.saveTiming = timing.data;
     let retained = false;
     try {
-      if ((await pendingCaptures()).length) {
+      if ((await timing.measure("pendingReadMs", pendingCaptures)).length) {
         retained = true;
         throw new Error("An image is pending. Use Retry upload first.");
       }
       this.machine.value.stage = "photo";
       this.machine.value.message = "Taking the photo…";
       this.emitState();
-      const { blob, method } = await this.still();
+      const { blob, method } = await timing.measure("photoMs", () =>
+        this.still(),
+      );
+      timing.data.bytes = blob.size;
       const photoMs = performance.now() - started;
       const capture: PendingCapture = {
         id,
@@ -607,9 +614,11 @@ export class PhoneCamera {
             "Full-resolution image checks were interrupted. Retake needed.",
         },
       };
-      await savePending(capture);
+      await timing.measure("initialPersistMs", () => savePending(capture));
       retained = true;
-      const bitmap = await createImageBitmap(blob);
+      const bitmap = await timing.measure("decodeMs", () =>
+        createImageBitmap(blob),
+      );
       capture.sourcePixels = [bitmap.width, bitmap.height];
       diagnostics.record("camera.photo", {
         stage: "decoded",
@@ -627,15 +636,19 @@ export class PhoneCamera {
       this.machine.value.message = "Checking the captured image…";
       this.emitState();
       const checksStarted = performance.now();
-      const result = await this.vision!.request(bitmap, { full: true });
+      const result = await timing.measure("checksMs", () =>
+        this.vision!.request(bitmap, { full: true }),
+      );
       this.machine.value.timings = {
         photoMs,
         checksMs: performance.now() - checksStarted,
       };
       capture.quality = result.quality;
-      await savePending(capture);
-      await this.upload(capture);
+      await timing.measure("qualityPersistMs", () => savePending(capture));
+      await this.upload(capture, timing);
     } catch (error) {
+      timing.set("captureTotalMs", performance.now() - timing.started);
+      timing.finish(false);
       diagnostics.record("camera.error", { stage: "capture", retained });
       this.machine.failed(
         `Capture needs attention: ${messageOf(error)}`,
@@ -653,6 +666,8 @@ export class PhoneCamera {
     try {
       for (const capture of await pendingCaptures()) await this.upload(capture);
     } catch (error) {
+      if (this.machine.value.saveTiming)
+        this.machine.value.saveTiming.outcome = "failed";
       diagnostics.record("camera.error", { stage: "recover" });
       this.machine.failed(
         `Image retained on phone: ${messageOf(error)} Use Retry upload.`,
@@ -664,47 +679,62 @@ export class PhoneCamera {
       this.saveRecovery.wake(true);
     }
   }
-  private async upload(capture: PendingCapture) {
+  private async upload(capture: PendingCapture, timing = new Timing("retry")) {
+    this.machine.value.saveTiming = timing.data;
+    timing.data.bytes = capture.blob.size;
     const started = performance.now();
-    diagnostics.record("upload.start", {
-      id: capture.id,
-      bytes: capture.blob.size,
-      method: capture.method,
-    });
-    this.machine.value.stage = "uploading";
-    this.machine.value.needsAttention = false;
-    this.machine.value.phase = "amber";
-    this.machine.value.message = `Saving original (${(capture.blob.size / 1048576).toFixed(1)} MB). Wait for the saved acknowledgement.`;
-    this.machine.value.activeId = capture.id;
-    this.emitState();
-    const final = await uploadCapture(capture);
-    // Atomic local state change: green can release the capture loop, but the
-    // exact original stays in this same record until independent verification.
-    await savePending({ ...capture, acknowledgement: final });
-    await this.saveRecovery.refresh();
-    diagnostics.record("upload.saved", {
-      id: capture.id,
-      status: final.status,
-      ms: performance.now() - started,
-    });
-    if (final.status === "accepted" || final.status === "manual-review") {
-      this.machine.value.timings = {
-        ...this.machine.value.timings,
-        saveMs: performance.now() - started,
-      };
-      this.machine.saved(
-        capture.id,
-        this.machine.value.count,
-        final.status === "manual-review",
+    try {
+      diagnostics.record("upload.start", {
+        id: capture.id,
+        bytes: capture.blob.size,
+        method: capture.method,
+      });
+      this.machine.value.stage = "uploading";
+      this.machine.value.needsAttention = false;
+      this.machine.value.phase = "amber";
+      this.machine.value.message = `Saving original (${(capture.blob.size / 1048576).toFixed(1)} MB). Wait for the saved acknowledgement.`;
+      this.machine.value.activeId = capture.id;
+      this.emitState();
+      const final = await uploadCapture(capture, timing);
+      // Atomic local state change: green can release the capture loop, but the
+      // exact original stays in this same record until independent verification.
+      await timing.measure("ackPersistMs", () =>
+        savePending({ ...capture, acknowledgement: final }),
       );
-      this.machine.value.countKnown = false;
-    } else
-      this.machine.failed(
-        `Previous photo needs retaking: ${capture.quality.reason} The image is kept; tap Retake photo to try again.`,
-        "retake",
-        capture.id,
-      );
-    this.saveRecovery.wake();
+      await timing.measure("inventoryMs", () => this.saveRecovery.refresh());
+      timing.set("saveMs", performance.now() - started);
+      timing.set("captureTotalMs", performance.now() - timing.started);
+      timing.finish(true);
+      diagnostics.record("upload.saved", {
+        id: capture.id,
+        status: final.status,
+        ms: performance.now() - started,
+      });
+      if (final.status === "accepted" || final.status === "manual-review") {
+        this.machine.value.timings = {
+          ...this.machine.value.timings,
+          saveMs: performance.now() - started,
+        };
+        this.machine.saved(
+          capture.id,
+          this.machine.value.count,
+          final.status === "manual-review",
+        );
+        this.machine.value.countKnown = false;
+      } else
+        this.machine.failed(
+          `Previous photo needs retaking: ${capture.quality.reason} The image is kept; tap Retake photo to try again.`,
+          "retake",
+          capture.id,
+        );
+      this.saveRecovery.wake();
+    } catch (error) {
+      timing.finish(false);
+      throw error;
+    } finally {
+      timing.set("saveMs", performance.now() - started);
+      timing.set("captureTotalMs", performance.now() - timing.started);
+    }
   }
 }
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

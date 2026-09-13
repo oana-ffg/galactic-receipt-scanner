@@ -1,3 +1,4 @@
+import { Timing, type SaveTiming } from "./save-timing";
 import { api } from "./api";
 import { RequestError } from "./errors";
 import { acknowledge, retainedCaptures, type PendingCapture } from "./pending";
@@ -12,6 +13,8 @@ import type { CaptureAcknowledgement, SaveRecoveryState } from "./types";
 
 export class SaveRecovery {
   private active = false;
+  private timing?: SaveTiming;
+  private resendTiming?: SaveTiming;
   private working = false;
   private timer?: ReturnType<typeof setTimeout>;
   private failures = new Map<
@@ -43,6 +46,8 @@ export class SaveRecovery {
   private storageUnavailable(): void {
     if (this.active)
       this.changed({
+        timing: this.timing,
+        resendTiming: this.resendTiming,
         pending: 0,
         bytes: 0,
         blocked: true,
@@ -58,39 +63,62 @@ export class SaveRecovery {
     this.timer = setTimeout(() => void this.run(), 100);
   }
   private async check(capture: PendingCapture): Promise<void> {
-    const expected = await expectedAcknowledgement(capture);
-    assertAcknowledgement(capture.acknowledgement!, expected);
-    const verify = () =>
-      api<
-        CaptureAcknowledgement & { verified: boolean; acceptedCount: number }
-      >(`/api/captures/${capture.id}/verify`);
-    let result;
+    const timing = new Timing("verification");
+    this.timing = timing.data;
+    timing.data.bytes = capture.blob.size;
     try {
-      result = await verify();
-    } catch (error) {
-      if (!(error instanceof RequestError) || error.status !== 404) throw error;
-      // Only missing data is repaired. Conflicting stored bytes or metadata are
-      // preserved for investigation, never overwritten by a background retry.
-      diagnostics.record("upload.recovery", { action: "resend" });
-      assertAcknowledgement(
-        await uploadCapture(capture),
-        capture.acknowledgement!,
+      const expected = await timing.measure("localHashMs", () =>
+        expectedAcknowledgement(capture),
       );
-      result = await verify();
+      assertAcknowledgement(capture.acknowledgement!, expected);
+      const verify = () =>
+        api<
+          CaptureAcknowledgement & { verified: boolean; acceptedCount: number }
+        >(`/api/captures/${capture.id}/verify`, {}, timing);
+      let result;
+      try {
+        result = await verify();
+      } catch (error) {
+        if (!(error instanceof RequestError) || error.status !== 404)
+          throw error;
+        // Only missing data is repaired. Conflicting stored bytes or metadata are
+        // preserved for investigation, never overwritten by a background retry.
+        diagnostics.record("upload.recovery", { action: "resend" });
+        const resend = new Timing("resend");
+        this.resendTiming = resend.data;
+        resend.data.bytes = capture.blob.size;
+        try {
+          assertAcknowledgement(
+            await uploadCapture(capture, resend),
+            capture.acknowledgement!,
+          );
+          resend.finish(true);
+        } catch (error) {
+          resend.finish(false);
+          throw error;
+        }
+        result = await verify();
+      }
+      assertAcknowledgement(result, capture.acknowledgement!);
+      if (
+        result.verified !== true ||
+        !Number.isSafeInteger(result.acceptedCount) ||
+        result.acceptedCount < 0
+      )
+        throw new Error("Saved photo readback was incomplete.");
+      // Delete only after an independent readback of both metadata and original
+      // bytes matches the exact source still stored in this IndexedDB record.
+      await timing.measure("localDeleteMs", () => acknowledge(capture.id));
+      this.failures.delete(capture.id);
+      diagnostics.record("upload.recovery", { action: "verified" });
+      timing.finish(true);
+      if (this.active) this.verified(capture.id, result.acceptedCount);
+    } catch (error) {
+      timing.finish(false);
+      throw error;
+    } finally {
+      timing.set("verificationMs", performance.now() - timing.started);
     }
-    assertAcknowledgement(result, capture.acknowledgement!);
-    if (
-      result.verified !== true ||
-      !Number.isSafeInteger(result.acceptedCount) ||
-      result.acceptedCount < 0
-    )
-      throw new Error("Saved photo readback was incomplete.");
-    // Delete only after an independent readback of both metadata and original
-    // bytes matches the exact source still stored in this IndexedDB record.
-    await acknowledge(capture.id);
-    this.failures.delete(capture.id);
-    diagnostics.record("upload.recovery", { action: "verified" });
-    if (this.active) this.verified(capture.id, result.acceptedCount);
   }
   private report(captures: PendingCapture[]): void {
     const waiting = captures.filter((capture) => capture.acknowledgement);
@@ -102,6 +130,8 @@ export class SaveRecovery {
       waiting.some((capture) => this.failures.get(capture.id)?.blocked);
     if (this.active)
       this.changed({
+        timing: this.timing,
+        resendTiming: this.resendTiming,
         pending: waiting.length,
         bytes,
         blocked,

@@ -58,11 +58,19 @@ it("acknowledges a fresh source using exactly one checksum-validated object writ
     BUCKET: {
       async put(...args: Parameters<typeof bucket.put>) {
         operations.push("R2 put");
+        await new Promise((resolve) => setTimeout(resolve, 25));
         return bucket.put(...args);
       },
     },
   } as never);
   expect(response.status).toBe(200);
+  const serverTiming = response.headers.get("Server-Timing")!;
+  expect(serverTiming).toMatch(/serverBodyMs;dur=/);
+  expect(
+    Number(serverTiming.match(/serverObjectMs;dur=([\d.]+)/)?.[1]),
+  ).toBeGreaterThanOrEqual(20);
+  expect(serverTiming).toMatch(/serverInsertMs;dur=/);
+  expect(serverTiming).toMatch(/serverTotalMs;dur=/);
   const ack = await response.json();
   expect(operations).toHaveLength(2);
   expect(operations[0]).toBe("R2 put");

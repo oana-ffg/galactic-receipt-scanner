@@ -128,3 +128,47 @@ it("explains a stalled removal, interrupted confirmation and eventual success", 
   evidence.reset();
   expect(evidence.diagnostics).toBeUndefined();
 });
+
+it("retains a brief empty transition and the observed duration lost to a reset", () => {
+  const evidence = new RemovalEvidence();
+  const weak = {
+    ...empty,
+    emptyStrong: false,
+    removalDiagnostics: {
+      geometry: "no-candidates" as const,
+      areaBrightness: 135,
+      coverage: 0.25,
+    },
+  };
+  evidence.observe(weak, 0);
+  evidence.observe(weak, 220);
+  evidence.observe(
+    {
+      ...paper,
+      removalDiagnostics: {
+        geometry: "outline",
+        areaBrightness: 200,
+        coverage: 0.9,
+      },
+    },
+    440,
+  );
+  for (let i = 1; i < 100; i++) evidence.observe(paper, 440 + i * 220);
+  expect(evidence.diagnostics).toMatchObject({
+    gate: "not-empty",
+    maxClearMs: 220,
+    emptySamples: 2,
+    minBrightness: 135,
+    minCoverage: 0.25,
+    resetReason: "not-empty",
+    resetClearMs: 220,
+    maxNoOutlineMs: 220,
+  });
+  expect(evidence.diagnostics?.transitions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ gate: "confirming", sample: 1 }),
+      expect.objectContaining({ gate: "not-empty", resetClearMs: 220 }),
+    ]),
+  );
+  expect(evidence.diagnostics?.transitions?.length).toBeLessThanOrEqual(8);
+});

@@ -83,12 +83,29 @@ it("automatically resends the exact retained bytes after a missing-record or mis
       json({ ...capture.acknowledgement, verified: true, acceptedCount: 1 }),
     );
   vi.stubGlobal("fetch", fetch);
-  recovery = new SaveRecovery(() => true, vi.fn(), vi.fn());
+  const changed = vi.fn();
+  recovery = new SaveRecovery(() => true, changed, vi.fn());
   recovery.start();
   await vi.waitFor(async () =>
     expect(await retainedCaptures()).toHaveLength(0),
   );
   expect(fetch).toHaveBeenCalledTimes(3);
+  const final = changed.mock.calls.at(-1)![0];
+  expect(final.timing).toMatchObject({
+    kind: "verification",
+    outcome: "complete",
+    requests: [
+      expect.objectContaining({ status: 404 }),
+      expect.objectContaining({ status: 200 }),
+    ],
+  });
+  expect(final.timing.failedStage).toBeUndefined();
+  expect(final.resendTiming).toMatchObject({
+    kind: "resend",
+    outcome: "complete",
+    bytes: capture.blob.size,
+    values: { requestMs: expect.any(Number), localHashMs: expect.any(Number) },
+  });
   const request = fetch.mock.calls[1];
   expect(request[0]).toBe(`/api/captures/${capture.id}`);
   expect(request[1].method).toBe("POST");

@@ -1,4 +1,4 @@
-import type { Quality, ScanState } from "./types";
+import type { Quality, ScanState, RemovalTransition } from "./types";
 
 /** Confirm observed removal, never infer it from motion or elapsed blind time. */
 export class RemovalEvidence {
@@ -9,18 +9,48 @@ export class RemovalEvidence {
   private lastObserved: number | undefined;
   private samples = 0;
   private resets = 0;
+  private epoch = 0;
+  private maxClearMs = 0;
+  private emptySamples = 0;
+  private minBrightness?: number;
+  private minCoverage?: number;
+  private noOutlineSince?: number;
+  private maxNoOutlineMs = 0;
+  private resetReason?: string;
+  private resetClearMs?: number;
+  private transitions: RemovalTransition[] = [];
+  private transitionKey = "";
   diagnostics?: ScanState["removalDiagnostics"];
 
   reset() {
+    this.epoch++;
     this.since = this.strongSince = this.last = undefined;
     this.started = undefined;
     this.lastObserved = undefined;
-    this.samples = this.resets = 0;
+    this.samples =
+      this.resets =
+      this.maxClearMs =
+      this.emptySamples =
+      this.maxNoOutlineMs =
+        0;
+    this.minBrightness =
+      this.minCoverage =
+      this.noOutlineSince =
+      this.resetClearMs =
+        undefined;
+    this.resetReason = undefined;
+    this.transitions = [];
+    this.transitionKey = "";
     this.diagnostics = undefined;
   }
 
-  private clearEvidence() {
-    if (this.since !== undefined) this.resets++;
+  private clearEvidence(reason: string) {
+    if (this.since !== undefined) {
+      this.resets++;
+      this.resetReason = reason;
+      // Only the last qualifying observation counts, never the blind gap.
+      this.resetClearMs = (this.last ?? this.since) - this.since;
+    }
     this.since = this.strongSince = this.last = undefined;
   }
 
@@ -30,10 +60,56 @@ export class RemovalEvidence {
     const gapMs =
       this.lastObserved === undefined ? undefined : now - this.lastObserved;
     this.lastObserved = now;
+    if (q.empty) this.emptySamples++;
+    const brightness = q.removalDiagnostics?.areaBrightness;
+    const coverage = q.removalDiagnostics?.coverage;
+    if (brightness !== undefined)
+      this.minBrightness = Math.min(
+        this.minBrightness ?? brightness,
+        brightness,
+      );
+    if (coverage !== undefined)
+      this.minCoverage = Math.min(this.minCoverage ?? coverage, coverage);
+    if (!q.quad) {
+      if (gapMs === undefined || gapMs > 750 || gapMs <= 0)
+        this.noOutlineSince = now;
+      this.noOutlineSince ??= now;
+      this.maxNoOutlineMs = Math.max(
+        this.maxNoOutlineMs,
+        now - this.noOutlineSince,
+      );
+    } else this.noOutlineSince = undefined;
     const record = (
       gate: NonNullable<ScanState["removalDiagnostics"]>["gate"],
     ) => {
+      const clearMs = this.since === undefined ? 0 : now - this.since;
+      this.maxClearMs = Math.max(this.maxClearMs, clearMs);
+      const key = `${gate}:${q.removalDiagnostics?.geometry}:${this.resets}`;
+      if (key !== this.transitionKey) {
+        this.transitionKey = key;
+        this.transitions.push({
+          sample: this.samples,
+          elapsedMs: now - this.started!,
+          gate,
+          geometry: q.removalDiagnostics?.geometry,
+          coverage,
+          brightness,
+          clearMs,
+          resetReason: this.resetReason,
+          resetClearMs: this.resetClearMs,
+        });
+        if (this.transitions.length > 8) this.transitions.shift();
+      }
       this.diagnostics = {
+        epoch: this.epoch,
+        transitions: [...this.transitions],
+        maxClearMs: this.maxClearMs,
+        emptySamples: this.emptySamples,
+        minBrightness: this.minBrightness,
+        minCoverage: this.minCoverage,
+        maxNoOutlineMs: this.maxNoOutlineMs,
+        resetReason: this.resetReason,
+        resetClearMs: this.resetClearMs,
         gate,
         gapMs,
         elapsedMs: now - this.started!,
@@ -44,7 +120,13 @@ export class RemovalEvidence {
       };
     };
     if (!q.empty || q.handsChecked !== true || q.hands.length) {
-      this.clearEvidence();
+      this.clearEvidence(
+        q.hands.length
+          ? "hands-present"
+          : !q.empty
+            ? "not-empty"
+            : "hands-unchecked",
+      );
       record(
         q.hands.length
           ? "hands-present"
@@ -55,7 +137,7 @@ export class RemovalEvidence {
       return false;
     }
     if (this.last !== undefined && (now <= this.last || now - this.last > 750))
-      this.clearEvidence();
+      this.clearEvidence(now <= this.last ? "nonmonotonic-frame" : "frame-gap");
     // The fast path requires consecutive strong frames close together. Slower
     // devices and ambiguous backgrounds retain the 450ms confirmation.
     if (this.last !== undefined && now - this.last > 350)

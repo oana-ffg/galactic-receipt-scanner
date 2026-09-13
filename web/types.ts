@@ -1,4 +1,6 @@
 export interface SaveRecoveryState {
+  timing?: import("./save-timing").SaveTiming;
+  resendTiming?: import("./save-timing").SaveTiming;
   pending: number;
   bytes: number;
   blocked: boolean;
@@ -92,12 +94,23 @@ export interface ScanState {
   recovery?: "retake" | "upload";
   previewWarning?: string;
   saveRecovery?: SaveRecoveryState;
+  saveTiming?: import("./save-timing").SaveTiming;
+  emittedAt?: number;
   stage?: "photo" | "checking" | "uploading";
   timings?: { photoMs?: number; checksMs?: number; saveMs?: number };
   count: number;
   countKnown?: boolean;
   quality: Quality;
   removalDiagnostics?: {
+    epoch?: number;
+    transitions?: RemovalTransition[];
+    maxClearMs?: number;
+    emptySamples?: number;
+    minBrightness?: number;
+    minCoverage?: number;
+    maxNoOutlineMs?: number;
+    resetReason?: string;
+    resetClearMs?: number;
     gate:
       | "not-empty"
       | "hands-unchecked"
@@ -128,4 +141,16 @@ export interface Capture {
   outputs: { image: boolean; pdf: boolean };
   acceptedCount?: number;
   metadata: { quality?: Quality; sourcePixels?: number[] };
+}
+
+export interface RemovalTransition {
+  sample: number;
+  elapsedMs: number;
+  gate: string;
+  geometry?: string;
+  coverage?: number;
+  brightness?: number;
+  clearMs: number;
+  resetReason?: string;
+  resetClearMs?: number;
 }

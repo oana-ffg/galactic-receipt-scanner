@@ -1,3 +1,4 @@
+import { DeliveryClock, clockNow } from "./delivery-timing";
 import { api } from "./api";
 import type { ScanState } from "./types";
 import { isControlCommand } from "./control-command";
@@ -26,8 +27,11 @@ export class DirectPreview {
   private telemetry = new RtpTelemetry();
   private sampledAt = -Infinity;
   private sampling = false;
+  private deliveryClock = new DeliveryClock();
+  private probeSent?: number;
+  private probeAt = -Infinity;
   constructor(
-    private receiveState: (state: ScanState) => void,
+    private receiveState: (state: ScanState, sentAt?: number) => void,
     private receiveCommand: (command: string) => void,
     private receiveVideo: (stream: MediaStream | null) => void,
   ) {}
@@ -50,10 +54,16 @@ export class DirectPreview {
     this.camera = "";
     this.session = "";
     this.lastMessage = 0;
+    this.deliveryClock = new DeliveryClock();
+    this.probeSent = undefined;
+    this.probeAt = -Infinity;
   }
   sendState(state: ScanState) {
     this.lastState = state;
-    this.send({ state });
+    this.send({ state, sentAt: clockNow() });
+  }
+  deliveryAge(at: number | undefined, received = clockNow()) {
+    return this.deliveryClock.age(at, received);
   }
   command(command: string) {
     return this.fresh && this.send({ command });
@@ -91,10 +101,33 @@ export class DirectPreview {
         return;
       try {
         const message = JSON.parse(event.data);
-        this.lastMessage = performance.now();
-        if (message.state?.type === "state") this.receiveState(message.state);
-        if (isControlCommand(message.command))
+        const received = clockNow();
+        if (Number.isFinite(message.clockProbe))
+          this.send({
+            clockReply: message.clockProbe,
+            receivedAt: received,
+            sentAt: clockNow(),
+          });
+        if (
+          message.clockReply === this.probeSent &&
+          this.probeSent !== undefined
+        ) {
+          this.deliveryClock.observe(
+            this.probeSent,
+            message.receivedAt,
+            message.sentAt,
+            received,
+          );
+          this.probeSent = undefined;
+        }
+        if (message.state?.type === "state") {
+          this.lastMessage = performance.now();
+          this.receiveState(message.state, message.sentAt);
+        }
+        if (isControlCommand(message.command)) {
+          this.lastMessage = performance.now();
           this.receiveCommand(message.command);
+        }
       } catch {
         /* Ignore malformed messages; the HTTP path remains available. */
       }
@@ -148,6 +181,13 @@ export class DirectPreview {
     stream?: MediaStream,
   ) {
     void this.sampleStats();
+    if (!stream && this.connected && performance.now() - this.probeAt > 5000) {
+      const at = clockNow();
+      if (this.send({ clockProbe: at })) {
+        this.probeSent = at;
+        this.probeAt = performance.now();
+      }
+    }
     if (!camera) {
       this.close();
       return;

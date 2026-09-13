@@ -143,3 +143,43 @@ describe("private diagnostic history", () => {
     expect(requestCategory("/api/station/unknown-secret")).toBe("other");
   });
 });
+
+it("retains transitions after an interruption resets sample numbers for the same saved receipt", () => {
+  vi.stubGlobal("location", { pathname: "/" });
+  vi.stubGlobal("navigator", { userAgent: "synthetic", onLine: true });
+  vi.stubGlobal("document", { visibilityState: "visible" });
+  const state = new CaptureState();
+  state.value.cameraId = "synthetic-new-camera";
+  state.control("start");
+  state.saved("same-synthetic-receipt");
+  const empty = {
+    ok: false,
+    quad: null,
+    hands: [],
+    handsChecked: true,
+    empty: true,
+    emptyStrong: false,
+    reason: "Empty",
+  };
+  for (let i = 0; i < 20; i++) {
+    state.observe({ ...empty, empty: false }, i * 200);
+    recordScanState(state.value);
+  }
+  state.interrupt();
+  state.observe(empty, 4200);
+  recordScanState(state.value);
+  state.observe(empty, 4700);
+  recordScanState(state.value);
+  expect(diagnosticSnapshot().removalTransitions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        event: "scan.removal.change",
+        data: expect.objectContaining({ sample: 1, gate: "confirming" }),
+      }),
+      expect.objectContaining({
+        event: "scan.removal.change",
+        data: expect.objectContaining({ sample: 2, gate: "removed" }),
+      }),
+    ]),
+  );
+});

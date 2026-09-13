@@ -1,3 +1,4 @@
+import { Timing } from "../web/save-timing";
 import {
   recoveryProvenance,
   storeOriginal,
@@ -231,7 +232,11 @@ function requireQuality(metadata: Record<string, unknown>) {
     "Image quality checks did not pass.",
   );
 }
-async function route(request: Request, env: Env): Promise<Response> {
+async function route(
+  request: Request,
+  env: Env,
+  timing: Timing,
+): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
   const connection = await connectionRoute(request, env);
@@ -317,9 +322,18 @@ async function route(request: Request, env: Env): Promise<Response> {
         410,
         "This test capture was permanently retired during the authorized pre-production cleanup. Reload the camera page before scanning real receipts.",
       );
-      const data = await bytes(request, MAX_IMAGE);
+      timing.set(
+        "serverRoutingMs",
+        performance.now() -
+          timing.started -
+          (timing.data.values.serverAuthMs ?? 0),
+      );
+      const data = await timing.measure("serverBodyMs", () =>
+        bytes(request, MAX_IMAGE),
+      );
       const type = imageType(data);
-      const sha = await digest(data);
+      const sha = await timing.measure("serverHashMs", () => digest(data));
+      const validationStarted = performance.now();
       let metadata: Record<string, unknown>;
       try {
         const raw = request.headers.get("x-capture-metadata") ?? "{}";
@@ -355,7 +369,13 @@ async function route(request: Request, env: Env): Promise<Response> {
         400,
         "Invalid retake source.",
       );
-      const parent = retakeOf ? await captureRow(env, retakeOf) : null;
+      timing.set("serverValidationMs", performance.now() - validationStarted);
+      const parent = retakeOf
+        ? await timing.measure("serverParentMs", () =>
+            captureRow(env, retakeOf),
+          )
+        : null;
+      const provenanceStarted = performance.now();
       const receiptId = parent ? (parent.receipt_id ?? parent.id) : id;
       const restored = recoveryProvenance(
         request.headers.get("x-capture-recovery"),
@@ -371,37 +391,44 @@ async function route(request: Request, env: Env): Promise<Response> {
           ),
         },
       );
+      timing.set("serverProvenanceMs", performance.now() - provenanceStarted);
       const key = `raw/${id}/${sha}`;
       // R2-first can preserve an unreferenced immutable object if D1 fails or
       // rejects an ID conflict. Keep those bytes for investigation; never
       // overwrite the canonical source or auto-delete financial source bytes.
-      await storeOriginal(env.BUCKET, key, data, sha, type);
+      await timing.measure("serverObjectMs", () =>
+        storeOriginal(env.BUCKET, key, data, sha, type),
+      );
       // The insert is the uniqueness check. A new capture needs no preflight
       // lookup or separate readback; RETURNING is part of this atomic write.
-      const inserted = await env.DB.prepare(
-        "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(?,COALESCE(MAX(take_number),0)+1) FROM captures WHERE receipt_id=? OR id=? RETURNING *",
-      )
-        .bind(
-          id,
-          restored?.created_at ?? new Date().toISOString(),
-          sha,
-          key,
-          type,
-          data.length,
-          completed ?? "checking",
-          JSON.stringify(metadata),
-          receiptId,
-          retakeOf,
-          restored?.take_number ?? null,
-          receiptId,
-          receiptId,
+      const inserted = await timing.measure("serverInsertMs", () =>
+        env.DB.prepare(
+          "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(?,COALESCE(MAX(take_number),0)+1) FROM captures WHERE receipt_id=? OR id=? RETURNING *",
         )
-        .first<CaptureRow>();
+          .bind(
+            id,
+            restored?.created_at ?? new Date().toISOString(),
+            sha,
+            key,
+            type,
+            data.length,
+            completed ?? "checking",
+            JSON.stringify(metadata),
+            receiptId,
+            retakeOf,
+            restored?.take_number ?? null,
+            receiptId,
+            receiptId,
+          )
+          .first<CaptureRow>(),
+      );
       const row =
         inserted ??
-        (await env.DB.prepare("SELECT * FROM captures WHERE id=?")
-          .bind(id)
-          .first<CaptureRow>());
+        (await timing.measure("serverRetryReadMs", () =>
+          env.DB.prepare("SELECT * FROM captures WHERE id=?")
+            .bind(id)
+            .first<CaptureRow>(),
+        ));
       requireThat(row, 503, "Capture metadata was not confirmed.");
       requireThat(
         row.sha256 === sha && row.retake_of === retakeOf,
@@ -409,9 +436,15 @@ async function route(request: Request, env: Env): Promise<Response> {
         "Capture ID already belongs to different bytes or retake source. Original unchanged.",
       );
       if (row.raw_key !== key)
-        await verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes);
+        await timing.measure("serverReadbackMs", () =>
+          verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes),
+        );
       if (request.headers.get("x-capture-acknowledgement") === "durable-v1")
-        return json(await captureAcknowledgement(row));
+        return json(
+          await timing.measure("serverAckMs", () =>
+            captureAcknowledgement(row),
+          ),
+        );
       return json(publicCapture(await captureRow(env, id)));
     }
   }
@@ -419,10 +452,22 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (verification && method === "GET") {
     const id = verification[1];
     requireThat(UUID.test(id), 400, "Invalid capture ID.");
-    const row = await captureRow(env, id);
-    await verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes);
+    timing.set(
+      "serverRoutingMs",
+      performance.now() -
+        timing.started -
+        (timing.data.values.serverAuthMs ?? 0),
+    );
+    const row = await timing.measure("serverRetryReadMs", () =>
+      captureRow(env, id),
+    );
+    await timing.measure("serverReadbackMs", () =>
+      verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes),
+    );
     return json({
-      ...(await captureAcknowledgement(row)),
+      ...(await timing.measure("serverAckMs", () =>
+        captureAcknowledgement(row),
+      )),
       verified: true,
       acceptedCount: row.accepted_count,
     });
@@ -850,14 +895,33 @@ async function route(request: Request, env: Env): Promise<Response> {
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const timing = new Timing();
+    const timed = /^\/api\/captures\/[^/]+(?:\/verify)?$/.test(
+      new URL(request.url).pathname,
+    );
+    const finish = (response: Response) => {
+      if (timed) {
+        timing.set("serverTotalMs", performance.now() - timing.started);
+        response.headers.set("Server-Timing", timing.header());
+        if (timing.data.failedStage)
+          response.headers.set(
+            "X-Scanner-Timing-Failure",
+            timing.data.failedStage,
+          );
+      }
+      return response;
+    };
     try {
       if (request.headers.has("authorization"))
         await authorizeProcessor(request, env);
       else authorize(request, env);
-      return secure(
-        await route(request, env),
-        /^\/assets\/vision\.worker-[\w-]+\.js$/.test(
-          new URL(request.url).pathname,
+      timing.set("serverAuthMs", performance.now() - timing.started);
+      return finish(
+        secure(
+          await route(request, env, timing),
+          /^\/assets\/vision\.worker-[\w-]+\.js$/.test(
+            new URL(request.url).pathname,
+          ),
         ),
       );
     } catch (error) {
@@ -884,15 +948,17 @@ export default {
         );
         return new Response(html, { status: response.status, headers });
       }
-      return secure(
-        json(
-          {
-            detail:
-              error instanceof HttpError
-                ? error.message
-                : "Storage temporarily unavailable. Your pending capture is retained; retry.",
-          },
-          error instanceof HttpError ? error.status : 503,
+      return finish(
+        secure(
+          json(
+            {
+              detail:
+                error instanceof HttpError
+                  ? error.message
+                  : "Storage temporarily unavailable. Your pending capture is retained; retry.",
+            },
+            error instanceof HttpError ? error.status : 503,
+          ),
         ),
       );
     }

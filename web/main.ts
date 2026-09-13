@@ -1,3 +1,4 @@
+import { clockNow } from "./delivery-timing";
 import QRCode from "qrcode";
 import { api } from "./api";
 import { StateOrder } from "./state-order";
@@ -285,6 +286,39 @@ function mountDashboard(): void {
   let audio: AudioContext | null = null;
   const live = element<HTMLVideoElement>("live-feed");
   const stateOrder = new StateOrder();
+  diagnostics.record("preview.latency", {
+    frameCallbackAvailable:
+      typeof live.requestVideoFrameCallback === "function",
+  });
+  let previewLatencyAt = -Infinity;
+  if (typeof live.requestVideoFrameCallback === "function") {
+    const frame = (now: number, metadata: VideoFrameCallbackMetadata) => {
+      if (now - previewLatencyAt >= 2000) {
+        previewLatencyAt = now;
+        const extra = metadata as VideoFrameCallbackMetadata & {
+          captureTime?: number;
+          receiveTime?: number;
+        };
+        diagnostics.record("preview.latency", {
+          captureTimeAvailable: Number.isFinite(extra.captureTime),
+          receiveTimeAvailable: Number.isFinite(extra.receiveTime),
+          mediaTime: metadata.mediaTime,
+          captureToPresentMs: Number.isFinite(extra.captureTime)
+            ? metadata.expectedDisplayTime - extra.captureTime!
+            : undefined,
+          receiveToPresentMs: Number.isFinite(extra.receiveTime)
+            ? metadata.expectedDisplayTime - extra.receiveTime!
+            : undefined,
+          processingMs:
+            metadata.processingDuration === undefined
+              ? undefined
+              : metadata.processingDuration * 1000,
+        });
+      }
+      live.requestVideoFrameCallback(frame);
+    };
+    live.requestVideoFrameCallback(frame);
+  }
   let lastVideoFrame = 0;
   let decodedFrames = 0;
   let httpFrames = 0;
@@ -305,7 +339,7 @@ function mountDashboard(): void {
     );
   };
   const direct = new DirectPreview(
-    (state) => acceptState(state),
+    (state, sentAt) => acceptState(state, "direct", sentAt),
     () => {},
     (stream) => {
       live.srcObject = stream;
@@ -363,8 +397,32 @@ function mountDashboard(): void {
       oscillator.stop(start + 0.24);
     }
   }
-  function acceptState(state: ScanState) {
-    if (!stateOrder.accept(state)) return;
+  let deliveryPhase = "";
+  function acceptState(
+    state: ScanState,
+    path: "direct" | "http" = "http",
+    sentAt?: number,
+  ) {
+    const receivedAt = clockNow();
+    const accepted = stateOrder.accept(state);
+    const key = `${path}:${state.phase}:${state.stage}:${state.armed}:${accepted}`;
+    diagnostics.record(
+      "state.delivery",
+      {
+        path,
+        accepted,
+        revision: state.stateRevision,
+        phoneEmittedAt: state.emittedAt,
+        desktopReceivedAt: receivedAt,
+        phoneSentAt: sentAt,
+        ...direct.deliveryAge(state.emittedAt, receivedAt),
+        transportAgeEstimateMs: direct.deliveryAge(sentAt, receivedAt)
+          .ageEstimateMs,
+      },
+      key === deliveryPhase ? 2000 : 0,
+    );
+    deliveryPhase = key;
+    if (!accepted) return;
     if (state.needsAttention && !needsAttention) void refreshLibrary();
     needsAttention = !!state.needsAttention;
     if (state.lastSaved && state.lastSaved !== lastSaved) {
@@ -381,6 +439,17 @@ function mountDashboard(): void {
     lastSaved = state.lastSaved;
     lastError = state.message;
     renderState(state);
+    diagnostics.record(
+      "state.delivery",
+      {
+        path,
+        revision: state.stateRevision,
+        renderedAt: clockNow(),
+        renderMs: clockNow() - receivedAt,
+      },
+      2000,
+      "render",
+    );
   }
   let fallbackRequestedAt = -Infinity;
   let fallbackRequestPending = false;

@@ -9,6 +9,11 @@ type Event =
   | "scan.state"
   | "scan.transition"
   | "scan.removal"
+  | "scan.removal.change"
+  | "save.timing"
+  | "save.request"
+  | "state.delivery"
+  | "preview.latency"
   | "camera.start"
   | "camera.stop"
   | "camera.frames"
@@ -82,12 +87,19 @@ export class DiagnosticHistory {
   }
 }
 
-export const diagnostics = new DiagnosticHistory();
+export const diagnostics = new DiagnosticHistory(() => Date.now(), 16000);
 // A separate budget prevents network chatter from evicting removal evidence.
 export const removalDiagnostics = new DiagnosticHistory(
   () => Date.now(),
-  16000,
+  12000,
 );
+
+const removalTransitions = new DiagnosticHistory(() => Date.now(), 6000);
+const saveTimings = new DiagnosticHistory(() => Date.now(), 8000);
+let removalCycle = "";
+let removalSample = 0;
+let removalGate = "";
+const saveKeys = new Map<string, string>();
 
 // Only a route category is retained: no capture IDs, query strings or file names.
 export function requestCategory(path: string): string {
@@ -116,19 +128,70 @@ export function requestCategory(path: string): string {
 let transition = "";
 export function recordScanState(state: ScanState) {
   const q = state.quality;
+  for (const timing of [
+    state.saveTiming,
+    state.saveRecovery?.timing,
+    state.saveRecovery?.resendTiming,
+  ]) {
+    if (!timing) continue;
+    const key = JSON.stringify(timing);
+    if (saveKeys.get(timing.kind) === key) continue;
+    saveKeys.set(timing.kind, key);
+    for (const [index, request] of (timing.requests ?? []).entries()) {
+      const requestKey = `${timing.at}:${index}:${JSON.stringify(request)}`;
+      const slot = `${timing.kind}:${index}`;
+      if (saveKeys.get(slot) === requestKey) continue;
+      saveKeys.set(slot, requestKey);
+      saveTimings.record("save.request", {
+        attemptAt: timing.at,
+        kind: timing.kind,
+        request: index + 1,
+        at: request.at,
+        status: request.status,
+        failedStage: request.failedStage,
+        ...request.values,
+      });
+    }
+    saveTimings.record("save.timing", {
+      at: timing.at,
+      kind: timing.kind,
+      outcome: timing.outcome,
+      bytes: timing.bytes,
+      status: timing.status,
+      failedStage: timing.failedStage,
+      ...timing.values,
+    });
+  }
   if (state.removalDiagnostics && !state.activeId) {
+    const cycle = state.lastCapture
+      ? `${state.cameraId}:${state.lastCapture}:${state.removalDiagnostics.epoch}`
+      : removalCycle;
+    if (cycle !== removalCycle) {
+      removalCycle = cycle;
+      removalSample = 0;
+      removalGate = "";
+    }
+    const { transitions, ...removalSummary } = state.removalDiagnostics;
+    for (const change of transitions ?? []) {
+      if (change.sample <= removalSample) continue;
+      removalSample = change.sample;
+      removalTransitions.record("scan.removal.change", { ...change });
+    }
+    const gate = `${state.removalDiagnostics.gate}:${q.removalDiagnostics?.geometry}:${state.removalDiagnostics.resets}`;
+    const changed = gate !== removalGate;
+    removalGate = gate;
     removalDiagnostics.record(
       "scan.removal",
       {
         ...q.removalDiagnostics,
-        ...state.removalDiagnostics,
+        ...removalSummary,
         armed: state.armed,
         empty: q.empty,
         strong: q.emptyStrong,
         handsChecked: q.handsChecked,
         hands: q.hands.length,
       },
-      state.removalDiagnostics.gate === "removed" ? 0 : 1000,
+      changed ? 0 : 1000,
     );
   }
   const data = {
@@ -216,5 +279,7 @@ export function diagnosticSnapshot() {
     online: navigator.onLine,
     history: diagnostics.snapshot(),
     removalHistory: removalDiagnostics.snapshot(),
+    removalTransitions: removalTransitions.snapshot(),
+    saveHistory: saveTimings.snapshot(),
   };
 }

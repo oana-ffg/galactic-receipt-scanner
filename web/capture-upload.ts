@@ -1,3 +1,4 @@
+import { Timing } from "./save-timing";
 import { api } from "./api";
 import { sha256 } from "./checksum";
 import type { PendingCapture } from "./pending";
@@ -59,6 +60,7 @@ export function assertAcknowledgement(
 
 export async function uploadCapture(
   capture: PendingCapture,
+  timing = new Timing("retry"),
 ): Promise<CaptureAcknowledgement> {
   const [response, expected] = await Promise.all([
     api<CaptureAcknowledgement | { status: "checking" }>(
@@ -81,8 +83,9 @@ export async function uploadCapture(
             : {}),
         },
       },
+      timing,
     ),
-    expectedAcknowledgement(capture),
+    timing.measure("localHashMs", () => expectedAcknowledgement(capture)),
   ]);
   let result = response;
   if (result.status === "checking") {
@@ -95,6 +98,8 @@ export async function uploadCapture(
       `/api/captures/${capture.id}/verify`,
     );
   }
-  assertAcknowledgement(result, expected);
+  await timing.measure("ackValidateMs", async () =>
+    assertAcknowledgement(result, expected),
+  );
   return result;
 }
