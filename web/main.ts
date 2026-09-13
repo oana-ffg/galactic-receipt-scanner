@@ -33,7 +33,7 @@ if (location.pathname === "/review") {
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
     <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}<button id="force" class="secondary" disabled>Force take</button><button id="set-background" class="secondary" title="Clear all paper and hands first. Set again after moving the phone or changing the lighting." disabled>Set empty desk</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
     <p id="background-status" class="detail" role="status" hidden></p>
-    <p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
+    <p id="save-recovery" class="error save-recovery" role="alert" hidden></p><p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
     ${isCamera ? "" : '<aside><section id="saved-photo" class="saved-photo"><h2>Last photo saved</h2><p>No photo saved yet.</p></section><details><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
     </div>
     ${isCamera ? "" : '<section class="library"><div class="library-heading"><h2>Recent captures</h2><span>Originals stay intact · OCR is unverified</span></div><div id="captures"><p class="muted">No captures yet.</p></div><nav class="pagination" aria-label="Capture pages"><button id="captures-previous" class="secondary" disabled>Newer</button><span id="captures-page">Page 1</span><button id="captures-next" class="secondary" disabled>Older</button></nav></section>'}`;
@@ -75,6 +75,7 @@ function renderState(state: ScanState): void {
     retakePending = null;
   library?.updateState(state);
   element<HTMLButtonElement>("force").disabled =
+    state.saveRecovery?.blocked === true ||
     !state.supportsForce ||
     !state.detectorReady ||
     !state.cameraConnected ||
@@ -100,32 +101,41 @@ function renderState(state: ScanState): void {
   element<HTMLButtonElement>("cancel-retake").disabled =
     Boolean(state.activeId) || state.recovery === "upload";
 
-  element("signal").className = `signal ${state.phase}`;
+  element("save-recovery").textContent = state.saveRecovery?.warning ?? "";
+  element("save-recovery").hidden = !state.saveRecovery?.warning;
+  element("signal").className =
+    `signal ${state.saveRecovery?.blocked ? "red" : state.phase}`;
   element("connection-warning").textContent = state.previewWarning ?? "";
-  element("phase").textContent = !state.cameraConnected
-    ? state.detectorReady
-      ? "RECONNECTING"
-      : "CAMERA STOPPED"
-    : state.manualReview && !state.activeId
-      ? "SAVED FOR REVIEW"
-      : state.needsAttention
-        ? "NEEDS ATTENTION"
-        : state.phase === "green"
-          ? "SAVED · NEXT"
-          : state.phase === "amber"
-            ? state.stage === "uploading"
-              ? "SAVING ORIGINAL"
-              : state.stage === "photo"
-                ? "TAKING PHOTO"
-                : state.stage === "checking"
-                  ? "CHECKING PHOTO"
-                  : "CHECKING STABILITY"
-            : state.paused
-              ? "PAUSED"
-              : "WAIT";
-  element("status").textContent = retakePending
-    ? "Waiting for the phone to select this retake. Do not start scanning yet."
-    : state.message;
+  element("phase").textContent =
+    state.saveRecovery?.blocked && !state.activeId
+      ? "SAVE RECOVERY NEEDED"
+      : !state.cameraConnected
+        ? state.detectorReady
+          ? "RECONNECTING"
+          : "CAMERA STOPPED"
+        : state.manualReview && !state.activeId
+          ? "SAVED FOR REVIEW"
+          : state.needsAttention
+            ? "NEEDS ATTENTION"
+            : state.phase === "green"
+              ? "SAVED · NEXT"
+              : state.phase === "amber"
+                ? state.stage === "uploading"
+                  ? "SAVING ORIGINAL"
+                  : state.stage === "photo"
+                    ? "TAKING PHOTO"
+                    : state.stage === "checking"
+                      ? "CHECKING PHOTO"
+                      : "CHECKING STABILITY"
+                : state.paused
+                  ? "PAUSED"
+                  : "WAIT";
+  element("status").textContent =
+    state.saveRecovery?.blocked && !state.activeId
+      ? "New captures are waiting while saved-photo recovery needs attention."
+      : retakePending
+        ? "Waiting for the phone to select this retake. Do not start scanning yet."
+        : state.message;
   if (state.countKnown !== false) renderCount(state.count);
   if (state.phase === "green" && state.timings) {
     const seconds =
@@ -142,7 +152,8 @@ function renderState(state: ScanState): void {
       Boolean(state.activeId) ||
       (state.recovery !== "retake" && !state.lastCapture);
     element<HTMLButtonElement>("recover").disabled =
-      Boolean(state.activeId) || state.recovery !== "upload";
+      Boolean(state.activeId) ||
+      (state.recovery !== "upload" && !state.saveRecovery?.warning);
   }
   if (!isCamera) {
     for (const id of ["start", "pause", "retry"]) {
@@ -155,7 +166,8 @@ function renderState(state: ScanState): void {
       state.recovery === "upload" ||
       (!state.lastCapture && state.recovery !== "retake");
     element<HTMLButtonElement>("recover").disabled =
-      Boolean(state.activeId) || state.recovery !== "upload";
+      Boolean(state.activeId) ||
+      (state.recovery !== "upload" && !state.saveRecovery?.warning);
     element<HTMLButtonElement>("start").disabled ||= !state.paused;
     element<HTMLButtonElement>("pause").disabled ||= state.paused;
     if (state.phase !== "green")

@@ -1,18 +1,14 @@
-import { sha256 } from "./checksum";
+import { uploadCapture } from "./capture-upload";
+import { SaveRecovery } from "./save-recovery";
 import { api } from "./api";
 import { messageOf, RequestError } from "./errors";
-import {
-  acknowledge,
-  pendingCaptures,
-  savePending,
-  type PendingCapture,
-} from "./pending";
+import { pendingCaptures, savePending, type PendingCapture } from "./pending";
 import { retakeTarget } from "./control-command";
 import { CaptureState } from "./state";
 import { Vision, type Analysis } from "./vision";
 import { CameraFrames } from "./camera-frames";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
-import type { Capture, ScanState } from "./types";
+import type { ScanState } from "./types";
 import { diagnostics } from "./diagnostics";
 import { cameraSettings, MediaRate, mediaErrorName } from "./media-diagnostics";
 interface PhotoCapture {
@@ -27,6 +23,20 @@ interface PhotoCapture {
 }
 type PhotoConstructor = new (track: MediaStreamTrack) => PhotoCapture;
 export class PhoneCamera {
+  private saveRecovery = new SaveRecovery(
+    () => this.running && this.connected && !this.busy,
+    (state) => {
+      this.machine.value.saveRecovery = state;
+      this.emitState();
+    },
+    (id, count) => {
+      if (this.machine.value.lastSaved === id && !this.machine.value.activeId) {
+        this.machine.value.count = count;
+        this.machine.value.countKnown = true;
+        this.emitState();
+      }
+    },
+  );
   private stream: MediaStream | null = null;
   private machine = new CaptureState();
   private vision: Vision | null = null;
@@ -141,6 +151,7 @@ export class PhoneCamera {
     void this.heartbeat(generation);
     void this.detect(generation);
     void this.preview(generation);
+    this.saveRecovery.start();
     await this.recover();
     if (!this.running) throw new Error(this.machine.value.message);
     // Recovery keeps its acknowledgement or required operator decision. Only a
@@ -218,6 +229,7 @@ export class PhoneCamera {
       }).catch(() => {
         /* Expiry releases the lease if the network is unavailable. */
       });
+    this.saveRecovery.stop();
     this.generation++;
     this.running = false;
     this.connected = false;
@@ -649,6 +661,7 @@ export class PhoneCamera {
     } finally {
       this.busy = false;
       this.emitState();
+      this.saveRecovery.wake(true);
     }
   }
   private async upload(capture: PendingCapture) {
@@ -664,45 +677,11 @@ export class PhoneCamera {
     this.machine.value.message = `Saving original (${(capture.blob.size / 1048576).toFixed(1)} MB). Wait for the saved acknowledgement.`;
     this.machine.value.activeId = capture.id;
     this.emitState();
-    const result = await api<Capture>(`/api/captures/${capture.id}`, {
-      method: "POST",
-      body: capture.blob,
-      headers: {
-        "Content-Type": capture.blob.type,
-        "X-Capture-Status": capture.manual
-          ? "manual-review"
-          : capture.quality.ok
-            ? "accepted"
-            : "rejected",
-        ...(capture.retakeOf ? { "X-Retake-Of": capture.retakeOf } : {}),
-        "X-Capture-Metadata": JSON.stringify({
-          captureMethod: capture.method,
-          manualCapture: capture.manual === true,
-          sourcePixels: capture.sourcePixels,
-          quality: capture.quality,
-          checks: "browser-opencv-mediapipe-v6-paper-boundary",
-        }),
-      },
-    });
-    const hash = await sha256(await capture.blob.arrayBuffer());
-    if (result.sha256 !== hash)
-      throw new Error("Stored checksum did not match. Keep this receipt.");
-    const final =
-      result.status === "checking"
-        ? await api<Capture>(`/api/captures/${capture.id}/finalize`, {
-            method: "POST",
-            body: JSON.stringify({
-              status: capture.manual
-                ? "manual-review"
-                : capture.quality.ok
-                  ? "accepted"
-                  : "rejected",
-            }),
-          })
-        : result;
-    if (!["accepted", "rejected", "manual-review"].includes(final.status))
-      throw new Error("Storage acknowledgement incomplete.");
-    await acknowledge(capture.id);
+    const final = await uploadCapture(capture);
+    // Atomic local state change: green can release the capture loop, but the
+    // exact original stays in this same record until independent verification.
+    await savePending({ ...capture, acknowledgement: final });
+    await this.saveRecovery.refresh();
     diagnostics.record("upload.saved", {
       id: capture.id,
       status: final.status,
@@ -715,15 +694,17 @@ export class PhoneCamera {
       };
       this.machine.saved(
         capture.id,
-        final.acceptedCount,
+        this.machine.value.count,
         final.status === "manual-review",
       );
+      this.machine.value.countKnown = false;
     } else
       this.machine.failed(
         `Previous photo needs retaking: ${capture.quality.reason} The image is kept; tap Retake photo to try again.`,
         "retake",
         capture.id,
       );
+    this.saveRecovery.wake();
   }
 }
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

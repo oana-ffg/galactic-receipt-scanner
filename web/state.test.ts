@@ -32,6 +32,21 @@ it("requires stability, acknowledgement and clearly empty removal", () => {
   s.observe({ ...clear, ok: false, empty: true }, 3100);
   expect(s.value.message).toBe("Ready for the next receipt.");
 });
+
+it("blocks automatic and forced capture when retained-save recovery needs attention", () => {
+  const state = new CaptureState();
+  state.value.detectorReady = true;
+  state.control("start");
+  state.value.saveRecovery = { pending: 8, bytes: 20000000, blocked: true };
+  for (const t of [0, 500, 1000, 1500])
+    expect(state.observe(clear, t)).toBeNull();
+  expect(state.force()).toBeNull();
+  state.value.saveRecovery.blocked = false;
+  expect(state.observe(clear, 2000)).toBeNull();
+  expect(state.observe(clear, 2500)).toBeNull();
+  expect(state.observe(clear, 2700)).toBeNull();
+  expect(state.observe(clear, 3000)).toBeTypeOf("string");
+});
 it("failure stays red until explicit retry", () => {
   const s = new CaptureState();
   s.control("start");

@@ -692,3 +692,10 @@ header {
     max-height: 35vh;
   }
 }
+
+.save-recovery {
+  border: 2px solid currentColor;
+  padding: 1rem;
+  font-weight: 700;
+  background: #fff2e4;
+}

@@ -22,6 +22,7 @@ type Event =
   | "preview.delivery"
   | "preview.rtp"
   | "upload.start"
+  | "upload.recovery"
   | "upload.saved";
 type Fields = Record<string, string | number | boolean | null | undefined>;
 interface Entry {
@@ -158,6 +159,9 @@ export function recordScanState(state: ScanState) {
     photoMs: state.timings?.photoMs,
     checksMs: state.timings?.checksMs,
     saveMs: state.timings?.saveMs,
+    verificationPending: state.saveRecovery?.pending,
+    retainedBytes: state.saveRecovery?.bytes,
+    verificationBlocked: state.saveRecovery?.blocked,
   };
   const key = JSON.stringify([
     state.phase,
@@ -170,6 +174,7 @@ export function recordScanState(state: ScanState) {
     state.activeId,
     state.lastCapture,
     Boolean(state.previewWarning),
+    state.saveRecovery?.blocked,
   ]);
   if (key !== transition) {
     transition = key;

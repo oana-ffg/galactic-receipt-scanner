@@ -130,6 +130,16 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       }, photoApi);
       const before = (await (await request.get("/api/captures")).json())
         .captures.length;
+      let verificationDelayed = true;
+      await page.route("**/api/captures/*/verify", (route) =>
+        verificationDelayed
+          ? route.fulfill({
+              status: 503,
+              contentType: "application/json",
+              body: "{}",
+            })
+          : route.continue(),
+      );
       await page.goto("/camera");
 
       await page
@@ -177,6 +187,40 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
           { timeout: 15000 },
         )
         .toBe("SAVED · NEXT");
+      // Green is independent of slower readback, but the full source remains
+      // durable on the phone and a delayed verifier is visibly retrying.
+      await expect(page.locator("#save-recovery")).toContainText(
+        "retrying automatically",
+      );
+      const retained = () =>
+        page.evaluate(
+          () =>
+            new Promise<number>((resolve, reject) => {
+              const open = indexedDB.open("receipt-scanner", 1);
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const db = open.result;
+                const tx = db.transaction("pending", "readonly");
+                const count = tx.objectStore("pending").count();
+                tx.oncomplete = () => {
+                  db.close();
+                  resolve(count.result);
+                };
+                tx.onerror = () => {
+                  db.close();
+                  reject(tx.error);
+                };
+              };
+            }),
+        );
+      expect(await retained()).toBe(1);
+      await expect(page.locator("#phase")).toHaveText("SAVED · NEXT");
+      verificationDelayed = false;
+      await page
+        .getByRole("button", { name: "Retry upload", exact: true })
+        .click();
+      await expect.poll(retained).toBe(0);
+      await expect(page.locator("#save-recovery")).toBeHidden();
       const after = (await (await request.get("/api/captures")).json())
         .captures;
       expect(after.length).toBe(before + 1);

@@ -1,3 +1,8 @@
+import {
+  recoveryProvenance,
+  storeOriginal,
+  verifyOriginal,
+} from "./capture-storage";
 import { processingRoute, protectBlindParse } from "./processing";
 /// <reference types="@cloudflare/workers-types" />
 import { hasReceiptResolution } from "../web/capture-resolution";
@@ -147,6 +152,21 @@ function publicCapture(row: CaptureRow) {
       image: Boolean(row.image_available),
       pdf: Boolean(row.pdf_available),
     },
+  };
+}
+async function captureAcknowledgement(row: CaptureRow) {
+  return {
+    id: row.id,
+    receipt_id: row.receipt_id ?? row.id,
+    take_number: row.take_number,
+    created_at: row.created_at,
+    sha256: row.sha256,
+    bytes: row.bytes,
+    status: row.status,
+    retake_of: row.retake_of,
+    metadataSha256: await digest(
+      new Uint8Array(new TextEncoder().encode(row.metadata)),
+    ),
   };
 }
 // Legacy rows with no receipt_id use their own ID without rewriting source metadata.
@@ -325,37 +345,33 @@ async function route(request: Request, env: Env): Promise<Response> {
       );
       const parent = retakeOf ? await captureRow(env, retakeOf) : null;
       const receiptId = parent ? (parent.receipt_id ?? parent.id) : id;
-      const existing = await env.DB.prepare(
-        "SELECT sha256,retake_of FROM captures WHERE id=?",
-      )
-        .bind(id)
-        .first<{ sha256: string; retake_of: string | null }>();
-      requireThat(
-        !existing ||
-          (existing.sha256 === sha && existing.retake_of === retakeOf),
-        409,
-        "Capture ID already belongs to different bytes or retake source. Original unchanged.",
+      const restored = recoveryProvenance(
+        request.headers.get("x-capture-recovery"),
+        {
+          id,
+          sha256: sha,
+          bytes: data.length,
+          status: completed,
+          retake_of: retakeOf,
+          receipt_id: receiptId,
+          metadataSha256: await digest(
+            new Uint8Array(new TextEncoder().encode(JSON.stringify(metadata))),
+          ),
+        },
       );
-      // A completed original needs no crop or PDF; those are downstream derivatives.
       const key = `raw/${id}/${sha}`;
-      // Conditional object creation + insert-first-wins make retries non-destructive, including races.
-      const object = await env.BUCKET.put(key, data, {
-        onlyIf: { etagDoesNotMatch: "*" },
-        httpMetadata: { contentType: type },
-        customMetadata: { sha256: sha },
-      });
-      if (!object)
-        requireThat(
-          await env.BUCKET.head(key),
-          503,
-          "Original storage not confirmed.",
-        );
-      await env.DB.prepare(
-        "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(MAX(take_number),0)+1 FROM captures WHERE receipt_id=? OR id=?",
+      // R2-first can preserve an unreferenced immutable object if D1 fails or
+      // rejects an ID conflict. Keep those bytes for investigation; never
+      // overwrite the canonical source or auto-delete financial source bytes.
+      await storeOriginal(env.BUCKET, key, data, sha, type);
+      // The insert is the uniqueness check. A new capture needs no preflight
+      // lookup or separate readback; RETURNING is part of this atomic write.
+      const inserted = await env.DB.prepare(
+        "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(?,COALESCE(MAX(take_number),0)+1) FROM captures WHERE receipt_id=? OR id=? RETURNING *",
       )
         .bind(
           id,
-          new Date().toISOString(),
+          restored?.created_at ?? new Date().toISOString(),
           sha,
           key,
           type,
@@ -364,23 +380,40 @@ async function route(request: Request, env: Env): Promise<Response> {
           JSON.stringify(metadata),
           receiptId,
           retakeOf,
+          restored?.take_number ?? null,
           receiptId,
           receiptId,
         )
-        .run();
-      const row = await captureRow(env, id);
+        .first<CaptureRow>();
+      const row =
+        inserted ??
+        (await env.DB.prepare("SELECT * FROM captures WHERE id=?")
+          .bind(id)
+          .first<CaptureRow>());
+      requireThat(row, 503, "Capture metadata was not confirmed.");
       requireThat(
         row.sha256 === sha && row.retake_of === retakeOf,
         409,
         "Capture ID already belongs to different bytes or retake source. Original unchanged.",
       );
-      requireThat(
-        await env.BUCKET.head(row.raw_key),
-        503,
-        "Original storage not confirmed.",
-      );
-      return json(publicCapture(row));
+      if (row.raw_key !== key)
+        await verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes);
+      if (request.headers.get("x-capture-acknowledgement") === "durable-v1")
+        return json(await captureAcknowledgement(row));
+      return json(publicCapture(await captureRow(env, id)));
     }
+  }
+  const verification = path.match(/^\/api\/captures\/([^/]+)\/verify$/);
+  if (verification && method === "GET") {
+    const id = verification[1];
+    requireThat(UUID.test(id), 400, "Invalid capture ID.");
+    const row = await captureRow(env, id);
+    await verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes);
+    return json({
+      ...(await captureAcknowledgement(row)),
+      verified: true,
+      acceptedCount: row.accepted_count,
+    });
   }
   const artifact = path.match(
     /^\/api\/captures\/([^/]+)\/artifacts\/(image|pdf|ocr)$/,

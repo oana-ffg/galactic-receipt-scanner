@@ -6,6 +6,7 @@ export interface PendingCapture {
   method: string;
   quality: import("./types").Quality;
   sourcePixels: number[];
+  acknowledgement?: import("./types").CaptureAcknowledgement;
 }
 
 async function database(): Promise<IDBDatabase> {
@@ -43,7 +44,9 @@ async function transaction<T>(
 
 export const savePending = (capture: PendingCapture) =>
   transaction("readwrite", (store) => store.put(capture));
-export const pendingCaptures = () =>
+export const retainedCaptures = () =>
   transaction<PendingCapture[]>("readonly", (store) => store.getAll());
+export const pendingCaptures = async () =>
+  (await retainedCaptures()).filter((capture) => !capture.acknowledgement);
 export const acknowledge = (id: string) =>
   transaction("readwrite", (store) => store.delete(id));

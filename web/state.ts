@@ -130,6 +130,7 @@ export class CaptureState {
   force(): string | null {
     if (
       this.value.activeId ||
+      this.value.saveRecovery?.blocked ||
       this.value.recovery === "upload" ||
       !this.value.cameraConnected ||
       !this.value.detectorReady
@@ -169,6 +170,10 @@ export class CaptureState {
         }
         this.removal.reset();
       }
+    }
+    if (this.value.saveRecovery?.blocked) {
+      this.reset();
+      return null;
     }
     if (this.value.paused || this.latched || !this.value.armed) return null;
     if (q.empty && !q.hands.length) {

@@ -42,6 +42,15 @@ For the smoothest preview, put the phone and desktop on the same network. One da
 
 Phone states carry a camera ID and increasing revision so the desktop can use the newest status from either connection without reverting to an older colour. Already-open older clients remain compatible; reload both pages after a saved acknowledgement to activate these improvements. Before the saved count loads, the counter shows a dash rather than an unverified zero.
 
+Saving confirms a checksum-validated original write and an atomic metadata insert before
+green. The phone retains its exact IndexedDB copy while a separate request reads back and
+checks the stored bytes and metadata; counts update afterward. Missing data is resent
+automatically with its original capture identity, timestamp and retake number. Conflicts
+retain the phone copy and show an actionable warning. New captures wait if verification
+needs attention or the retained backlog reaches eight photos or 96 MiB. If the page closes,
+verification resumes when the camera is enabled again. Do not clear site data while
+recovery is outstanding.
+
 Use light paper on a dark background. Keep all four edges visible and hands out of view.
 Leave a dark gap around the paper and keep keyboards and other bright objects away from it.
 Completely remove each receipt before adding the next. Calibrate the first few scans on

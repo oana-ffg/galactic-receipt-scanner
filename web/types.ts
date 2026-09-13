@@ -1,3 +1,25 @@
+export interface SaveRecoveryState {
+  pending: number;
+  bytes: number;
+  blocked: boolean;
+  warning?: string;
+}
+
+export interface CaptureSource {
+  id: string;
+  sha256: string;
+  bytes: number;
+  status: "accepted" | "rejected" | "manual-review";
+  retake_of: string | null;
+  metadataSha256: string;
+}
+
+export interface CaptureAcknowledgement extends CaptureSource {
+  receipt_id: string;
+  take_number: number;
+  created_at: string;
+}
+
 export interface RemovalDiagnostics {
   geometry: "no-candidates" | "incomplete" | "outline";
   bounds?: string;
@@ -69,6 +91,7 @@ export interface ScanState {
   needsAttention?: boolean;
   recovery?: "retake" | "upload";
   previewWarning?: string;
+  saveRecovery?: SaveRecoveryState;
   stage?: "photo" | "checking" | "uploading";
   timings?: { photoMs?: number; checksMs?: number; saveMs?: number };
   count: number;
