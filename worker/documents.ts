@@ -486,10 +486,17 @@ export async function documentRoute(
         if (d.mergedInto) {
           const previous = stored.find((s) => s.id === d.id);
           for (const severity of ["broken", "uncertainties"] as const) {
-            const required = [
-              ...mergeReviewReasons(d)[severity],
-              ...(previous ? mergeReviewReasons(previous)[severity] : []),
-            ];
+            const currentReasons = mergeReviewReasons(d)[severity];
+            const previousReasons = previous
+              ? mergeReviewReasons(previous)[severity]
+              : [];
+            // Previously transferred reasons are resolved on the retained document.
+            const required =
+              previous?.mergedInto === d.mergedInto
+                ? currentReasons.filter(
+                    (reason) => !previousReasons.includes(reason),
+                  )
+                : [...currentReasons, ...previousReasons];
             requireThat(
               required.every((reason) => target[severity].includes(reason)),
               400,

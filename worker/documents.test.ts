@@ -262,6 +262,31 @@ it("keeps unresolved reasons on retained documents during agent-driven merges", 
   expect(
     (await (await request(`/api/documents/${b.id}`)).json()).document.status,
   ).toBe("broken");
+  a.revision = b.revision = 2;
+  b.broken = [];
+  b.evidence = "Original inspected: the synthetic OCR failure is resolved.";
+  expect((await save([b])).status).toBe(200);
+  expect(
+    (await (await request(`/api/documents/${b.id}`)).json()).document.broken,
+  ).toEqual([]);
+  const history = await (
+    await request(`/api/documents/${b.id}/history`)
+  ).json();
+  expect(history).toHaveLength(3);
+  b.revision = 3;
+  a.uncertainties = ["New synthetic handwritten amount needs clarification"];
+  expect((await save([a])).status).toBe(400);
+  b.uncertainties = [...a.uncertainties];
+  expect((await save([a, b])).status).toBe(200);
+  a.revision = 3;
+  b.revision = 4;
+  const c = newDocument(await capture());
+  a.mergedInto = c.id;
+  c.evidence = "Synthetic retargeting";
+  expect((await save([a, c])).status).toBe(400);
+  c.broken = [...a.broken];
+  c.uncertainties = [...a.uncertainties];
+  expect((await save([a, c])).status).toBe(200);
 });
 it("pins visual approval to a stored PDF hash and requires review after regeneration", async () => {
   const d = newDocument(await capture());
