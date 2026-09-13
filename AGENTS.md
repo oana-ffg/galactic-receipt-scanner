@@ -20,6 +20,37 @@ implementation generic. Never put actual receipts, extracted text, financial inf
 local credentials, machine-specific settings, or private organisation details in source,
 tests, screenshots, commits, or documentation. Only synthetic documents belong in tests.
 
+## Cloud setup, portability and subscription use
+
+**The end goal is that a new user can point ChatGPT Work IN THE CLOUD at this
+repository and have it set up their own private instance and processing workflow.**
+Setup, authentication, credential management and agent data access must work from that
+cloud environment without the maintainer's machines, local developer tools, filesystem
+paths or personal secret store. Verify that complete user journey before calling setup
+portable or finished; a working installation on the maintainer's Mac is insufficient.
+
+**Current development happens locally through Codex.** Continue implementing and
+testing locally while preserving the cloud Work deployment target. End-to-end cloud
+Work testing is deferred until a suitable tester/environment is available; it is not
+a prerequisite for local iteration. Treat cloud compatibility as a design expectation
+until verified, and report specific untested capabilities without treating the whole
+project as blocked. Local development tooling is acceptable; requiring the maintainer's
+machine or personal credentials for another user's deployed instance is not.
+
+**No gopass dependency.** Do not require or introduce gopass for this project. Provide
+owner-accessible credential provisioning, connection and revocation suitable for cloud
+Work. Existing machine-specific credential setup is migration debt, not the product's
+onboarding contract. Do not assume a browser password manager is accessible to a Work
+shell without verifying the supported integration. An optional PC processing worker may
+supplement the cloud workflow, but must not become a prerequisite for cloud setup.
+
+This project is participating in an **OpenAI hackathon**. Use the user's ChatGPT
+subscription through Work/Codex and managed model agents as much as possible. Avoid
+third-party AI/OCR APIs and additional API spending for now. Do not call the OpenAI API
+or paid inference services; subscription-backed agents and ordinary CPU OCR in the
+processing environment are the current tools. Surface an unsupported cloud capability explicitly rather
+than silently substituting a dependency on the maintainer's computer.
+
 ## Production data and test isolation
 
 **PRODUCTION IS LIVE. The owner has been scanning real receipts for hours. Treat all
@@ -148,9 +179,19 @@ its bytes against that artifact hash. Downloading existing PDFs and generating m
 PDFs are separate operations; never silently skip missing outputs or claim an incomplete
 batch is complete. Resume from verified local files instead of downloading them again.
 
-## Accuracy is the highest priority
+## Capture speed and financial accuracy
 
-**These are financial source documents. Accuracy outranks throughput and file size.**
+**Scan speed is paramount: the current delivery target is thousands of scanned images
+by 30 September 2026 for a grant application. Financial accuracy is equally essential;
+submitting incorrect data can create liability.**
+
+Optimize the time between replacing a receipt and its durable saved acknowledgement.
+OCR, grouping, extraction, PDF generation and accounting review belong in separate
+downstream jobs and must never lengthen the capture/save path. Achieve throughput by
+removing unnecessary work and waits, not by weakening original preservation, durable
+save guarantees or source legibility. Preserve uncertainty for downstream review;
+never invent or silently alter financial values to finish faster. A fast successful
+capture is not a claim that its accounting data has been verified.
 
 - Preserve original uploaded bytes, with SHA-256 hashes and capture provenance. Cropped
   images, OCR and PDFs are reproducible derivatives, never replacements for originals.
@@ -168,7 +209,8 @@ batch is complete. Resume from verified local files instead of downloading them 
 
 ## Engineering priorities
 
-1. Accuracy and recoverability.
+1. Fast capture and accurate financial processing, with source integrity, durable saves
+   and recoverability as non-negotiable requirements. Keep downstream work off the capture path.
 2. Clean, maintainable code: explicit state transitions, cohesive modules, shared logic,
    typed boundaries, few dependencies, no dead code, temporary hacks or speculative APIs.
 3. Good performance: bounded frame queues, one inference at a time, small preview frames,
