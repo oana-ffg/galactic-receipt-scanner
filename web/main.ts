@@ -16,6 +16,7 @@ import {
   startDiagnostics,
 } from "./diagnostics";
 import { MediaRate } from "./media-diagnostics";
+import { PreviewOverlay } from "./preview-overlay";
 
 startDiagnostics();
 
@@ -24,6 +25,7 @@ const isCamera = location.pathname === "/camera";
 let library: CaptureLibrary | undefined;
 let lastState: ScanState | undefined;
 let retakePending: string | null = null;
+let previewOverlay: PreviewOverlay | undefined;
 
 if (location.pathname === "/agent-access") {
   void import("./agent-access").then((module) => module.mountAgentAccess(app));
@@ -81,6 +83,7 @@ function renderCount(count: number): void {
 function renderState(state: ScanState): void {
   recordScanState(state);
   lastState = state;
+  previewOverlay?.update(state);
   if (retakePending && state.selectedRetake && state.retakeOf === retakePending)
     retakePending = null;
   library?.updateState(state);
@@ -188,6 +191,8 @@ function renderState(state: ScanState): void {
 }
 
 function disconnected(reason = "Connection lost. Waiting to reconnect…"): void {
+  previewOverlay?.update();
+  previewOverlay?.setMedia(null);
   diagnostics.record("network", { connected: false, source: "station" }, 2000);
   for (const id of [
     "start",
@@ -265,6 +270,7 @@ function mountCamera(): void {
 }
 
 function mountDashboard(): void {
+  previewOverlay = new PreviewOverlay(element("preview"));
   library = new CaptureLibrary(async (id) => {
     if (retakePending)
       throw new Error("Wait for the phone to acknowledge the selected retake.");
@@ -348,6 +354,7 @@ function mountDashboard(): void {
     (state, sentAt) => acceptState(state, "direct", sentAt),
     () => {},
     (stream) => {
+      previewOverlay?.setMedia(null);
       live.srcObject = stream;
       lastVideoFrame = 0;
       decodedFrames = 0;
@@ -521,6 +528,7 @@ function mountDashboard(): void {
     const started = performance.now();
     if (!videoFresh()) {
       live.hidden = true;
+      previewOverlay?.setMedia(element<HTMLCanvasElement>("feed"));
       let status = 0;
       try {
         const response = await fetch("/api/station/preview", {
@@ -563,6 +571,7 @@ function mountDashboard(): void {
         );
         if (!videoFresh()) {
           element("feed").hidden = true;
+          previewOverlay?.setMedia(null);
           element("empty-preview").hidden = false;
           element("connection-warning").textContent =
             `Preview unavailable. ${messageOf(problem)}`;
@@ -572,6 +581,7 @@ function mountDashboard(): void {
       live.hidden = false;
       element("feed").hidden = true;
       element("empty-preview").hidden = true;
+      previewOverlay?.setMedia(live);
     }
     if (started - deliverySampleAt >= 2000) {
       deliverySampleAt = started;
@@ -642,23 +652,7 @@ async function drawPreview(blob: Blob): Promise<void> {
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
   element("empty-preview").hidden = true;
-  // The overlay and preview share the same pixel coordinate system and aspect ratio.
-  const quality = lastState?.quality;
-  if (!quality) return;
-  ctx.lineWidth = 3;
-  function polygon(points: number[][], colour: string) {
-    ctx.strokeStyle = colour;
-    ctx.beginPath();
-    points.forEach(([x, y], i) =>
-      i === 0
-        ? ctx.moveTo(x * canvas.width, y * canvas.height)
-        : ctx.lineTo(x * canvas.width, y * canvas.height),
-    );
-    ctx.closePath();
-    ctx.stroke();
-  }
-  if (quality.quad) polygon(quality.quad, quality.ok ? "#57e0a5" : "#ffbc54");
-  quality.hands?.forEach((points) => polygon(points, "#ff6f7e"));
+  previewOverlay?.setMedia(canvas);
 }
 
 async function refreshLibrary(): Promise<void> {

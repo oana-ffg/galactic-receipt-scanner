@@ -149,6 +149,10 @@ header p {
 #empty-preview[hidden] {
   display: none;
 }
+#preview-overlay {
+  position: absolute;
+  pointer-events: none;
+}
 .detail {
   height: 44px;
   overflow-y: auto;
