@@ -47,6 +47,9 @@ private-file persistence need later end-to-end validation; do not block local it
 or claim cloud readiness prematurely. If the page says Sites access is not configured,
 follow PROCESSING_ACCESS.md; never export cookies or make the Site public.
 
+For a Luna host configured with the bounded worker, follow [the Luna protocol](../receipt-processing/references/luna-protocol.md)
+for every processing operation. It uses this client internally and keeps tokens out of model output.
+
 ## Read data and images
 
 - `captures --limit 100` returns current takes, newest first. Follow `next` using `--before`.

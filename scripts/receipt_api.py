@@ -206,7 +206,7 @@ class ScannerClient:
         pinned = self.file(f"/api/files/{capture_id}/ocr?version={sha}", sha, root / (capture_id + "-" + sha + ".ocr.json"))
         return {**original, "ocr_path": pinned["path"], "ocr_sha256": sha}
 
-    def pdf(self, document_id, directory=".local/receipt-api"):
+    def pdf(self, document_id, directory=".local/receipt-api", before_upload=None):
         if not UUID.fullmatch(document_id):
             raise ClientError("Invalid document ID.")
         document = self.get("/api/documents/" + document_id)["document"]
@@ -226,8 +226,11 @@ class ScannerClient:
         if process.returncode:
             raise ClientError("Searchable PDF generation failed; retain its sources and inspect the local layout/runtime.")
         data = output.read_bytes()
-        result = json.loads(self.request(f"/api/documents/{document_id}/pdf?revision={document['revision']}", data, "application/pdf"))
         sha = hashlib.sha256(data).hexdigest()
+        if before_upload is not None:
+            before_upload({"path": str(output.absolute()), "sha256": sha, "revision": document["revision"],
+                           "filename": document["filename"], "pages": len(pages), "searchable": True})
+        result = json.loads(self.request(f"/api/documents/{document_id}/pdf?revision={document['revision']}", data, "application/pdf"))
         if result.get("sha256") != sha:
             raise ClientError("PDF upload checksum mismatch.")
         if result.get("revision") != document["revision"]:

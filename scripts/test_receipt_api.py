@@ -208,8 +208,16 @@ class ClientTests(unittest.TestCase):
                     self.assertEqual(len(retained), 1)
                     self.assertEqual(next(iter(retained)).read_bytes(), data)
             self.client.request = Mock(side_effect=ClientError("Scanner returned HTTP 409; reread revision."))
+            intent = Mock()
             with self.assertRaisesRegex(ClientError, "409"):
-                self.client.pdf(self.id, directory)
+                self.client.pdf(self.id, directory, before_upload=intent)
+            intent.assert_called_once()
+            self.assertEqual(intent.call_args.args[0]["sha256"], sha)
+            self.assertEqual(Path(intent.call_args.args[0]["path"]).read_bytes(), data)
+            self.client.request.reset_mock()
+            with self.assertRaisesRegex(OSError, "journal unavailable"):
+                self.client.pdf(self.id, directory, before_upload=Mock(side_effect=OSError("journal unavailable")))
+            self.client.request.assert_not_called()
 
 
 if __name__ == "__main__":

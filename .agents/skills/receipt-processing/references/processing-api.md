@@ -134,7 +134,8 @@ Consult [legacy fields](api.md) only for a grouping/edit requirement not covered
 
 Use `client.pdf(document_id,directory)` (or CLI `pdf DOCUMENT_ID`), which prepares
 missing OCR, generates ordered searchable original-image pages, uploads for the exact
-revision, and downloads/hash-verifies the pinned PDF. It returns
+revision, and verifies the server-computed upload hash against the generated local PDF.
+It does not download the PDF again. It returns
 `{sha256,filename,revision,path,pages,searchable}`. Respect the server's filename.
 Unknown source date/vendor remains unresolved; do not substitute scan time.
 

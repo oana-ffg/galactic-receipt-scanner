@@ -1,5 +1,8 @@
 # Worker runbook
 
+For Luna with a configured bounded worker and standing approval, use [the Luna protocol](luna-protocol.md)
+instead of the inline scripts below. This reference remains the fallback/API and Astra runbook.
+
 Read this once with the processing skill and [extraction/API contract](processing-api.md).
 Normal processing does not require reading application source. Use the calls below;
 do not discover CLI options by trial and error, construct HTTP authentication yourself,
