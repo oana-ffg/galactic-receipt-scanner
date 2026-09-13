@@ -1,3 +1,4 @@
+import { ScannerAudio } from "./audio";
 import { clockNow } from "./delivery-timing";
 import QRCode from "qrcode";
 import { api } from "./api";
@@ -8,7 +9,12 @@ import { messageOf } from "./errors";
 import type { ScanState } from "./types";
 import { CaptureLibrary } from "./library";
 import "./style.css";
-import { diagnostics, recordScanState, startDiagnostics } from "./diagnostics";
+import {
+  audioDiagnostics,
+  diagnostics,
+  recordScanState,
+  startDiagnostics,
+} from "./diagnostics";
 import { MediaRate } from "./media-diagnostics";
 
 startDiagnostics();
@@ -34,7 +40,8 @@ if (location.pathname === "/agent-access") {
     ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}<button id="force" class="secondary" disabled>Force take</button><button id="set-background" class="secondary" title="Clear all paper and hands first. Set again after moving the phone or changing the lighting." disabled>Set empty desk</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label><button id="test-audio" class="secondary">Test audio</button>'}<button id="force" class="secondary" disabled>Force take</button><button id="set-background" class="secondary" title="Clear all paper and hands first. Set again after moving the phone or changing the lighting." disabled>Set empty desk</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    ${isCamera ? "" : '<p id="audio-warning" class="error" role="status"></p>'}
     <p id="background-status" class="detail" role="status" hidden></p>
     <p id="save-recovery" class="error save-recovery" role="alert" hidden></p><p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
     ${isCamera ? "" : '<aside><section id="saved-photo" class="saved-photo"><h2>Last photo saved</h2><p>No photo saved yet.</p></section><details><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
@@ -283,7 +290,6 @@ function mountDashboard(): void {
   let lastSaved: string | null = null;
   let lastError = "";
   let needsAttention = false;
-  let audio: AudioContext | null = null;
   const live = element<HTMLVideoElement>("live-feed");
   const stateOrder = new StateOrder();
   diagnostics.record("preview.latency", {
@@ -362,41 +368,38 @@ function mountDashboard(): void {
   } catch {
     audioToggle.checked = true;
   }
-  function enableAudio() {
-    if (audioToggle.checked) {
-      audio ??= new AudioContext();
-      void audio.resume().catch(() => {});
-    }
-  }
-  document.addEventListener("pointerdown", enableAudio, { once: true });
-  document.addEventListener("keydown", enableAudio, { once: true });
+  const audio = new ScannerAudio(audioToggle.checked, (message) => {
+    element("audio-warning").textContent = message;
+  });
+  const recoverAudio = () => {
+    void audio.recover("gesture");
+  };
+  document.addEventListener("pointerdown", recoverAudio);
+  document.addEventListener("keydown", recoverAudio);
+  window.addEventListener("focus", () => {
+    void audio.recover("focus");
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void audio.recover("visible");
+  });
+  navigator.mediaDevices?.addEventListener("devicechange", () => {
+    void audio.recover("device-change");
+  });
+  const testAudio = element<HTMLButtonElement>("test-audio");
+  testAudio.disabled = !audioToggle.checked;
+  testAudio.onclick = () => {
+    void audio.play(true, "test");
+  };
   audioToggle.onchange = () => {
     try {
       localStorage.setItem("scanner-audio", audioToggle.checked ? "on" : "off");
     } catch {
       /* Keep the current choice when browser storage is unavailable. */
     }
-    enableAudio();
+    testAudio.disabled = !audioToggle.checked;
+    audio.setEnabled(audioToggle.checked);
   };
-  function sound(success: boolean): void {
-    if (!audioToggle.checked || !audio) return;
-    for (let i = 0; i < (success ? 1 : 3); i++) {
-      const oscillator = audio.createOscillator();
-      const gain = audio.createGain();
-      const start = audio.currentTime + i * 0.3;
-      oscillator.type = success ? "sine" : "sawtooth";
-      oscillator.frequency.setValueAtTime(success ? 880 : 180, start);
-      if (!success)
-        oscillator.frequency.exponentialRampToValueAtTime(80, start + 0.22);
-      gain.gain.setValueAtTime(0.001, start);
-      gain.gain.linearRampToValueAtTime(success ? 0.12 : 0.09, start + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.22);
-      oscillator.connect(gain);
-      gain.connect(audio.destination);
-      oscillator.start(start);
-      oscillator.stop(start + 0.24);
-    }
-  }
+  void audio.recover("startup");
   let deliveryPhase = "";
   function acceptState(
     state: ScanState,
@@ -426,7 +429,14 @@ function mountDashboard(): void {
     if (state.needsAttention && !needsAttention) void refreshLibrary();
     needsAttention = !!state.needsAttention;
     if (state.lastSaved && state.lastSaved !== lastSaved) {
-      if (lastState) sound(!state.manualReview);
+      if (lastState)
+        void audio.play(!state.manualReview, "saved", state.stateRevision);
+      else
+        audioDiagnostics.record("audio", {
+          action: "skipped",
+          reason: "initial-state",
+          revision: state.stateRevision,
+        });
       void refreshLibrary();
     }
     if (
@@ -435,7 +445,7 @@ function mountDashboard(): void {
       lastState?.phase === "amber" &&
       !lastState.manualReview
     )
-      sound(false);
+      void audio.play(false, "rejected", state.stateRevision);
     lastSaved = state.lastSaved;
     lastError = state.message;
     renderState(state);

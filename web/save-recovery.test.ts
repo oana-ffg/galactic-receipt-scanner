@@ -90,6 +90,10 @@ it("automatically resends the exact retained bytes after a missing-record or mis
     expect(await retainedCaptures()).toHaveLength(0),
   );
   expect(fetch).toHaveBeenCalledTimes(3);
+  // Storage deletion precedes the completion notification; await both outcomes.
+  await vi.waitFor(() =>
+    expect(changed.mock.calls.at(-1)?.[0].timing?.outcome).toBe("complete"),
+  );
   const final = changed.mock.calls.at(-1)![0];
   expect(final.timing).toMatchObject({
     kind: "verification",

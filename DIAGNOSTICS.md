@@ -66,7 +66,25 @@ timestamps when available. Availability flags distinguish missing support from z
 delay. It is separate from state delivery and existing RTP/freeze/rate diagnostics.
 Synchronous UI rendering completion is not proof that a frame has been painted.
 
-General history is capped at 16 KB, removal samples at 12 KB, removal transitions
+General history is capped at 12 KB, audio history at 4 KB, removal samples at 12 KB, removal transitions
 at 6 KB and save timing at 8 KB, each expiring after two minutes. Issue context must
 remain below the server's 48 KB limit. These are bounded diagnostic windows, not a
 complete session audit or a replacement for durable receipt records.
+
+## Dashboard audio
+
+`audioHistory` retains sound requests and their local sequence numbers, save-state
+revisions, skips, context initialization/state changes, resume attempts/results,
+failures, scheduling and oscillator completion. It has its own budget so preview
+traffic cannot evict all sound evidence. Context time, browser-reported output
+latencies and visibility help distinguish an uninitialized/suspended context from
+a tone that progressed through the browser audio graph. No device names, device
+identifiers or raw exception messages are collected.
+
+A scheduled or ended tone does not prove that a speaker or Bluetooth headset made
+it audible. Use **Test audio** to check the selected system output. The dashboard
+shows a warning when audio needs activation or playback fails. Automatic alert resume attempts
+expire after 1.2 seconds; a late resume never replays that missed acknowledgement.
+An explicitly clicked Test audio waits up to five seconds for device startup.
+Tones stalled during playback are disconnected after 1.8 seconds. Audio recovery
+is independent of phone capture, uploads and saved-state rendering.
