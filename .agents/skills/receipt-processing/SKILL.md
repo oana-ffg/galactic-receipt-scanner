@@ -104,8 +104,11 @@ searchable image PDFs. Text is invisible and may be inaccurate; never redraw or 
 visible receipt text with model output. Unknown date/vendor remains unresolved.
 
 Optional crops need visually verified original-pixel bounds with paper margin, retaining faint
-text and handwriting. No generative cleanup. Retrieve the pinned stored PDF, verify its hash
-and inspect every page before checking PDF review. Save failures with recovery actions.
+text and handwriting. No generative cleanup. Compare the upload response's server-computed
+hash and revision with the generated PDF, then inspect every page of that same local file
+before checking PDF review. Do not download it again during normal processing. For an
+existing artifact without a verified local copy, or an explicit retrieval-path check,
+download the pinned PDF and verify its hash. Save failures with recovery actions.
 
 Reconcile the snapshot: every current source is assigned, a documented duplicate, or explicitly
 pending. Report named PDFs separately from fully reviewed documents. New scans may arrive

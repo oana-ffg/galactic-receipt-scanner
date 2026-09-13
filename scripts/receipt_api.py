@@ -229,9 +229,13 @@ class ScannerClient:
         result = json.loads(self.request(f"/api/documents/{document_id}/pdf?revision={document['revision']}", data, "application/pdf"))
         sha = hashlib.sha256(data).hexdigest()
         if result.get("sha256") != sha:
-            raise ClientError("Stored PDF checksum mismatch.")
-        verified = self.file(f"/api/documents/{document_id}/pdf?revision={result['revision']}&version={sha}", sha, root / (document_id + "-" + sha + ".pdf"))
-        return {**result, "path": verified["path"], "pages": len(pages), "searchable": True}
+            raise ClientError("PDF upload checksum mismatch.")
+        if result.get("revision") != document["revision"]:
+            raise ClientError("PDF upload revision mismatch.")
+        # The server hashes the received bytes and acknowledges only after storage
+        # and metadata persistence. Inspect these identical local bytes; reserve a
+        # pinned download through file() for explicit retrieval-path verification.
+        return {**result, "path": str(output.absolute()), "pages": len(pages), "searchable": True}
 
 
 def main():

@@ -176,7 +176,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(Path(result["ocr_path"]).read_bytes(), data)
             self.assertEqual(self.client.request.call_count, 2)
 
-    def test_pdf_verifies_upload_readback_and_preserves_stale_revision_errors(self):
+    def test_pdf_verifies_upload_without_redownloading_and_preserves_errors(self):
         self.client.get = Mock(return_value={"document": {"id": self.id, "revision": 3, "filename": "2026-01-01_synthetic.pdf", "pages": [{"captureId": self.id, "sha256": self.sha, "rotation": 0, "crop": None}]}})
         self.client.prepare = Mock(return_value={"path": "/synthetic/source.jpg", "ocr_path": "/synthetic/ocr.json", "sha256": self.sha})
         data = b"%PDF-synthetic-test-only"
@@ -190,6 +190,23 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(Path(result["path"]).read_bytes(), data)
             self.assertEqual(result["sha256"], sha)
             self.assertIn("revision=3", self.client.request.call_args_list[0].args[0])
+            self.client.request.assert_called_once_with(
+                f"/api/documents/{self.id}/pdf?revision=3", data, "application/pdf")
+            self.assertTrue(Path(result["path"]).is_absolute())
+            for response, message in [
+                    ({"sha256": "0" * 64, "revision": 3}, "checksum"),
+                    ({"sha256": sha, "revision": 4}, "revision"),
+                    ({"revision": 3}, "checksum"),
+                    ({"sha256": sha}, "revision")]:
+                with self.subTest(response=response):
+                    self.client.request = Mock(return_value=json.dumps(response).encode())
+                    before = set(Path(directory).glob("*.pdf"))
+                    with self.assertRaisesRegex(ClientError, message):
+                        self.client.pdf(self.id, directory)
+                    self.client.request.assert_called_once()
+                    retained = set(Path(directory).glob("*.pdf")) - before
+                    self.assertEqual(len(retained), 1)
+                    self.assertEqual(next(iter(retained)).read_bytes(), data)
             self.client.request = Mock(side_effect=ClientError("Scanner returned HTTP 409; reread revision."))
             with self.assertRaisesRegex(ClientError, "409"):
                 self.client.pdf(self.id, directory)

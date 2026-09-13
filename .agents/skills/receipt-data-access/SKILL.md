@@ -66,7 +66,8 @@ For routine work prefer `prepare CAPTURE_ID`: it verifies the original, reuses s
 ordinary OCR or runs the local CPU pass, saves and verifies the OCR artifact, and returns only
 paths/hashes. Inspect the original image and read the OCR JSON's text/lines without printing
 its embedded PDF base64. `pdf DOCUMENT_ID` prepares missing OCR, generates from the saved page
-order, uploads and verifies the searchable PDF, returning its local path and pinned hash.
+order, uploads it, and verifies the server-computed hash and acknowledged revision,
+returning the generated local path and acknowledged hash without downloading it again.
 These deterministic helpers make no model calls. Astra uses `original` alone before its blind
 checkpoint; use prepare and read OCR only after the draft is saved.
 
@@ -93,9 +94,11 @@ Read back the saved artifact using its hash. Do not print the PDF-layer base64 p
 The manifest contains ordered `pages` with captureId, sha256, path, rotation, crop and
 ocr_path. Generate using the saved document pages; each original and OCR source hash is
 checked. `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` uploads for the exact revision.
-Download it using `file '/api/documents/ID/pdf?revision=N&version=SHA' SHA PRIVATE_PATH`,
-inspect it, then post document_id, current revision, sha256 and inspection evidence to
-`/api/processing/pdf-review`. This attests only the pinned PDF, not human review.
+Compare the upload response hash with the local PDF and require the acknowledged revision
+to match, inspect that same local file, then post document_id, current revision, sha256 and inspection evidence to
+`/api/processing/pdf-review`. This attests only that PDF hash, not human review.
+Use `file '/api/documents/ID/pdf?revision=N&version=SHA' SHA PRIVATE_PATH` for an
+explicit retrieval check or when the verified local PDF is unavailable.
 
 Version 2 exposes shared claims, private categories, model confidences and human review.
 The encrypted browser handoff provides API credentials independently of browser password
@@ -115,7 +118,7 @@ goes **before** the subcommand.
 | `post PROCESSING_API_PATH PRIVATE_JSON_FILE` | POSTs the saved JSON bytes; use /api/processing/ routes. |
 | `original CAPTURE_ID --directory PRIVATE_DIRECTORY` | Verified original path/hash; --directory is optional here. |
 | `prepare CAPTURE_ID` | Verified original and stored OCR paths/hashes. **No --directory CLI option.** |
-| `pdf DOCUMENT_ID` | Generated, uploaded, pinned verified PDF. **No --directory CLI option.** |
+| `pdf DOCUMENT_ID` | Generated local PDF with server-acknowledged hash/revision; no repeated download. **No --directory CLI option.** |
 | `file API_PATH SHA256 PRIVATE_DESTINATION` | Hash-verified bytes for a pinned artifact. |
 | `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` | Advanced manual upload; prepare already does this. |
 | `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` | Advanced manual upload; pdf already does this. |

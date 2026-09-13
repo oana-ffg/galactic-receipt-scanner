@@ -47,6 +47,23 @@ on POSIX. Never apply the artifact rule to credentials. Check a synthetic local 
 through the actual image-viewing tool before claiming a receipt. Leave old inaccessible
 caches intact; use a fresh authorized work directory rather than changing their ACLs.
 
+## Hosts with standing command approvals
+
+If the owner has configured narrow command allow rules, the coordinator must supply the
+exact approved CLI invocation: absolute runtime/client/config paths, argument order and
+allowed operation. Invoke that command directly through the shell tool. Calling the
+client from a changing inline Python script does not match a rule for its CLI invocation.
+Never broaden an approval to all Python or shell execution.
+
+For a covered submit or PDF-review operation, use the recipes below to write the private
+request file first, then call `receipt_api.py --config PRIVATE_CLIENT_CONFIG post
+PROCESSING_API_PATH PRIVATE_JSON_FILE` with the supplied runtime and exact arguments.
+Save the returned JSON privately and continue the recipe's readback checks; do not also
+execute its `post_saved` call. The `pdf DOCUMENT_ID` CLI is the corresponding generation
+operation and uses the default ignored `.local/receipt-api` cache. Uncovered operations
+retain the normal approval flow. Standing approvals are host configuration, not credentials
+or a cloud capability to assume. Never put an owner's paths or connection in tracked rules.
+
 ## Reuse the existing client
 
 The Python API exposes the same implementation as the CLI, with less shell quoting and
@@ -188,9 +205,12 @@ subprocess.run([
 ```
 
 `client.pdf` already prepares missing OCR, generates in saved page order, uploads, and
-downloads the hash-verified pinned PDF. Its result includes `filename`, `revision`,
-`sha256`, `path`, `pages` and `searchable`. Do not regenerate or manually construct a
-second download URL on success. Rendering uses the already installed Poppler
+checks the server-computed hash and acknowledged revision. The server responds only after
+storing the received PDF and its metadata. Its result includes `filename`, `revision`,
+`sha256`, `path`, `pages` and `searchable`; `path` is the generated local PDF. Render and
+inspect that same file. Do not regenerate or download it again on success. Use the
+client's pinned `file` command only for an explicit retrieval-path check or when the
+verified local file is unavailable. Rendering uses the already installed Poppler
 `pdftoppm`; do not install a renderer inside the worker.
 
 Inspect every rendered page against the originals, increasing resolution/zoom when
