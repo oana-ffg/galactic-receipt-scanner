@@ -38,10 +38,17 @@ host's credential access and managed model spawning have been verified.
 
 Read [worker instructions](references/model-workers.md) and the
 [processing contract](references/processing-api.md). Keep unprocessed, awaiting-page,
-Astra-review, human-review and broken states distinct. The ordinary OCR pass is local
-CPU work and runs before model submission. Its searchable PDF text and numeric comparison
-are unverified evidence: **original pixels are the source of truth**. Luna must flag
-OCR disagreements with at most medium certainty. Astra rereads the originals and records
+Astra-review, human-review and broken states distinct. **Each Luna/Astra worker must use
+its own built-in vision to inspect the verified originals and extract their contents.**
+Do not substitute OCR output or another model for that visual reading.
+
+Reuse the already prepared local CPU Tesseract runtime through the existing client for
+the required numeric comparison and searchable PDF text. Processing workers must not
+install or download OCR packages, engines or models, or add another OCR pipeline. If the
+prepared runtime is missing or broken, report the setup failure to the coordinator.
+The ordinary OCR pass still runs before model submission; its output is unverified
+comparison evidence. **Original pixels are the source of truth.** Luna must flag OCR
+disagreements with at most medium certainty. Astra rereads the originals and records
 why either reading is wrong; unresolved disagreements remain low/medium for a human.
 
 ## Grouping and originals
