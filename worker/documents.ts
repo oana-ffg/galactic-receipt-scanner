@@ -1,6 +1,7 @@
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
 import {
+  DOCUMENT_EVIDENCE_LIMIT,
   documentReasons,
   mergeReviewReasons,
   filenameBase,
@@ -87,7 +88,7 @@ function validate(
   );
   requireThat(
     str(d.text, 250000) &&
-      str(d.evidence) &&
+      str(d.evidence, DOCUMENT_EVIDENCE_LIMIT) &&
       ["unchecked", "absent", "present", "uncertain"].includes(d.handwriting),
     400,
     "Invalid transcription or evidence.",
@@ -274,31 +275,30 @@ export async function documentRoute(
         JSON.stringify(JSON.parse(f.payload).pages) === JSON.stringify(d.pages),
     );
     const state = documentReasons(d);
+    function requireProcessing(reason: string) {
+      state.reasons.push(reason);
+      if (state.status === "ready") state.status = "processing";
+    }
     if (
       d.checks.pdf &&
       file?.sha256 !== d.reviewedPdfSha256 &&
       !d.mergedInto &&
       !d.duplicateOf
     ) {
-      state.reasons.push(
+      requireProcessing(
         "The current PDF differs from the visually reviewed version. Inspect it again.",
       );
-      if (state.status !== "broken") state.status = "review";
     }
     const stale = d.pages.some(
       (p) => !captures.find((c) => c.id === p.captureId)?.is_current,
     );
     if (stale && !d.mergedInto && !d.duplicateOf) {
-      state.reasons.push(
+      requireProcessing(
         "A newer current take exists. Reconcile page selection and recheck the output.",
       );
-      if (state.status !== "broken") state.status = "review";
     }
     if (!file && !d.mergedInto && !d.duplicateOf) {
-      state.reasons.push(
-        "PDF has not been saved for these pages and filename.",
-      );
-      if (state.status !== "broken") state.status = "review";
+      requireProcessing("PDF has not been saved for these pages and filename.");
     }
     return {
       ...d,

@@ -9,6 +9,7 @@ import type {
 } from "./documents";
 import type { Capture } from "./types";
 import { RequestError } from "./errors";
+import { appendProcessingEvidence } from "./documents";
 
 export const readDocuments = () => api<DocumentCatalog>("/api/documents");
 export const readDocument = (id: string) =>
@@ -120,6 +121,38 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
   return result;
 }
 
+async function saveOcrObservations(
+  id: string,
+  result: { text: string; uncertainWords: readonly unknown[] },
+) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { document: fresh } = await documentForCapture(id);
+      if (!fresh || fresh.checks.transcription) return;
+      if (fresh.pages.length === 1 && !fresh.text) fresh.text = result.text;
+      const observations: string[] = [];
+      if (result.uncertainWords.length)
+        observations.push(
+          `OCR processing: ${result.uncertainWords.length} low-confidence words on source ${id}; retry extraction and verify against the original.`,
+        );
+      if (!result.text.trim())
+        observations.push(
+          `OCR processing: no readable text on source ${id}; try another reading for faint print, rotation or handwriting.`,
+        );
+      fresh.evidence = appendProcessingEvidence(fresh.evidence, observations);
+      await saveDocuments([fresh]);
+      return;
+    } catch (error) {
+      if (!(
+        error instanceof RequestError &&
+        error.status === 409 &&
+        attempt === 0
+      ))
+        throw error;
+    }
+  }
+}
+
 export async function processOcr(ids: string[]) {
   const { ReceiptOcr } = await import("./ocr");
   const engine = new ReceiptOcr();
@@ -128,22 +161,19 @@ export async function processOcr(ids: string[]) {
     for (const id of ids) {
       try {
         const result = await engine.transcribe(id);
-        const { document: fresh } = await documentForCapture(id);
-        if (fresh && !fresh.checks.transcription) {
-          if (fresh.pages.length === 1 && !fresh.text) fresh.text = result.text;
-          const flags = [...fresh.uncertainties];
-          if (result.uncertainWords.length)
-            flags.push(
-              `OCR: ${result.uncertainWords.length} low-confidence words on source ${id}. Compare with the original.`,
-            );
-          if (!result.text.trim())
-            flags.push(
-              `OCR: no readable text on source ${id}. Inspect for faint print, rotation or handwriting.`,
-            );
-          fresh.uncertainties = [...new Set(flags)];
-          await saveDocuments([fresh]);
+        try {
+          await saveOcrObservations(id, result);
+          results.push({ ok: true, ...result });
+        } catch (error) {
+          // The immutable OCR artifact was saved. A document update conflict or
+          // network failure does not mean transcription failed.
+          results.push({
+            ...result,
+            ok: false,
+            failureRecorded: false,
+            error: `OCR was saved, but document processing notes could not be updated. Refresh and retry. ${error instanceof Error ? error.message : String(error)}`,
+          });
         }
-        results.push({ ok: true, ...result });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         let recorded = false;

@@ -45,7 +45,7 @@ function amount(value: string): number {
 
 export async function mountReview(app: HTMLElement) {
   app.innerHTML =
-    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="attention">Needs attention</option><option value="all">All documents</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
+    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="review">Human review</option><option value="all">All documents</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
   let selected: string | null = null;
   let busy = false;
@@ -83,7 +83,7 @@ export async function mountReview(app: HTMLElement) {
       {},
     );
     app.querySelector("#review-counts")!.textContent =
-      `${counts.ready ?? 0} ready · ${counts.review ?? 0} need review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
+      `${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
     for (const d of catalog.documents) {
       if (d.status === "merged") continue;
       if (
@@ -253,7 +253,11 @@ export async function mountReview(app: HTMLElement) {
       doc.broken.join("\n"),
       true,
     );
-    const evidence = field("What was checked and resolved", doc.evidence, true);
+    const evidence = field(
+      "Processing observations and verification evidence",
+      doc.evidence,
+      true,
+    );
     form.append(uncertainties.wrap, broken.wrap, evidence.wrap);
     const checks = el("fieldset");
     checks.append(el("legend", "Confirm only what you have inspected"));
@@ -654,7 +658,7 @@ export async function mountReview(app: HTMLElement) {
       const result = await processOcr(ids);
       await refresh();
       setMessage(
-        `${result.results.filter((r) => r.ok).length} transcribed; ${result.results.filter((r) => !r.ok).length} failed. All OCR needs visual review.`,
+        `${result.results.filter((r) => r.ok).length} transcribed; ${result.results.filter((r) => !r.ok).length} failed. OCR still needs verification against the originals.`,
       );
     });
   registerSiteTools(refresh);

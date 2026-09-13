@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendProcessingEvidence,
+  DOCUMENT_EVIDENCE_LIMIT,
   documentReasons,
   filenameBase,
   invoiceDifference,
+  mergeReviewReasons,
   newDocument,
   validDate,
 } from "./documents";
@@ -12,13 +15,36 @@ const source = {
   sha256: "a".repeat(64),
 } as Capture;
 describe("source-backed processing", () => {
+  it("retains bounded processing evidence without changing existing notes", () => {
+    expect(
+      appendProcessingEvidence("Existing check", [
+        "OCR pending",
+        "OCR pending",
+      ]),
+    ).toBe("Existing check\nOCR pending");
+    const full = "x".repeat(DOCUMENT_EVIDENCE_LIMIT);
+    expect(appendProcessingEvidence(full, ["OCR pending"])).toBe(full);
+  });
   it("keeps missing vendor/date, OCR and handwriting visible", () => {
     const d = newDocument(source);
-    expect(documentReasons(d).status).toBe("review");
+    expect(documentReasons(d).status).toBe("processing");
     expect(filenameBase(d)).toBeNull();
     expect(documentReasons(d).reasons.join(" ")).toContain("Handwriting");
     expect(validDate("2026-02-30")).toBe(false);
     expect(validDate("2024-02-29")).toBe(true);
+  });
+  it("keeps concrete questions and source failures above pending machine work", () => {
+    const d = newDocument(source);
+    d.uncertainties = [
+      "The transaction date remains unreadable after two OCR attempts.",
+    ];
+    expect(documentReasons(d).status).toBe("review");
+    d.broken = ["The only saved page is clipped before the printed total."];
+    expect(documentReasons(d).status).toBe("broken");
+    d.broken = [];
+    d.uncertainties = [];
+    d.handwriting = "uncertain";
+    expect(documentReasons(d).status).toBe("review");
   });
   it("checks signed invoice lines and explicit tax, credits and rounding exactly", () => {
     const d = newDocument(source);
@@ -35,7 +61,13 @@ describe("source-backed processing", () => {
     };
     expect(invoiceDifference(d.invoice)).toBe(0);
     d.invoice.total = 17501;
+    expect(documentReasons(d).status).toBe("processing");
+    expect(mergeReviewReasons(d).broken).toEqual([]);
+    d.checks.visual = d.checks.transcription = true;
+    expect(documentReasons(d).status).toBe("processing");
+    d.checks.grouping = true;
     expect(documentReasons(d).status).toBe("broken");
+    expect(mergeReviewReasons(d).broken).toHaveLength(1);
     d.invoice.lines = [-10000];
     d.invoice.adjustments = [{ label: "Tax credit", amount: -2500 }];
     d.invoice.total = -12500;

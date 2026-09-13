@@ -618,6 +618,9 @@ header {
 .review-item.review {
   border-left: 5px solid #f1c76b;
 }
+.review-item.processing {
+  border-left: 5px solid #86b9e8;
+}
 .review-item.ready {
   border-left: 5px solid #64e3ac;
 }

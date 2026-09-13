@@ -88,6 +88,13 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
   await expect(
     page.getByRole("heading", { name: "Receipt review", exact: true }),
   ).toBeVisible();
+  await expect(page.locator("#review-counts")).toContainText(
+    "3 awaiting processing",
+  );
+  await expect(page.locator("#review-list button")).toHaveCount(0);
+  await page.locator("#review-filter").selectOption("processing");
+  await expect(page.locator("#review-list button")).toHaveCount(3);
+  await page.locator("#review-filter").selectOption("attention");
   const result = await page.evaluate(async (ids) => {
     const tools = (window as any).documentTools;
     const { document: first } = await tools.read_document.execute({
@@ -130,12 +137,14 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     .getByRole("button", { name: /2026-08-14-synthetic_paper_shop/ })
     .click();
   await expect(
-    page.getByText("Unclear handwritten payer name.", { exact: true }),
+    page
+      .locator("#review-detail")
+      .getByText("Unclear handwritten payer name.", { exact: true }),
   ).toBeVisible();
   await expect(
     page
       .locator("#review-detail")
-      .getByText(/differ from the printed total by -1/),
+      .getByText(/Extracted amounts do not balance/),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Page 2", exact: true }),

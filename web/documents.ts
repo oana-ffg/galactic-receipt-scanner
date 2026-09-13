@@ -1,5 +1,20 @@
 import type { Capture } from "./types";
 
+export const DOCUMENT_EVIDENCE_LIMIT = 20000;
+
+export function appendProcessingEvidence(
+  evidence: string,
+  notes: string[],
+): string {
+  for (const note of notes) {
+    if (evidence.includes(note)) continue;
+    const next = [evidence, note].filter(Boolean).join("\n");
+    // Full OCR observations remain in their immutable capture artifact.
+    if (next.length <= DOCUMENT_EVIDENCE_LIMIT) evidence = next;
+  }
+  return evidence;
+}
+
 export interface DocumentPage {
   captureId: string;
   sha256: string;
@@ -48,7 +63,7 @@ export interface ReceiptDocument {
 }
 export interface DocumentView extends ReceiptDocument {
   filename: string | null;
-  status: "ready" | "review" | "broken" | "duplicate" | "merged";
+  status: "ready" | "processing" | "review" | "broken" | "duplicate" | "merged";
   reasons: string[];
   scannedAt: string[];
   pdf: { sha256: string; revision: number } | null;
@@ -101,17 +116,35 @@ export function invoiceDifference(invoice: InvoiceCheck): number {
   );
 }
 
+function confirmedInvoiceMismatch(doc: ReceiptDocument): boolean {
+  return !!(
+    doc.invoice &&
+    invoiceDifference(doc.invoice) !== 0 &&
+    doc.checks.visual &&
+    doc.checks.transcription &&
+    doc.checks.grouping
+  );
+}
+
 export function documentReasons(doc: ReceiptDocument): {
   status: DocumentView["status"];
   reasons: string[];
 } {
   if (doc.mergedInto) return { status: "merged", reasons: [] };
   const broken = [...doc.broken];
-  if (doc.invoice && invoiceDifference(doc.invoice) !== 0)
+  if (confirmedInvoiceMismatch(doc))
     broken.push(
-      `Invoice components differ from the printed total by ${invoiceDifference(doc.invoice)} minor units.`,
+      `Invoice components differ from the printed total by ${invoiceDifference(doc.invoice!)} minor units.`,
     );
   const reasons = [...broken, ...doc.uncertainties];
+  if (
+    doc.invoice &&
+    invoiceDifference(doc.invoice) !== 0 &&
+    !confirmedInvoiceMismatch(doc)
+  )
+    reasons.push(
+      "Extracted amounts do not balance; reread the source and check page completeness before treating the document as broken.",
+    );
   if (!doc.vendor) reasons.push("Vendor needs identification.");
   if (!doc.receiptDate)
     reasons.push("Receipt date needs identification; scan date is separate.");
@@ -139,14 +172,20 @@ export function documentReasons(doc: ReceiptDocument): {
     reasons.push("Handwritten annotation needs human review.");
   if ((doc.kind === "invoice" || doc.kind === "credit-note") && !doc.invoice)
     reasons.push("Invoice arithmetic has not been checked.");
+  const needsHumanReview =
+    doc.uncertainties.length > 0 ||
+    doc.handwriting === "uncertain" ||
+    doc.annotations.some((a) => a.uncertain || a.text === null);
   return {
     status: broken.length
       ? "broken"
-      : reasons.length
+      : needsHumanReview
         ? "review"
-        : doc.duplicateOf
-          ? "duplicate"
-          : "ready",
+        : reasons.length
+          ? "processing"
+          : doc.duplicateOf
+            ? "duplicate"
+            : "ready",
     reasons,
   };
 }
@@ -160,9 +199,9 @@ export function mergeReviewReasons(doc: ReceiptDocument): {
     broken: [
       ...new Set([
         ...doc.broken,
-        ...(doc.invoice && invoiceDifference(doc.invoice) !== 0
+        ...(confirmedInvoiceMismatch(doc)
           ? [
-              `Source invoice components differed from the printed total by ${invoiceDifference(doc.invoice)} minor units; reconcile after grouping.`,
+              `Source invoice components differed from the printed total by ${invoiceDifference(doc.invoice!)} minor units; reconcile after grouping.`,
             ]
           : []),
       ]),

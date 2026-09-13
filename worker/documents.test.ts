@@ -160,6 +160,7 @@ it("keeps broken totals broken and invalidates output after page changes", async
   d.receiptDate = "2026-02-02";
   d.kind = "invoice";
   d.evidence = "Synthetic invoice";
+  d.checks.visual = d.checks.transcription = d.checks.grouping = true;
   d.invoice = {
     currency: "DKK",
     lines: [100, 200],
@@ -308,7 +309,7 @@ it("pins visual approval to a stored PDF hash and requires review after regenera
     ).status,
   ).toBe(200);
   const changed = await (await request(`/api/documents/${d.id}`)).json();
-  expect(changed.document.status).toBe("review");
+  expect(changed.document.status).toBe("processing");
   expect(changed.document.reasons.join(" ")).toContain(
     "visually reviewed version",
   );
