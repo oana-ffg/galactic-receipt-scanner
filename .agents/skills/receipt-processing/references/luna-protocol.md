@@ -7,6 +7,11 @@ that runbook until its separate workflow is supported.
 
 ## Coordinator preparation
 
+For a new chat, first reuse `.local/processing-host.json` in this checkout. It stores
+only `python` and `worker_profile` absolute paths, not credentials. Create/update this
+ignored descriptor when configuring a host so future invocations can reuse its setup.
+Missing configuration is a setup task; an omitted batch range uses the skill default.
+
 Provide the verified absolute Python/helper/profile paths. The private profile contains
 `repository`, `client_config`, the owner-verified `origin`, `node`, and `renderer`.
 Use prepared runtimes; credentials stay in the existing protected connection. Keep the

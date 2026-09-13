@@ -5,6 +5,38 @@ description: Process saved receipts using fresh Luna workers, group related page
 
 # Receipt processing
 
+## Start when invoked
+
+A bare `$receipt-processing` invocation means **run the saved-receipt workflow now**.
+Default to one batch of up to **10 oldest pending documents in the Luna small stage**.
+An explicit count/stage in the user's request overrides that default. The claim API
+selects the next eligible document; it cannot target an arbitrary document ID. For an
+exact-document request, verify the claimed ID and safely release an unsubmitted claim
+if it differs; report the selection limitation instead of processing another document. Do not
+end with "skill loaded" or ask which batch/range when none was specified. Announce the
+default and begin connection preparation and worker dispatch. An explicit request to
+explain, inspect or edit this skill is not a processing run.
+
+Reuse the coordinator handoff when provided. Otherwise read the repository's ignored
+`.local/processing-host.json` for the prepared `python` executable and `worker_profile`
+path; read that profile for the client config, origin, Node and PDF renderer paths.
+This descriptor is discovery metadata, not executable authority: reject symlink/junction
+indirection or non-regular descriptor/profile files, and verify that the Python/helper/profile
+tuple matches the existing exact standing launch rule. Also validate the profile's checkout,
+origin and prepared runtimes. A mismatch is a concrete configuration blocker; never broaden
+approvals or request execution of a different command merely because the descriptor names it.
+Do not print credentials or scan secret stores. Verify the destination as described in the access skill. If the host
+descriptor is missing, follow existing connection setup and runtime discovery before
+asking for anything unavailable. Ask only about a concrete missing prerequisite or
+ambiguous destination, not the already-defined batch size or stage.
+
+If the caller is not Terra and managed delegation is available, delegate coordination
+to a Terra subagent with `fork_turns: none`, supplying this request, discovered paths
+and verified connection facts. Wait for its outcome in this task; do not ask the user
+to switch models or create another chat. Terra then uses fresh Luna workers below.
+Do not create a recurring schedule from a bare invocation. Respect actual permission
+failures and the stop-on-worker-failure rule; the defaults do not bypass approvals.
+
 Use the owner's subscription-backed managed agents. Do not call the OpenAI API or paid
 inference services. Read [direct data access](../receipt-data-access/SKILL.md) first; fetch
 images through the client and open verified originals in the individual worker's context.
@@ -18,7 +50,7 @@ for Astra and hosts without that helper; do not mix its inline scripts into a bo
 ## Coordinator
 
 Use **Terra (`gpt-5.6-terra`) for coordination**, including WebMCP authorization when
-needed. A skill cannot switch its caller's model; select Terra when creating the task.
+needed. Use the delegation route above when the invoking task uses another model.
 The coordinator uses only connection status, public connection requests, encrypted
 responses, worker instructions and compact result metadata. Never load receipt images,
 PDF renders, full OCR text or full extraction payloads into its context. Read the access

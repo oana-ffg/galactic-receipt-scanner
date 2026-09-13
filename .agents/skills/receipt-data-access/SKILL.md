@@ -10,6 +10,11 @@ Read [API access setup](../../../PROCESSING_ACCESS.md) when provisioning another
 Load credentials through the private connection config; never paste them into prompts,
 command arguments, logs or source.
 
+Reuse coordinator-supplied paths or the repository's ignored
+`.local/processing-host.json` (`python`, `worker_profile`). The referenced worker profile
+contains the existing private `client_config` and prepared runtimes. Keep this descriptor
+local to its host; do not commit it or ask the owner to supply paths that it already stores.
+
 Start with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
 Its non-secret `origin` identifies the actual request destination. Before dispatching
 fresh processing workers, match it to owner-verified Site metadata or the owner's
