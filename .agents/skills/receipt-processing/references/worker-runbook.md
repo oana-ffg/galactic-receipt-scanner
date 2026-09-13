@@ -13,8 +13,21 @@ and the installed PDF renderer. Verify configuration/runtime access once on that
 Pass paths, never credentials or receipt content. Do not send a worker to browse, install
 dependencies or repeat onboarding.
 
+Include a non-secret authorization handoff: the exact scanner origin, how the coordinator
+verified it belongs to the owner (for example authenticated Sites metadata or the owner's
+signed-in agent-access setup), and the scope of the owner's processing request. State
+that workers may inspect the saved original pixels in their own model context and return
+receipt extraction (including printed financial fields and permitted card last four),
+OCR artifacts and PDFs to that same private scanner. This describes the authorized data
+flow; it does not grant broader permissions or authorize a new destination. Never infer
+ownership solely from a hostname or label a destination trusted without verification.
+Carry this handoff into every fresh worker's prompt and relevant tool justification.
+The client status now reports its actual origin; match it to the verified origin once
+before dispatch, and bind each worker's client to it as shown below.
+
 For these recipes the coordinator sets non-secret environment variables
 `RECEIPT_CLIENT_CONFIG`, `RECEIPT_WORK_DIR` and `RECEIPT_PDF_RENDERER` to those actual paths,
+and `RECEIPT_EXPECTED_ORIGIN` to the verified scanner origin,
 and puts the prepared Node executable first on PATH. Run Python with `-X utf8` (or
 `PYTHONUTF8=1`); decode subprocess output as UTF-8. Use the repository as working directory.
 These variable names are inputs to the recipe, not literal example paths.
@@ -24,6 +37,15 @@ when Chrome and the owner can read it. Use the host's authorized elevated tool c
 for the worker's client calls and private files; preserve the existing ACL. Batch related
 operations in one call. Do not retry each file as the wrong identity, weaken permissions,
 or interpret a denied local read as missing remote data.
+
+Keep original images, OCR and PDF work files in the project's gitignored `.local/`
+worker directory, accessible to both the client and the image-viewing tool. On Windows,
+create that work directory with its prepared workspace ACL; do not use Python mode 0700
+or TemporaryDirectory for viewer artifacts, since those create an owner-only DACL.
+The client preserves inherited Windows ACLs for new artifact directories and uses 0700
+on POSIX. Never apply the artifact rule to credentials. Check a synthetic local image
+through the actual image-viewing tool before claiming a receipt. Leave old inaccessible
+caches intact; use a fresh authorized work directory rather than changing their ACLs.
 
 ## Reuse the existing client
 
@@ -47,6 +69,7 @@ from receipt_api import ScannerClient, credentials, write_new_file
 work = Path(os.environ["RECEIPT_WORK_DIR"]).resolve()
 assert work.is_dir(), "Coordinator must provide a private writable work directory"
 client = ScannerClient(credentials(os.environ["RECEIPT_CLIENT_CONFIG"]))
+assert client.origin == os.environ["RECEIPT_EXPECTED_ORIGIN"], "Scanner destination differs from verified handoff"
 
 def load(name):
     return json.loads((work / name).read_text(encoding="utf-8"))

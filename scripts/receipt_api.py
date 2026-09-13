@@ -27,6 +27,14 @@ class NoRedirect(HTTPRedirectHandler):
         raise ClientError("Redirect refused; check the Site address and credentials.")
 
 
+def artifact_directory(path):
+    """Keep the prepared workspace ACL on Windows; restrict POSIX caches to the owner."""
+    # On Windows, 0700 replaces inherited ACLs and excludes the sandbox image viewer.
+    # Artifact parents must already be private, authorized workspace directories.
+    # Credentials use separate storage and must not use this helper.
+    Path(path).mkdir(parents=True, exist_ok=True, mode=0o777 if os.name == "nt" else 0o700)
+
+
 def write_new_file(target, body):
     """Publish verified bytes atomically without replacing any existing file."""
     fd, temporary = tempfile.mkstemp(prefix=".download-", dir=target.parent)
@@ -124,7 +132,7 @@ class ScannerClient:
         body = target.read_bytes() if cached else self.request(path)
         if hashlib.sha256(body).hexdigest() != sha:
             raise ClientError("Artifact hash verification failed; existing files were preserved.")
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        artifact_directory(target.parent)
         if not cached:
             write_new_file(target, body)
         return {"path": str(target.absolute()), "sha256": sha, "bytes": len(body), "cached": cached}
@@ -144,7 +152,7 @@ class ScannerClient:
         directory = Path(directory)
         if directory.is_symlink():
             raise ClientError("Image cache must not be a symlink.")
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        artifact_directory(directory)
         target = directory / (capture_id + "-" + sha + suffix)
         if target.is_symlink():
             raise ClientError("Cached original must not be a symlink.")
@@ -164,7 +172,7 @@ class ScannerClient:
         root = Path(directory)
         original = self.original(capture_id, root / "originals")
         meta = self.get("/api/captures/" + capture_id)
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        artifact_directory(root)
         for artifact in meta.get("artifacts", []):
             if artifact.get("kind") != "ocr":
                 continue
@@ -261,7 +269,7 @@ def main():
     args = parser.parse_args()
     client = ScannerClient(credentials(args.config, args.credentials_stdin))
     if args.command == "status":
-        result = client.get("/api/processing/access")
+        result = {**client.get("/api/processing/access"), "origin": client.origin}
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":

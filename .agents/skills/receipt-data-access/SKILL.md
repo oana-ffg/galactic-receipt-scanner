@@ -11,6 +11,10 @@ Load credentials through the private connection config; never paste them into pr
 command arguments, logs or source.
 
 Start with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
+Its non-secret `origin` identifies the actual request destination. Before dispatching
+fresh processing workers, match it to owner-verified Site metadata or the owner's
+authenticated connection setup and pass that verification and authorized data flow in
+the worker handoff. A credential config alone is not independent proof of ownership.
 The connection helper creates a private config referring to its protected credential file.
 There is no gopass dependency. `--credentials-stdin` supports an explicitly authorized
 secret provider for optional personal integrations; browser password storage is not
@@ -65,6 +69,12 @@ its embedded PDF base64. `pdf DOCUMENT_ID` prepares missing OCR, generates from 
 order, uploads and verifies the searchable PDF, returning its local path and pinned hash.
 These deterministic helpers make no model calls. Astra uses `original` alone before its blind
 checkpoint; use prepare and read OCR only after the draft is saved.
+
+Put working images and derivatives under a gitignored `.local/` directory with the
+prepared workspace's access permissions, separate from protected credentials. New
+Windows artifact directories inherit their parent's ACL so the sandbox image viewer can
+read them; POSIX artifact directories remain owner-only. Verify the parent is private
+and authorized for processing, and preflight image viewing before taking a queue claim.
 
 
 `post /api/processing/ENDPOINT PRIVATE_JSON_FILE` submits a private JSON body. Read the

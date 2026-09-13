@@ -1,11 +1,14 @@
 import hashlib
 import json
+import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 from urllib.request import Request
-from receipt_api import ScannerClient, ClientError, NoRedirect
+from receipt_api import ScannerClient, ClientError, NoRedirect, main
 
 
 class ClientTests(unittest.TestCase):
@@ -23,7 +26,8 @@ class ClientTests(unittest.TestCase):
             first = self.client.original(self.id, directory)
             self.assertFalse(first["cached"])
             self.assertEqual(Path(first["path"]).read_bytes(), self.body)
-            self.assertEqual(Path(first["path"]).stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(Path(first["path"]).stat().st_mode & 0o777, 0o600)
             self.assertTrue(self.client.original(self.id, directory)["cached"])
             self.client.request.assert_called_once()
             Path(first["path"]).write_bytes(b"corrupted")
@@ -38,6 +42,53 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(ClientError, "hash/size"):
                 self.client.original(self.id, directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_new_original_directory_preserves_platform_access_contract(self):
+        self.client.get = Mock(return_value=self.meta)
+        self.client.request = Mock(return_value=self.body)
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "originals"
+            result = self.client.original(self.id, cache)
+            self.assertEqual(Path(result["path"]).read_bytes(), self.body)
+            if os.name == "nt":
+                # A protected child DACL is the regression: it removes permissions
+                # the authorized workspace has granted to the image-viewing tool.
+                import ctypes
+                from ctypes import wintypes
+                security = ctypes.WinDLL("advapi32", use_last_error=True)
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                pointer = ctypes.c_void_p
+                security.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, wintypes.DWORD,
+                    wintypes.DWORD, pointer, pointer, pointer, pointer, ctypes.POINTER(pointer)]
+                security.GetNamedSecurityInfoW.restype = wintypes.DWORD
+                security.GetSecurityDescriptorControl.argtypes = [pointer,
+                    ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD)]
+                security.GetSecurityDescriptorControl.restype = wintypes.BOOL
+                kernel.LocalFree.argtypes = [pointer]
+                kernel.LocalFree.restype = pointer
+                descriptor = pointer()
+                self.assertEqual(security.GetNamedSecurityInfoW(str(cache), 1, 4,
+                    None, None, None, None, ctypes.byref(descriptor)), 0)
+                try:
+                    control, revision = wintypes.WORD(), wintypes.DWORD()
+                    self.assertTrue(security.GetSecurityDescriptorControl(descriptor,
+                        ctypes.byref(control), ctypes.byref(revision)))
+                    self.assertFalse(control.value & 0x1000)  # SE_DACL_PROTECTED
+                finally:
+                    kernel.LocalFree(descriptor)
+            else:
+                self.assertEqual(cache.stat().st_mode & 0o777, 0o700)
+
+    def test_status_identifies_actual_destination_without_credentials(self):
+        output = io.StringIO()
+        with patch("receipt_api.credentials", return_value={}), \
+                patch("receipt_api.ScannerClient", return_value=self.client), \
+                patch.object(self.client, "get", return_value={"version": 2, "origin": "untrusted-server-field"}), \
+                patch("sys.argv", ["receipt_api.py", "status"]), redirect_stdout(output):
+            main()
+        self.assertEqual(json.loads(output.getvalue()), {"version": 2, "origin": self.client.origin})
+        self.assertNotIn(self.client.sites_token, output.getvalue())
+        self.assertNotIn(self.client.processing_token, output.getvalue())
 
     def test_snapshot_metadata_avoids_per_image_lookup_but_still_verifies_bytes(self):
         self.client.get = Mock(side_effect=AssertionError('Unexpected metadata request'))
@@ -78,7 +129,12 @@ class ClientTests(unittest.TestCase):
                 self.client.original(self.id, directory)
             self.client.get = Mock(return_value=self.meta)
             link = Path(directory) / (self.id + "-" + self.sha + ".jpg")
-            link.symlink_to(Path(directory) / "unrelated")
+            try:
+                link.symlink_to(Path(directory) / "unrelated")
+            except OSError as error:
+                if os.name == "nt" and error.winerror == 1314:
+                    self.skipTest("Windows symlink creation privilege is unavailable to this test process")
+                raise
             with self.assertRaisesRegex(ClientError, "symlink"):
                 self.client.original(self.id, directory)
 
