@@ -1,11 +1,18 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { test, expect } from "@playwright/test";
 import { PDFDocument } from "pdf-lib";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
+import { newDocument } from "../web/documents";
+const processorToken = "rsc_" + "s".repeat(43);
 let isolated: Awaited<ReturnType<typeof runtime>>;
 test.beforeEach(async ({ page }) => {
-  isolated = await runtime();
+  isolated = await runtime({
+    processingTokenSha256: createHash("sha256")
+      .update(processorToken)
+      .digest("hex"),
+  });
   await page.route(`${origin}/**`, async (route) => {
     const req = route.request();
     const response = await isolated.dispatchFetch(req.url(), {
@@ -122,7 +129,7 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     await tools.save_documents.execute({ documents: [first] });
     return tools.generate_document_pdf.execute({ id: first.id });
   }, ids);
-  expect(result.filename).toBe("2026-08-14-synthetic_paper_shop.pdf");
+  expect(result.filename).toBe("2026-08-14_synthetic_paper_shop.pdf");
   const response = await request.get(
     `/api/documents/${ids[0]}/pdf?revision=${result.revision}&version=${result.sha256}`,
   );
@@ -130,11 +137,25 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
   const pdfBytes = await response.body();
   const pdf = await PDFDocument.load(pdfBytes);
   expect(pdf.getPageCount()).toBe(2);
+  const loading = getDocument({
+    data: new Uint8Array(pdfBytes),
+    useSystemFonts: true,
+  });
+  const searchable = await loading.promise;
+  for (let number = 1; number <= 2; number++) {
+    const pageText = await (await searchable.getPage(number)).getTextContent();
+    const text = pageText.items
+      .map((item) => ("str" in item ? item.str : ""))
+      .join(" ");
+    expect(text.length).toBeGreaterThan(100);
+    expect(text).toMatch(/\d+[,.]\d{2}/);
+  }
+  await loading.destroy();
   await mkdir("test-results/documents", { recursive: true });
   await writeFile("test-results/documents/synthetic-grouped.pdf", pdfBytes);
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page
-    .getByRole("button", { name: /2026-08-14-synthetic_paper_shop/ })
+    .getByRole("button", { name: /2026-08-14_synthetic_paper_shop/ })
     .click();
   await expect(
     page
@@ -253,4 +274,156 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
   await expect(page.getByRole("status")).toHaveText(/Review saved/);
   const checked = await request.get(`/api/documents/${ids[0]}`);
   expect((await checked.json()).document.checks.pdf).toBe(false);
+});
+
+test("human review edits structured values and detaches a wrong page into the pool", async ({
+  page,
+}) => {
+  const ids = [randomUUID(), randomUUID()];
+  const image = await readFile("e2e/fixtures/generated/danish.png");
+  for (const id of ids)
+    expect(
+      (
+        await isolatedRequest.post(`/api/captures/${id}`, {
+          data: image,
+          headers: {
+            Origin: origin,
+            "X-Scanner-Request": "1",
+            "X-Capture-Status": "accepted",
+            "X-Capture-Metadata": JSON.stringify({
+              sourcePixels: [941, 1672],
+              quality: { ok: true, receiptPixels: [941, 1672] },
+            }),
+          },
+        })
+      ).ok(),
+    ).toBe(true);
+  await page.goto("/review");
+  await page
+    .getByLabel("Category name", { exact: true })
+    .fill("Synthetic supplies");
+  await page
+    .getByLabel("What belongs in this category?")
+    .fill("Synthetic test purchases only.");
+  await page.getByRole("button", { name: "Add category", exact: true }).click();
+  await expect(page.locator("#review-categories")).toContainText(
+    "Synthetic supplies: Synthetic test purchases only.",
+  );
+  async function model(path: string, body: object): Promise<any> {
+    const response = await isolated.dispatchFetch(origin + path, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${processorToken}` },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    expect(response.status, JSON.stringify(data)).toBe(200);
+    return data;
+  }
+  const categories = await (
+    await isolatedRequest.get("/api/processing/categories")
+  ).json();
+  const lease = (await model("/api/processing/claim", { stage: "small" }))
+    .claim;
+  const captures = await Promise.all(
+    ids.map(
+      async (id) =>
+        await (await isolatedRequest.get(`/api/captures/${id}`)).json(),
+    ),
+  );
+  const target = newDocument(captures.find((c) => c.id === lease.document.id));
+  target.pages = captures.map((c) => newDocument(c).pages[0]);
+  const extraction = {
+    type: "receipt",
+    vendor: "Synthetic shop",
+    receipt_date: "2026-01-02",
+    reference: null,
+    currency: "DKK",
+    has_handwriting: true,
+    has_payment_slip: false,
+    payment_status: "not-applicable",
+    card_last_four: null,
+    line_items: [
+      {
+        description: "Synthetic item",
+        quantity: null,
+        unit_price_minor: null,
+        amount_minor: 1234,
+      },
+    ],
+    adjustments: [],
+    total_minor: 1234,
+    charged_total_minor: null,
+    payment_adjustments: [],
+    vat_minor: null,
+    tax_basis: "gross",
+    completeness: "complete",
+    category_id: categories[0].id,
+    certainty: "medium",
+    uncertainties: [],
+    broken_reasons: [],
+    confirmed_arithmetic_mismatch: false,
+    evidence: "Synthetic test extraction.",
+  };
+  await model("/api/processing/submit", {
+    token: lease.token,
+    model: "gpt-5.6-luna",
+    extraction,
+    documents: [target],
+  });
+  const large = (await model("/api/processing/claim", { stage: "large" }))
+    .claim;
+  await model("/api/processing/draft", {
+    token: large.token,
+    model: "gpt-6-astra",
+    extraction,
+  });
+  await model("/api/processing/submit", {
+    token: large.token,
+    model: "gpt-6-astra",
+    extraction,
+  });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.locator("#review-filter").selectOption("review");
+  await page.locator("#review-list button").click();
+  await expect(page.getByText(/Luna: medium · Astra: medium/)).toBeVisible();
+  await expect(page.getByLabel("Handwriting is present")).toBeChecked();
+  await page
+    .getByLabel("Vendor", { exact: true })
+    .fill("Corrected synthetic vendor");
+  await page
+    .getByLabel("Review findings", { exact: true })
+    .fill("Human checked every synthetic source.");
+  await page
+    .getByRole("button", { name: "Save and mark human reviewed" })
+    .click();
+  await expect(page.getByText(/Human reviewed: yes/)).toBeVisible();
+  const saved = await (
+    await isolatedRequest.get(`/api/documents/${target.id}`)
+  ).json();
+  expect(saved.document.vendor).toBe("Corrected synthetic vendor");
+  expect(saved.document.processing.human_review_revision).toBe(
+    saved.document.revision,
+  );
+  await page
+    .getByLabel("Reason for detaching page")
+    .nth(1)
+    .fill("Different synthetic transaction.");
+  await page
+    .getByRole("button", { name: "This page belongs elsewhere" })
+    .nth(1)
+    .click();
+  await expect(page.locator("#review-message")).toContainText(
+    "Page detached and returned to the matching pool",
+  );
+  const split = await (
+    await isolatedRequest.get(
+      `/api/documents?captureId=${target.pages[1].captureId}`,
+    )
+  ).json();
+  expect(split.document.id).not.toBe(target.id);
+  expect(split.document.pages).toHaveLength(1);
+  await page.screenshot({
+    path: "test-results/documents/structured-review.png",
+    fullPage: true,
+  });
 });

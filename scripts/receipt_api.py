@@ -55,6 +55,20 @@ def credentials(config_path, from_stdin=False):
     return value
 
 
+def matches_ocr(value, capture_id, source_sha):
+    if not isinstance(value, dict):
+        return False
+    source, provenance = value.get("source"), value.get("provenance")
+    return (isinstance(source, dict) and isinstance(provenance, dict)
+            and source.get("captureId") == capture_id and source.get("sha256") == source_sha
+            and isinstance(provenance.get("engine"), str) and provenance["engine"].startswith("tesseract.js")
+            and isinstance(value.get("text"), str)
+            and isinstance(value.get("text_only_pdf_layers"), list) and bool(value["text_only_pdf_layers"])
+            and all(isinstance(layer, dict) and isinstance(layer.get("base64"), str) and bool(layer["base64"])
+                    and isinstance(layer.get("sha256"), str) and SHA.fullmatch(layer["sha256"])
+                    for layer in value["text_only_pdf_layers"]))
+
+
 class ScannerClient:
     def __init__(self, value):
         self.origin = value.get("origin", "")
@@ -140,7 +154,75 @@ class ScannerClient:
         if not cached:
             write_new_file(target, body)
         return {"capture_id": capture_id, "path": str(target.absolute()), "sha256": sha,
-                "bytes": size, "scanned_at": meta.get("created_at"), "cached": cached}
+                "bytes": size, "scanned_at": meta.get("created_at"), "cached": cached,
+                "quad": ((meta.get("metadata") or {}).get("quality") or {}).get("quad")}
+
+
+    def prepare(self, capture_id, directory=".local/receipt-api"):
+        """Verify an original and reuse or run CPU OCR, returning bounded references."""
+        root = Path(directory)
+        original = self.original(capture_id, root / "originals")
+        meta = self.get("/api/captures/" + capture_id)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for artifact in meta.get("artifacts", []):
+            if artifact.get("kind") != "ocr":
+                continue
+            sha = artifact.get("sha256", "")
+            if not SHA.fullmatch(sha):
+                continue
+            destination = root / (capture_id + "-" + sha + ".ocr.json")
+            self.file(f"/api/files/{capture_id}/ocr?version={sha}", sha, destination)
+            try:
+                value = json.loads(destination.read_text())
+            except (ValueError, UnicodeError):
+                continue
+            if matches_ocr(value, capture_id, original["sha256"]):
+                return {**original, "ocr_path": str(destination.absolute()), "ocr_sha256": sha}
+        run = root / (capture_id + "-" + os.urandom(8).hex())
+        manifest = run.with_suffix(".source.json")
+        output = run.with_suffix(".ocr.json")
+        write_new_file(manifest, json.dumps(original).encode())
+        process = subprocess.run(["node", "scripts/receipt_ocr.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
+        if process.returncode:
+            raise ClientError("Local OCR failed; preserve the source and inspect the local runtime before retrying.")
+        data = output.read_bytes()
+        if not matches_ocr(json.loads(data), capture_id, original["sha256"]):
+            raise ClientError("Generated OCR does not match the verified source.")
+        if len(data) > 1024 * 1024:
+            raise ClientError("OCR artifact exceeds 1 MB; preserve the local result for review.")
+        result = json.loads(self.request(f"/api/captures/{capture_id}/artifacts/ocr", data))
+        sha = hashlib.sha256(data).hexdigest()
+        if result.get("sha256") != sha:
+            raise ClientError("Stored OCR checksum mismatch.")
+        pinned = self.file(f"/api/files/{capture_id}/ocr?version={sha}", sha, root / (capture_id + "-" + sha + ".ocr.json"))
+        return {**original, "ocr_path": pinned["path"], "ocr_sha256": sha}
+
+    def pdf(self, document_id, directory=".local/receipt-api"):
+        if not UUID.fullmatch(document_id):
+            raise ClientError("Invalid document ID.")
+        document = self.get("/api/documents/" + document_id)["document"]
+        if not document.get("filename") or document.get("mergedInto") or document.get("duplicateOf"):
+            raise ClientError("This document needs a supported date/vendor and retained pages before PDF export.")
+        root = Path(directory)
+        pages = []
+        for page in document["pages"]:
+            source = self.prepare(page["captureId"], directory)
+            if source["sha256"] != page["sha256"]:
+                raise ClientError("Document source hash mismatch.")
+            pages.append({**page, "path": source["path"], "ocr_path": source["ocr_path"]})
+        run = root / (document_id + "-" + str(document["revision"]) + "-" + os.urandom(8).hex())
+        manifest, output = run.with_suffix(".pages.json"), run.with_suffix(".pdf")
+        write_new_file(manifest, json.dumps({"pages": pages}).encode())
+        process = subprocess.run(["node", "scripts/receipt_pdf.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
+        if process.returncode:
+            raise ClientError("Searchable PDF generation failed; retain its sources and inspect the local layout/runtime.")
+        data = output.read_bytes()
+        result = json.loads(self.request(f"/api/documents/{document_id}/pdf?revision={document['revision']}", data, "application/pdf"))
+        sha = hashlib.sha256(data).hexdigest()
+        if result.get("sha256") != sha:
+            raise ClientError("Stored PDF checksum mismatch.")
+        verified = self.file(f"/api/documents/{document_id}/pdf?revision={result['revision']}&version={sha}", sha, root / (document_id + "-" + sha + ".pdf"))
+        return {**result, "path": verified["path"], "pages": len(pages), "searchable": True}
 
 
 def main():
@@ -151,9 +233,16 @@ def main():
     commands.add_parser("status")
     get = commands.add_parser("get", help="Read a relative processing API path")
     get.add_argument("path")
+    post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing endpoint")
+    post.add_argument("path")
+    post.add_argument("file")
     listing = commands.add_parser("captures", help="One current-take page; follow next using --before")
     listing.add_argument("--before")
     listing.add_argument("--limit", type=int, default=100, choices=range(1, 101))
+    prepare = commands.add_parser("prepare", help="Verify an original and run/reuse ordinary local OCR")
+    prepare.add_argument("capture_id")
+    generate = commands.add_parser("pdf", help="Generate, upload and verify a searchable PDF from saved document pages")
+    generate.add_argument("document_id")
     original = commands.add_parser("original", help="Download and verify an immutable original")
     original.add_argument("capture_id")
     original.add_argument("--directory", default=".local/receipt-api/originals")
@@ -161,9 +250,7 @@ def main():
     artifact.add_argument("path")
     artifact.add_argument("sha256")
     artifact.add_argument("destination")
-    save = commands.add_parser("save-documents", help="Save a JSON file containing {documents:[...]} with current revisions")
-    save.add_argument("file")
-    ocr = commands.add_parser("save-extraction", help="Save an immutable extraction JSON artifact")
+    ocr = commands.add_parser("save-ocr", help="Save an immutable ordinary OCR JSON artifact")
     ocr.add_argument("capture_id")
     ocr.add_argument("file")
     pdf = commands.add_parser("save-pdf", help="Upload a PDF for an exact document revision")
@@ -181,6 +268,10 @@ def main():
         if args.before:
             query["before"] = args.before
         result = client.get("/api/captures?" + urlencode(query))
+    elif args.command == "prepare":
+        result = client.prepare(args.capture_id)
+    elif args.command == "pdf":
+        result = client.pdf(args.document_id)
     elif args.command == "original":
         result = client.original(args.capture_id, args.directory)
     elif args.command == "file":
@@ -190,11 +281,11 @@ def main():
         if len(data) > LIMIT:
             raise ClientError("Upload exceeds the client size limit.")
         content_type = "application/json"
-        if args.command == "save-documents":
-            path = "/api/documents"
-            if len(data) > 24000:
-                raise ClientError("Document transaction exceeds 24 KB; reduce the batch.")
-        elif args.command == "save-extraction":
+        if args.command == "post":
+            if not args.path.startswith("/api/processing/"):
+                raise ClientError("Use post only for processing endpoints.")
+            path = args.path
+        elif args.command == "save-ocr":
             if not UUID.fullmatch(args.capture_id):
                 raise ClientError("Invalid capture ID.")
             if len(data) > 1024 * 1024:
@@ -214,7 +305,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ClientError, OSError, ValueError, TypeError) as error:
+    except (ClientError, OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
         # Parser/OS messages can contain private input; keep these generic.
         print(str(error) if isinstance(error, ClientError) else "Cannot read valid private configuration/input; check paths and credential storage.", file=sys.stderr)
         sys.exit(1)

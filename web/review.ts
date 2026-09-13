@@ -1,3 +1,5 @@
+import { processingReview, categorySetup } from "./processing-review";
+import type { PurchaseCategory } from "./extraction";
 import { api } from "./api";
 import {
   readDocuments,
@@ -45,9 +47,10 @@ function amount(value: string): number {
 
 export async function mountReview(app: HTMLElement) {
   app.innerHTML =
-    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="review">Human review</option><option value="all">All documents</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
+    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="all">All documents</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
   let selected: string | null = null;
+  let categories: PurchaseCategory[] = [];
   let busy = false;
   const message = app.querySelector<HTMLElement>("#review-message")!;
   const list = app.querySelector<HTMLElement>("#review-list")!;
@@ -69,7 +72,13 @@ export async function mountReview(app: HTMLElement) {
     }
   }
   async function refresh() {
-    catalog = await readDocuments();
+    [catalog, categories] = await Promise.all([
+      readDocuments(),
+      api<PurchaseCategory[]>("/api/processing/categories"),
+    ]);
+    app
+      .querySelector("#review-categories")!
+      .replaceChildren(categorySetup(categories, action, refresh));
     renderList();
     if (selected) {
       const d = catalog.documents.find((d) => d.id === selected);
@@ -83,7 +92,7 @@ export async function mountReview(app: HTMLElement) {
       {},
     );
     app.querySelector("#review-counts")!.textContent =
-      `${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
+      `${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
     for (const d of catalog.documents) {
       if (d.status === "merged") continue;
       if (
@@ -178,16 +187,51 @@ export async function mountReview(app: HTMLElement) {
         ];
         doc.checks.grouping = false;
         doc.checks.pdf = false;
-        renderDetail(doc);
+        if (doc.processing)
+          void action(async () => {
+            await saveDocuments([doc]);
+            await refresh();
+          });
+        else renderDetail(doc);
       };
       controls.append(earlier);
       const rotate = el("button", "Rotate 90°", "secondary");
       rotate.onclick = () => {
         p.rotation = ((p.rotation + 90) % 360) as typeof p.rotation;
         doc.checks.pdf = false;
-        renderDetail(doc);
+        if (doc.processing)
+          void action(async () => {
+            await saveDocuments([doc]);
+            await refresh();
+          });
+        else renderDetail(doc);
       };
       controls.append(rotate);
+      const detach = el("button", "This page belongs elsewhere", "secondary");
+      detach.disabled = doc.pages.length < 2;
+      const reason = el("input");
+      reason.placeholder = "Why does this page not belong?";
+      reason.setAttribute("aria-label", "Reason for detaching page");
+      detach.onclick = () =>
+        void action(async () => {
+          if (!reason.value.trim())
+            throw Error("Describe the mismatching page before detaching it.");
+          await api("/api/processing/detach", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              document_id: doc.id,
+              revision: doc.revision,
+              capture_id: p.captureId,
+              reason: reason.value,
+            }),
+          });
+          await refresh();
+          setMessage(
+            "Page detached and returned to the matching pool. Original preserved.",
+          );
+        });
+      controls.append(reason, detach);
       card.append(
         controls,
         el(
@@ -419,7 +463,11 @@ export async function mountReview(app: HTMLElement) {
         );
       });
     };
-    detail.append(form);
+    detail.append(
+      doc.processing
+        ? processingReview(doc, categories, action, refresh)
+        : form,
+    );
     const outputs = el("div", undefined, "controls");
     const generate = el("button", "Generate PDF", "secondary");
     generate.onclick = () =>
@@ -454,6 +502,26 @@ export async function mountReview(app: HTMLElement) {
           await inspectPdf(link.href, doc.pdf!.sha256, doc.filename!);
         });
       outputs.append(preview, link);
+      if (doc.processing) {
+        const checked = el(
+          "button",
+          "PDF inspected — confirm legibility",
+          "secondary",
+        );
+        checked.onclick = () =>
+          void action(async () => {
+            const fresh = (await readDocuments()).documents.find(
+              (d) => d.id === doc.id,
+            )!;
+            if (fresh.pdf?.sha256 !== doc.pdf?.sha256)
+              throw Error("PDF changed; inspect the current version first.");
+            fresh.checks.pdf = true;
+            fresh.reviewedPdfSha256 = fresh.pdf!.sha256;
+            await saveDocuments([fresh]);
+            await refresh();
+          });
+        outputs.append(checked);
+      }
     }
     detail.append(outputs);
     if (doc.duplicateOf) {

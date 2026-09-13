@@ -56,8 +56,8 @@ it("preserves scan times and sources through non-adjacent grouping, splitting an
   const first = await (await request("/api/documents")).json();
   const savedA = first.documents.find((d: any) => d.id === a.id),
     savedB = first.documents.find((d: any) => d.id === b.id);
-  expect(savedA.filename).toBe("2026-02-01-synthetic_shop.pdf");
-  expect(savedB.filename).toBe("2026-02-01-synthetic_shop_2.pdf");
+  expect(savedA.filename).toBe("2026-02-01_synthetic_shop.pdf");
+  expect(savedB.filename).toBe("2026-02-01_synthetic_shop_2.pdf");
   expect(savedA.scannedAt).toEqual([a.created_at]);
   savedA.pages.push(...savedB.pages);
   savedA.evidence = "Same synthetic invoice number and pages 1/2, 2/2.";
@@ -149,9 +149,9 @@ it("never hides an unassigned current original on its first processing save", as
   a.evidence = "Proposed duplicate";
   expect((await save([a])).status).toBe(200);
   const updated = await (await request("/api/documents")).json();
-  expect(updated.documents.find((d: any) => d.id === a.id).status).toBe(
-    "broken",
-  );
+  const duplicate = updated.documents.find((d: any) => d.id === a.id);
+  expect(duplicate.status).toBe("duplicate");
+  expect(duplicate.reasons).toContain("OCR failed on synthetic source");
 });
 it("keeps broken totals broken and invalidates output after page changes", async () => {
   const c = await capture(),

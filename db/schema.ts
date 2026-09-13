@@ -1,5 +1,7 @@
+import { sql } from "drizzle-orm";
 import {
   sqliteTable,
+  check,
   text,
   integer,
   index,
@@ -114,6 +116,8 @@ export const documentHeads = sqliteTable("document_heads", {
   revision: integer("revision").notNull(),
 });
 export const documentPages = sqliteTable("document_pages", {
+  page_index: integer("page_index"),
+  type: text("type"),
   capture_id: text("capture_id")
     .primaryKey()
     .references(() => captures.id),
@@ -130,4 +134,53 @@ export const documentFiles = sqliteTable("document_files", {
 export const documentNames = sqliteTable("document_names", {
   filename: text("filename").primaryKey(),
   document_id: text("document_id").notNull(),
+});
+
+export const purchaseCategories = sqliteTable("purchase_categories", {
+  id: text("id").primaryKey(),
+  normalized_name: text("normalized_name").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  created_at: text("created_at").notNull(),
+});
+export const processingLock = sqliteTable("processing_lock", {
+  id: integer("id").primaryKey(),
+  token: text("token").notNull(),
+  stage: text("stage").notNull(),
+  document_id: text("document_id").notNull(),
+  revision: integer("revision").notNull(),
+  expires: integer("expires").notNull(),
+  draft: text("draft"),
+});
+export const processingAttempts = sqliteTable("processing_attempts", {
+  token: text("token").primaryKey(),
+  document_id: text("document_id").notNull(),
+  revision: integer("revision").notNull(),
+  stage: text("stage").notNull(),
+  model: text("model").notNull(),
+  payload: text("payload").notNull(),
+  created_at: text("created_at").notNull(),
+});
+export const rejectedAssociations = sqliteTable("rejected_associations", {
+  id: text("id").primaryKey(),
+  capture_id: text("capture_id").notNull(),
+  document_id: text("document_id").notNull(),
+  reason: text("reason").notNull(),
+  created_at: text("created_at").notNull(),
+});
+export const processingCommits = sqliteTable(
+  "processing_commits",
+  {
+    token: text("token").primaryKey(),
+    valid: integer("valid").notNull(),
+  },
+  (table) => [check("processing_commit_valid", sql`${table.valid} = 1`)],
+);
+export const processingDrafts = sqliteTable("processing_drafts", {
+  token: text("token").primaryKey(),
+  document_id: text("document_id").notNull(),
+  revision: integer("revision").notNull(),
+  model: text("model").notNull(),
+  payload: text("payload").notNull(),
+  created_at: text("created_at").notNull(),
 });

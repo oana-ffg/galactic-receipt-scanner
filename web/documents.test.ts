@@ -89,6 +89,15 @@ describe("source-backed processing", () => {
       },
     ];
     expect(documentReasons(d).status).toBe("review");
-    expect(filenameBase(d)).toBe("2026-09-01-example_søns_shop");
+    expect(filenameBase(d)).toBe("2026-09-01_example_søns_shop");
+  });
+});
+it("keeps an explicit duplicate out of the processing queue while retaining source reasons", () => {
+  const doc = newDocument(source);
+  doc.duplicateOf = "00000000-0000-4000-8000-000000000002";
+  doc.uncertainties = ["Synthetic unresolved annotation."];
+  expect(documentReasons(doc)).toMatchObject({
+    status: "duplicate",
+    reasons: ["Synthetic unresolved annotation."],
   });
 });

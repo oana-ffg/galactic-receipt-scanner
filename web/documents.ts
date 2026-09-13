@@ -1,3 +1,9 @@
+import {
+  processingDisposition,
+  extractionProblems,
+  type ProcessingState,
+  type DocumentType,
+} from "./extraction";
 import type { Capture } from "./types";
 
 export const DOCUMENT_EVIDENCE_LIMIT = 20000;
@@ -16,6 +22,7 @@ export function appendProcessingEvidence(
 }
 
 export interface DocumentPage {
+  type?: DocumentType;
   captureId: string;
   sha256: string;
   rotation: 0 | 90 | 180 | 270;
@@ -37,7 +44,8 @@ export interface ReceiptDocument {
   pages: DocumentPage[];
   vendor: string | null;
   receiptDate: string | null;
-  kind: "unknown" | "receipt" | "invoice" | "credit-note";
+  kind: DocumentType;
+  processing?: ProcessingState;
   reference: string | null;
   text: string;
   handwriting: "unchecked" | "absent" | "present" | "uncertain";
@@ -63,7 +71,15 @@ export interface ReceiptDocument {
 }
 export interface DocumentView extends ReceiptDocument {
   filename: string | null;
-  status: "ready" | "processing" | "review" | "broken" | "duplicate" | "merged";
+  status:
+    | "ready"
+    | "processing"
+    | "review"
+    | "broken"
+    | "duplicate"
+    | "merged"
+    | "awaiting-pages"
+    | "model-review";
   reasons: string[];
   scannedAt: string[];
   pdf: { sha256: string; revision: number } | null;
@@ -131,6 +147,55 @@ export function documentReasons(doc: ReceiptDocument): {
   reasons: string[];
 } {
   if (doc.mergedInto) return { status: "merged", reasons: [] };
+  if (doc.duplicateOf)
+    return {
+      status: "duplicate",
+      reasons: [
+        ...new Set([
+          ...doc.broken,
+          ...doc.uncertainties,
+          ...(doc.handwriting === "uncertain"
+            ? ["Handwriting presence is uncertain."]
+            : []),
+          ...(doc.annotations.some((a) => a.uncertain || a.text === null)
+            ? ["Source annotation remains uncertain."]
+            : []),
+        ]),
+      ],
+    };
+  if (doc.processing) {
+    const p = doc.processing;
+    const disposition = processingDisposition(p);
+    const reasons = [
+      ...new Set([
+        ...doc.broken,
+        ...doc.uncertainties,
+        ...p.extraction.broken_reasons,
+        ...extractionProblems(p.extraction),
+        ...(p.ocr_comparison?.resolution
+          ? []
+          : (p.ocr_comparison?.disagreements ?? [])),
+      ]),
+    ];
+    if (doc.broken.length) return { status: "broken", reasons };
+    if (doc.uncertainties.length && disposition === "extracted")
+      return { status: "review", reasons };
+    if (disposition === "awaiting-pages")
+      reasons.unshift("Waiting for remaining pages or a matching receipt.");
+    if (disposition === "processing")
+      reasons.unshift("Document changed; a fresh parse is required.");
+    if (disposition === "model-review")
+      reasons.unshift("Queued for an independent full parse by Astra.");
+    return {
+      status:
+        disposition === "extracted"
+          ? doc.checks.pdf
+            ? "ready"
+            : "processing"
+          : disposition,
+      reasons,
+    };
+  }
   const broken = [...doc.broken];
   if (confirmedInvoiceMismatch(doc))
     broken.push(
@@ -217,7 +282,7 @@ export function filenameBase(doc: ReceiptDocument): string | null {
     .replace(/[^\p{L}\p{N}]+/gu, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 100);
-  return vendor ? `${doc.receiptDate}-${vendor}` : null;
+  return vendor ? `${doc.receiptDate}_${vendor}` : null;
 }
 
 export function validDate(value: string): boolean {

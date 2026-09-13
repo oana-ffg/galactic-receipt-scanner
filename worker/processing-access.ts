@@ -6,16 +6,29 @@ export function processingRouteAllowed(method: string, path: string): boolean {
     "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
   if (method === "GET")
     return (
-      ["/api/processing/access", "/api/captures", "/api/documents"].includes(
-        path,
-      ) ||
+      [
+        "/api/processing/access",
+        "/api/processing/categories",
+        "/api/processing/context",
+        "/api/captures",
+        "/api/documents",
+      ].includes(path) ||
       new RegExp(`^/api/captures/${id}$`).test(path) ||
       new RegExp(`^/api/files/${id}/(raw|image|pdf|ocr)$`).test(path) ||
       new RegExp(`^/api/documents/${id}(/(history|pdf))?$`).test(path)
     );
   return (
     method === "POST" &&
-    (path === "/api/documents" ||
+    ([
+      "/api/processing/claim",
+      "/api/processing/renew",
+      "/api/processing/release",
+      "/api/processing/draft",
+      "/api/processing/submit",
+      "/api/processing/detach",
+      "/api/processing/categories",
+      "/api/processing/pdf-review",
+    ].includes(path) ||
       new RegExp(`^/api/documents/${id}/pdf$`).test(path) ||
       new RegExp(`^/api/captures/${id}/artifacts/ocr$`).test(path))
   );

@@ -43,11 +43,12 @@ it must solve its own supported authentication and unattended write permission p
 
 ## Scope and rotation
 
-Machine GET access: captures, raw/image/PDF/OCR downloads, documents, document history/PDFs,
-and `/api/processing/access`. Machine POST access: versioned documents, document PDFs,
-and immutable capture OCR artifacts. All other routes/methods are denied, including capture
-upload/finalization, image replacement, camera control, private issues and UI/assets.
-Server validation, original preservation and optimistic document revisions remain in force.
+Machine GET access covers captures, original/artifact downloads, documents/history and
+processing categories/context. Model changes use `/api/processing/claim`, renewal, draft,
+submit, release and supported detach. Generic machine document POST is denied. PDF upload
+and pinned inspection use document PDF routes and `/api/processing/pdf-review`; immutable
+ordinary OCR uses capture OCR artifacts. Human approval requires the owner browser session.
+Camera uploads/control, private issues and UI/assets remain outside machine access.
 
 The processing credential belongs to the owner and authorizes reading all receipt data and
 editing processing decisions. Treat it accordingly. Rotate by replacing the secret-store token
@@ -58,8 +59,9 @@ revocation records are not implemented.
 
 ## Current capabilities
 
-The client handles transport, resumable hash-verified image retrieval and existing document
-writes. `/api/processing/access` advertises the actual capabilities. It does not yet provide
-shared queue leases, a category registry or the new two-model human-review UI. Preserve new
-extraction metadata in immutable artifacts and the private ledger until that rollout; do not
-claim those fields exist in the current document schema or activate unattended overlapping runs.
+API v2 has atomic renewable per-document claims, immutable independent Astra checkpoints,
+private purchase categories, structured amounts, arithmetic and ordinary OCR comparisons,
+revision-pinned human review and searchable image PDF helpers. Read the project
+[processing skill](.agents/skills/receipt-processing/SKILL.md) for worker/scheduling instructions.
+A current local Codex worker can use gopass directly. Work still needs its own verified secure
+credential provider; no MCP server or assumed browser-to-shell password access is provided.

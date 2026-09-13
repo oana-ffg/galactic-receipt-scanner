@@ -1,0 +1,750 @@
+import { compareStoredOcr } from "./ocr-comparison";
+import type { Env } from "./index";
+import type { Capture } from "../web/types";
+import { newDocument, type ReceiptDocument } from "../web/documents";
+import {
+  extractionErrors,
+  financialTypes,
+  processingDisposition,
+  type Extraction,
+  type ProcessingState,
+} from "../web/extraction";
+import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
+import { documentRoute, storedDocuments } from "./documents";
+
+type Lock = {
+  token: string;
+  stage: "small" | "large";
+  document_id: string;
+  revision: number;
+  expires: number;
+  draft: string | null;
+};
+const STAGE_MODEL = { small: "gpt-5.6-luna", large: "gpt-6-astra" } as const;
+const LEASE_MS = 20 * 60 * 1000;
+async function activeLock(env: Env) {
+  return env.DB.prepare(
+    "SELECT * FROM processing_lock WHERE id=1 AND expires > unixepoch()*1000",
+  ).first<Lock>();
+}
+export async function protectBlindParse(request: Request, env: Env) {
+  if (!request.headers.has("authorization")) return;
+  const path = new URL(request.url).pathname;
+  if (
+    !path.startsWith("/api/documents") &&
+    !/^\/api\/files\/[^/]+\/ocr$/.test(path)
+  )
+    return;
+  const lock = await activeLock(env);
+  requireThat(
+    !lock || request.method !== "POST",
+    409,
+    "Use the leased processing submission to change documents while a worker is active.",
+  );
+  requireThat(
+    !lock || lock.stage !== "large" || lock.draft !== null,
+    409,
+    "Save the independent full parse before reading earlier extraction results.",
+  );
+}
+async function records(env: Env, captures: Capture[]) {
+  const stored = await storedDocuments(env);
+  const assigned = new Set(
+    stored.flatMap((d) => d.pages.map((p) => p.captureId)),
+  );
+  return [
+    ...stored,
+    ...captures
+      .filter(
+        (c) =>
+          c.is_current &&
+          !assigned.has(c.id) &&
+          !stored.some((d) => d.id === c.id),
+      )
+      .map(newDocument),
+  ];
+}
+function validateExtraction(value: unknown): asserts value is Extraction {
+  const errors = extractionErrors(value);
+  requireThat(!errors.length, 400, errors.join(" "));
+}
+async function categoryCheck(env: Env, e: Extraction) {
+  if (e.category_id !== null)
+    requireThat(
+      await env.DB.prepare("SELECT id FROM purchase_categories WHERE id=?")
+        .bind(e.category_id)
+        .first(),
+      400,
+      "Unknown purchase category.",
+    );
+}
+function state(
+  e: Extraction,
+  previous: ProcessingState | undefined,
+  stage: Lock["stage"] | "human",
+  revision: number,
+): ProcessingState {
+  return {
+    extraction: e,
+    not_invoice: e.type !== "unknown" && !financialTypes.includes(e.type),
+    has_handwriting: e.has_handwriting,
+    small_model_certainty:
+      stage === "small"
+        ? e.certainty
+        : (previous?.small_model_certainty ?? null),
+    large_model_confidence:
+      stage === "large"
+        ? e.certainty
+        : stage === "human"
+          ? (previous?.large_model_confidence ?? null)
+          : null,
+    has_human_review: stage === "human",
+    human_review_revision: stage === "human" ? revision + 1 : null,
+    needs_reparse: false,
+    seen_capture_count: previous?.seen_capture_count ?? 0,
+  };
+}
+function applyExtraction(
+  d: ReceiptDocument,
+  e: Extraction,
+  p: ProcessingState,
+) {
+  d.processing = p;
+  d.kind = e.type;
+  if (d.pages.length === 1) d.pages[0].type = e.type;
+  d.vendor = e.vendor;
+  d.receiptDate = e.receipt_date;
+  d.reference = e.reference;
+  d.handwriting = e.has_handwriting ? "present" : "absent";
+  d.invoice = null;
+  d.uncertainties = [...e.uncertainties];
+  d.broken = [...e.broken_reasons];
+  d.evidence = e.evidence;
+  d.checks = {
+    visual: false,
+    transcription: false,
+    grouping: false,
+    pdf: false,
+  };
+  d.reviewedPdfSha256 = null;
+}
+async function save(
+  request: Request,
+  env: Env,
+  load: () => Promise<Capture[]>,
+  documents: ReceiptDocument[],
+  statements: D1PreparedStatement[],
+) {
+  return (await documentRoute(
+    new Request(new URL("/api/documents", request.url), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documents }),
+    }),
+    env,
+    load,
+    { statements, trustedProcessing: true },
+  ))!;
+}
+export async function processingRoute(
+  request: Request,
+  env: Env,
+  load: () => Promise<Capture[]>,
+): Promise<Response | null> {
+  const url = new URL(request.url),
+    path = url.pathname,
+    method = request.method;
+  if (!path.startsWith("/api/processing/")) return null;
+  if (path === "/api/processing/categories") {
+    if (method === "GET")
+      return json(
+        (
+          await env.DB.prepare(
+            "SELECT id,name,description FROM purchase_categories ORDER BY name",
+          ).all()
+        ).results,
+      );
+    requireThat(method === "POST", 405, "Method not allowed.");
+    const input = await bodyJson(request);
+    requireThat(
+      typeof input.name === "string" &&
+        input.name.trim().length > 0 &&
+        input.name.length <= 150 &&
+        typeof input.description === "string" &&
+        input.description.trim().length > 0 &&
+        input.description.length <= 2000,
+      400,
+      "A category needs a name and description.",
+    );
+    const name = input.name.trim().normalize("NFKC"),
+      normalized = name.toLocaleLowerCase("en").replace(/\s+/g, " ");
+    await env.DB.prepare(
+      "INSERT INTO purchase_categories(id,normalized_name,name,description,created_at) VALUES(?,?,?,?,?) ON CONFLICT(normalized_name) DO NOTHING",
+    )
+      .bind(
+        crypto.randomUUID(),
+        normalized,
+        name,
+        input.description.trim(),
+        new Date().toISOString(),
+      )
+      .run();
+    const result = await env.DB.prepare(
+      "SELECT id,name,description FROM purchase_categories WHERE normalized_name=?",
+    )
+      .bind(normalized)
+      .first<{ id: string; name: string; description: string }>();
+    requireThat(
+      result?.description === input.description.trim(),
+      409,
+      "This category name already has a different description. Read and reuse the existing category or choose a distinct name.",
+    );
+    return json(result);
+  }
+  if (path === "/api/processing/claim" && method === "POST") {
+    requireThat(
+      request.headers.has("authorization"),
+      403,
+      "Model processing requires scoped machine credentials.",
+    );
+    const input = await bodyJson(request);
+    requireThat(
+      input.stage === "small" || input.stage === "large",
+      400,
+      "Choose small or large processing stage.",
+    );
+    const captures = await load(),
+      docs = await records(env, captures);
+    const current = new Set(
+      captures.filter((c) => c.is_current).map((c) => c.id),
+    );
+    const time = new Map(captures.map((c) => [c.id, c.created_at]));
+    const candidates = docs
+      .filter(
+        (d) =>
+          !d.mergedInto &&
+          !d.duplicateOf &&
+          d.pages.some((p) => current.has(p.captureId)) &&
+          (input.stage === "small"
+            ? !d.processing ||
+              d.processing.needs_reparse ||
+              (processingDisposition(d.processing) === "awaiting-pages" &&
+                captures.length > d.processing.seen_capture_count)
+            : d.processing &&
+              !d.processing.needs_reparse &&
+              d.processing.large_model_confidence === null &&
+              !d.processing.has_human_review &&
+              ["model-review", "broken"].includes(
+                processingDisposition(d.processing),
+              )),
+      )
+      .sort(
+        (a, b) =>
+          Number(!!a.processing && !a.processing.needs_reparse) -
+            Number(!!b.processing && !b.processing.needs_reparse) ||
+          (time.get(a.pages[0].captureId) ?? "").localeCompare(
+            time.get(b.pages[0].captureId) ?? "",
+          ) ||
+          a.id.localeCompare(b.id),
+      );
+    const d = candidates[0];
+    if (!d) return json({ claim: null, reason: "queue-empty" });
+    const token = crypto.randomUUID();
+    // Exactly one document lease across both stages. The head predicate rejects stale selection.
+    const result = await env.DB.prepare(
+      `INSERT INTO processing_lock(id,token,stage,document_id,revision,expires,draft)
+      SELECT 1,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=?
+      ON CONFLICT(id) DO UPDATE SET token=excluded.token,stage=excluded.stage,document_id=excluded.document_id,revision=excluded.revision,expires=excluded.expires,draft=NULL WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
+    )
+      .bind(token, input.stage, d.id, d.revision, LEASE_MS, d.id, d.revision)
+      .first();
+    if (!result) return json({ claim: null, reason: "busy-or-changed" });
+    return json({
+      claim: {
+        ...result,
+        stage: input.stage,
+        document: { id: d.id, revision: d.revision, pages: d.pages },
+        scanned_at: d.pages.map((p) => time.get(p.captureId)),
+      },
+    });
+  }
+  if (path === "/api/processing/pdf-review" && method === "POST") {
+    requireThat(
+      request.headers.has("authorization"),
+      403,
+      "Use scoped machine credentials for PDF attestation.",
+    );
+    requireThat(
+      !(await activeLock(env)),
+      409,
+      "Finish the active model claim before confirming a PDF.",
+    );
+    const input = await bodyJson(request),
+      captures = await load(),
+      docs = await records(env, captures);
+    const doc = docs.find((d) => d.id === input.document_id);
+    requireThat(
+      doc &&
+        doc.revision === input.revision &&
+        typeof input.sha256 === "string",
+      409,
+      "Document changed; read and inspect the current PDF.",
+    );
+    requireThat(
+      typeof input.evidence === "string" &&
+        input.evidence.trim().length > 0 &&
+        input.evidence.length <= 2000,
+      400,
+      "Record the actual PDF inspection.",
+    );
+    doc.checks.pdf = true;
+    doc.reviewedPdfSha256 = input.sha256;
+    doc.evidence = [doc.evidence, input.evidence]
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 20000);
+    return (await documentRoute(
+      new Request(new URL("/api/documents", request.url), {
+        method: "POST",
+        body: JSON.stringify({ documents: [doc] }),
+      }),
+      env,
+      async () => captures,
+    ))!;
+  }
+  if (path === "/api/processing/human-review" && method === "POST") {
+    requireThat(
+      !request.headers.has("authorization"),
+      403,
+      "Human approval requires the owner's interactive session.",
+    );
+    const input = await bodyJson(request, 1024 * 1024);
+    validateExtraction(input.extraction);
+    await categoryCheck(env, input.extraction);
+    const captures = await load(),
+      docs = await records(env, captures);
+    const doc = docs.find((d) => d.id === input.document_id);
+    requireThat(
+      doc && doc.revision === input.revision,
+      409,
+      "Document changed. Reload before approving.",
+    );
+    const keepPdf =
+      doc.vendor === input.extraction.vendor &&
+      doc.receiptDate === input.extraction.receipt_date &&
+      doc.checks.pdf;
+    const checkedHash = doc.reviewedPdfSha256;
+    applyExtraction(
+      doc,
+      input.extraction,
+      state(input.extraction, doc.processing, "human", doc.revision),
+    );
+    if (keepPdf) {
+      doc.checks.pdf = true;
+      doc.reviewedPdfSha256 = checkedHash;
+    }
+    return save(request, env, async () => captures, [doc], []);
+  }
+  if (path === "/api/processing/detach" && method === "POST") {
+    const input = await bodyJson(request);
+    const captures = await load(),
+      docs = await records(env, captures);
+    const d = docs.find((d) => d.id === input.document_id);
+    requireThat(
+      d && d.revision === input.revision && d.pages.length > 1,
+      409,
+      "Reload a document with at least two pages before detaching.",
+    );
+    const p = d.pages.find((p) => p.captureId === input.capture_id);
+    requireThat(
+      p &&
+        typeof input.reason === "string" &&
+        input.reason.trim().length > 0 &&
+        input.reason.length <= 2000,
+      400,
+      "Choose a page and explain the rejected match.",
+    );
+    // Machine detach is only allowed after the independent Astra parse checkpoint.
+    const lock = await activeLock(env);
+    if (request.headers.has("authorization"))
+      requireThat(
+        lock &&
+          input.token === lock.token &&
+          lock.document_id === d.id &&
+          lock.stage === "large" &&
+          lock.draft,
+        409,
+        "An Astra claim and saved independent parse are required to detach a page.",
+      );
+    else
+      requireThat(
+        !lock,
+        409,
+        "A model is processing a document. Retry when its lease finishes.",
+      );
+    const separate = newDocument(captures.find((c) => c.id === p.captureId)!);
+    separate.id = crypto.randomUUID();
+    separate.pages = [p];
+    d.pages = d.pages.filter((page) => page !== p);
+    d.annotations = d.annotations.filter((a) => a.captureId !== p.captureId);
+    if (d.processing) {
+      d.processing.needs_reparse = true;
+      d.processing.has_human_review = false;
+      d.processing.human_review_revision = null;
+      d.processing.large_model_confidence = null;
+    }
+    d.checks = {
+      visual: false,
+      transcription: false,
+      grouping: false,
+      pdf: false,
+    };
+    d.reviewedPdfSha256 = null;
+    d.invoice = null;
+    const statements = [
+      env.DB.prepare(
+        "INSERT INTO rejected_associations(id,capture_id,document_id,reason,created_at) VALUES(?,?,?,?,?)",
+      ).bind(
+        crypto.randomUUID(),
+        p.captureId,
+        d.id,
+        input.reason,
+        new Date().toISOString(),
+      ),
+    ];
+    if (lock) {
+      statements.unshift(leaseGuard(env, lock));
+      statements.push(
+        env.DB.prepare(
+          "UPDATE processing_lock SET expires=0 WHERE token=?",
+        ).bind(lock.token),
+      );
+    }
+    return save(request, env, async () => captures, [d, separate], statements);
+  }
+  requireThat(
+    request.headers.has("authorization"),
+    403,
+    "Model processing requires scoped machine credentials.",
+  );
+  const input =
+    method === "POST"
+      ? await bodyJson(request, 512 * 1024)
+      : { token: url.searchParams.get("token") };
+  requireThat(
+    typeof input.token === "string" && UUID.test(input.token),
+    400,
+    "A claim token is required.",
+  );
+  if (path === "/api/processing/submit" && method === "POST") {
+    const done = await env.DB.prepare(
+      "SELECT document_id,revision,payload FROM processing_attempts WHERE token=?",
+    )
+      .bind(input.token)
+      .first<{ document_id: string; revision: number; payload: string }>();
+    if (done) {
+      requireThat(
+        JSON.stringify(JSON.parse(done.payload).request) ===
+          JSON.stringify(input),
+        409,
+        "This claim was already submitted with different data.",
+      );
+      return json({
+        saved: [{ id: done.document_id, revision: done.revision }],
+        replayed: true,
+      });
+    }
+  }
+  const lock = await activeLock(env);
+  requireThat(
+    lock && lock.token === input.token,
+    409,
+    "Claim expired or belongs to another worker. Claim again before saving.",
+  );
+  if (path === "/api/processing/renew" && method === "POST") {
+    const result = await env.DB.prepare(
+      "UPDATE processing_lock SET expires=unixepoch()*1000+? WHERE token=? AND expires>unixepoch()*1000 RETURNING expires",
+    )
+      .bind(LEASE_MS, lock.token)
+      .first();
+    requireThat(result, 409, "Claim expired.");
+    return json(result);
+  }
+  if (path === "/api/processing/release" && method === "POST") {
+    await env.DB.prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
+      .bind(lock.token)
+      .run();
+    return json({ released: true });
+  }
+  if (path === "/api/processing/draft" && method === "POST") {
+    requireThat(
+      lock.stage === "large",
+      400,
+      "Independent checkpoints are for Astra.",
+    );
+    validateExtraction(input.extraction);
+    await categoryCheck(env, input.extraction);
+    const draft = JSON.stringify(input.extraction);
+    requireThat(
+      input.model === STAGE_MODEL[lock.stage],
+      400,
+      "Record the actual managed model name.",
+    );
+    if (lock.draft !== null) {
+      requireThat(
+        lock.draft === draft,
+        409,
+        "The independent parse is immutable.",
+      );
+      return json({ saved: true });
+    }
+    try {
+      await env.DB.batch([
+        leaseGuard(env, lock, ":draft"),
+        env.DB.prepare(
+          "INSERT INTO processing_drafts(token,document_id,revision,model,payload,created_at) VALUES(?,?,?,?,?,?)",
+        ).bind(
+          lock.token,
+          lock.document_id,
+          lock.revision,
+          input.model,
+          draft,
+          new Date().toISOString(),
+        ),
+        env.DB.prepare("UPDATE processing_lock SET draft=? WHERE token=?").bind(
+          draft,
+          lock.token,
+        ),
+      ]);
+    } catch (error) {
+      if (/constraint/.test(String(error)))
+        throw new HttpError(
+          409,
+          "The independent parse was already saved or the claim expired.",
+        );
+      throw error;
+    }
+    return json({ saved: true });
+  }
+  if (path === "/api/processing/context" && method === "GET") {
+    requireThat(
+      lock.stage === "small" || lock.draft !== null,
+      409,
+      "Save the independent parse before comparison.",
+    );
+    const captures = await load(),
+      docs = await records(env, captures);
+    const doc = docs.find((d) => d.id === lock.document_id);
+    requireThat(
+      doc && doc.revision === lock.revision,
+      409,
+      "Claimed document changed.",
+    );
+
+    const ordered = captures
+      .filter((c) => c.is_current)
+      .sort(
+        (a, b) =>
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      );
+    const after = url.searchParams.get("after_capture");
+    const last = after
+      ? ordered.findIndex((c) => c.id === after)
+      : Math.max(
+          ...doc.pages.map((p) =>
+            ordered.findIndex((c) => c.id === p.captureId),
+          ),
+        );
+    requireThat(last >= 0, 400, "Unknown page cursor.");
+    const date = url.searchParams.get("date"),
+      total = url.searchParams.get("total_minor"),
+      currency = url.searchParams.get("currency");
+    const matches = docs.filter((d) => {
+      const e = d.processing?.extraction;
+      if (
+        !date ||
+        total === null ||
+        !currency ||
+        !e?.receipt_date ||
+        e.total_minor === null ||
+        e.currency !== currency ||
+        d.mergedInto ||
+        d.duplicateOf ||
+        d.id === doc.id
+      )
+        return false;
+      return (
+        Math.abs(Date.parse(e.receipt_date) - Date.parse(date)) <=
+          3 * 86400000 &&
+        Math.abs(e.total_minor - Number(total)) <=
+          Math.max(100, Math.abs(Number(total)) * 0.02)
+      );
+    });
+    const relevantIds = [doc.id, ...matches.slice(0, 50).map((d) => d.id)];
+    const rejected = (
+      await env.DB.prepare(
+        `SELECT capture_id,document_id,reason FROM rejected_associations WHERE document_id IN (${relevantIds.map(() => "?").join(",")}) ORDER BY created_at DESC LIMIT 101`,
+      )
+        .bind(...relevantIds)
+        .all()
+    ).results;
+    return json({
+      rejected_associations_truncated: rejected.length > 100,
+      document: doc,
+      ocr_comparison: doc.processing?.ocr_comparison ?? null,
+      independent_parse: lock.draft ? JSON.parse(lock.draft) : null,
+      next_images: ordered.slice(last + 1, last + 3).map((c) => ({
+        id: c.id,
+        sha256: c.sha256,
+        created_at: c.created_at,
+        document_id: docs.find((d) => d.pages.some((p) => p.captureId === c.id))
+          ?.id,
+      })),
+      candidates: matches.slice(0, 50).map((d) => ({
+        id: d.id,
+        revision: d.revision,
+        pages: d.pages,
+        vendor: d.vendor,
+        receipt_date: d.receiptDate,
+        reference: d.reference,
+        type: d.processing!.extraction.type,
+        total_minor: d.processing!.extraction.total_minor,
+        currency: d.processing!.extraction.currency,
+        has_payment_slip: d.processing!.extraction.has_payment_slip,
+        payment_status: d.processing!.extraction.payment_status,
+        card_last_four: d.processing!.extraction.card_last_four,
+      })),
+      candidates_truncated: matches.length > 50,
+      rejected_associations: rejected.slice(0, 100),
+    });
+  }
+  if (path === "/api/processing/submit" && method === "POST") {
+    validateExtraction(input.extraction);
+    await categoryCheck(env, input.extraction);
+    requireThat(
+      input.model === STAGE_MODEL[lock.stage],
+      400,
+      "Record the actual managed model name.",
+    );
+    requireThat(
+      lock.stage === "small" || lock.draft !== null,
+      409,
+      "Save Astra's independent full parse first.",
+    );
+    const captures = await load(),
+      docs = await records(env, captures);
+    const previous = docs.find((d) => d.id === lock.document_id);
+    requireThat(
+      previous && previous.revision === lock.revision,
+      409,
+      "The claimed document changed.",
+    );
+    const changed =
+      input.documents === undefined
+        ? [structuredClone(previous)]
+        : (structuredClone(input.documents) as ReceiptDocument[]);
+    requireThat(
+      Array.isArray(changed) && changed.length > 0 && changed.length <= 20,
+      400,
+      "Submit at most 20 affected documents.",
+    );
+    const d = changed.find((d) => d?.id === lock.document_id);
+    requireThat(
+      d && d.revision === lock.revision && !d.mergedInto,
+      400,
+      "Keep the claimed document as the retained target.",
+    );
+    const rejected = (
+      await env.DB.prepare(
+        "SELECT capture_id,document_id FROM rejected_associations",
+      ).all<{ capture_id: string; document_id: string }>()
+    ).results;
+    for (const item of changed) {
+      requireThat(
+        item && typeof item.id === "string",
+        400,
+        "Invalid changed document.",
+      );
+      const old = docs.find((d) => d.id === item.id);
+      // Only the target receives fresh model validation. Other affected records are invalidated.
+      item.processing = old?.processing
+        ? structuredClone(old.processing)
+        : undefined;
+      if (item.processing) {
+        item.processing.needs_reparse = true;
+        item.processing.has_human_review = false;
+        item.processing.human_review_revision = null;
+        item.processing.large_model_confidence = null;
+      }
+      requireThat(
+        Array.isArray(item.pages) &&
+          !item.pages.some((p) =>
+            rejected.some(
+              (r) => r.capture_id === p.captureId && r.document_id === item.id,
+            ),
+          ),
+        409,
+        "This page association was rejected; keep it detached for another match.",
+      );
+    }
+    const comparison = await compareStoredOcr(env, d, input.extraction);
+    const extracted = structuredClone(input.extraction);
+    const conflict =
+      comparison.status === "missing" || comparison.status === "disagreement";
+    if (
+      lock.stage === "large" &&
+      comparison.status === "disagreement" &&
+      typeof input.ocr_resolution === "string" &&
+      input.ocr_resolution.trim().length > 0 &&
+      input.ocr_resolution.length <= 20000
+    )
+      comparison.resolution = input.ocr_resolution;
+    if (conflict && !comparison.resolution && extracted.certainty === "high")
+      extracted.certainty = "medium";
+    applyExtraction(
+      d,
+      extracted,
+      state(extracted, previous.processing, lock.stage, d.revision),
+    );
+    d.processing!.ocr_comparison = comparison;
+    d.processing!.seen_capture_count = captures.length;
+    const payload = JSON.stringify({
+      request: input,
+      independent_draft_token: lock.draft ? lock.token : null,
+      sources: d.pages.map((p) => ({
+        capture_id: p.captureId,
+        sha256: p.sha256,
+      })),
+    });
+    const statements = [
+      leaseGuard(env, lock),
+      env.DB.prepare(
+        "INSERT INTO processing_attempts(token,document_id,revision,stage,model,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+      ).bind(
+        lock.token,
+        d.id,
+        d.revision + 1,
+        lock.stage,
+        input.model,
+        payload,
+        new Date().toISOString(),
+      ),
+      env.DB.prepare("UPDATE processing_lock SET expires=0 WHERE token=?").bind(
+        lock.token,
+      ),
+    ];
+    return save(request, env, async () => captures, changed, statements);
+  }
+  throw new HttpError(404, "Processing route not found.");
+}
+function leaseGuard(env: Env, lock: Lock, phase = "") {
+  return env.DB.prepare(
+    "INSERT INTO processing_commits(token,valid) SELECT ?,EXISTS(SELECT 1 FROM processing_lock WHERE token=? AND document_id=? AND revision=? AND stage=? AND expires>unixepoch()*1000)",
+  ).bind(
+    lock.token + phase,
+    lock.token,
+    lock.document_id,
+    lock.revision,
+    lock.stage,
+  );
+}

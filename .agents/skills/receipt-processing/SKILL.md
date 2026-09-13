@@ -20,17 +20,19 @@ conversation history or images. Each worker handles one document. Default batch:
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
 
-Check server capabilities before claiming work. The current API has no shared claim queue;
-use one explicitly assigned batch and the existing private ledger described in
-[EXTRACTION.md](../../../EXTRACTION.md). Do not start recurring or overlapping workers until
-atomic queue claims and revision-based review selection are implemented. Keep unprocessed,
-awaiting-page, model-review and human-review work distinct; extraction failure is not proof
-that a source is broken.
+Check `/api/processing/access`: version 2 must advertise queueClaims. Use the shared
+20-minute renewable lease, one document per fresh worker. An hourly run handles at most
+10 Luna documents; a daily run handles at most 10 Astra exceptions. Stop a run when the
+queue is empty/busy. Do not spin or launch a second coordinator. Schedule only after the
+host's credential access and managed model spawning have been verified.
 
-Read [worker instructions](references/model-workers.md) for the selected Luna or Astra mode.
-Read [document API](references/api.md) before promoting supported fields to Site documents.
-New classification/category/confidence fields belong in immutable extraction artifacts until
-the server schema supports them; never silently drop them or claim they are UI fields.
+Read [worker instructions](references/model-workers.md) and the
+[processing contract](references/processing-api.md). Keep unprocessed, awaiting-page,
+Astra-review, human-review and broken states distinct. The ordinary OCR pass is local
+CPU work and runs before model submission. Its searchable PDF text and numeric comparison
+are unverified evidence: **original pixels are the source of truth**. Luna must flag
+OCR disagreements with at most medium certainty. Astra rereads the originals and records
+why either reading is wrong; unresolved disagreements remain low/medium for a human.
 
 ## Grouping and originals
 
@@ -67,10 +69,11 @@ have no annotations. Preserve existing annotations. Presence alone is not an ext
 ## PDFs and completion
 
 Use source-supported dates/vendors; never substitute scan time. Reserve a unique filename
-and generate ordered image PDFs with full original resolution. Follow the server's returned
-filename; existing Site names use a date/vendor hyphen, while the requested next naming
-revision uses `YYYY-MM-DD_vendor_name.pdf` with `_2` etc. Do not rename existing artifacts by
-assumption. Unknown date/vendor remains an explicit unresolved output.
+and generate ordered image PDFs with full original resolution. Follow the server's returned filename. New reservations use
+`YYYY-MM-DD_vendor_name.pdf` with `_2` etc.; historical reservations remain stable.
+Use `scripts/receipt_pdf.mjs` with verified originals and ordinary OCR artifacts to produce
+searchable image PDFs. Text is invisible and may be inaccurate; never redraw or replace
+visible receipt text with model output. Unknown date/vendor remains unresolved.
 
 Optional crops need visually verified original-pixel bounds with paper margin, retaining faint
 text and handwriting. No generative cleanup. Retrieve the pinned stored PDF, verify its hash

@@ -15,7 +15,7 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
-it("allows hash-verified original reads and versioned processing writes without browser identity", async () => {
+it("allows verified originals and immutable OCR but denies unclaimed document writes", async () => {
   const id = crypto.randomUUID();
   const bytes = new Uint8Array([255, 216, 255, 12]);
   const saved = await mf.dispatchFetch(`${origin}/api/captures/${id}`, {
@@ -54,12 +54,11 @@ it("allows hash-verified original reads and versioned processing writes without 
       headers: auth,
       body: JSON.stringify({ documents: [doc] }),
     });
-  expect((await save()).status).toBe(200);
-  expect((await save()).status).toBe(409);
+  expect((await save()).status).toBe(403);
   expect(
     ((await (await read(`/api/documents/${id}`)).json()) as any).document
       .vendor,
-  ).toBe(doc.vendor);
+  ).toBeNull();
   const attempt = JSON.stringify({ model: "synthetic", has_handwriting: true });
   const upload = await mf.dispatchFetch(
     `${origin}/api/captures/${id}/artifacts/ocr`,

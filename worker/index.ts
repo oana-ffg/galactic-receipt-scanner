@@ -1,3 +1,4 @@
+import { processingRoute, protectBlindParse } from "./processing";
 /// <reference types="@cloudflare/workers-types" />
 import { hasReceiptResolution } from "../web/capture-resolution";
 import {
@@ -205,24 +206,32 @@ async function route(request: Request, env: Env): Promise<Response> {
   const path = url.pathname;
   if (path === "/api/processing/access" && request.method === "GET")
     return json({
-      version: 1,
+      version: 2,
       capabilities: [
         "read_captures",
         "read_originals",
         "read_documents",
-        "save_documents",
+        "submit_claimed_documents",
+        "plain_ocr_numeric_comparison",
+        "searchable_pdfs",
         "save_ocr_artifacts",
         "save_document_pdfs",
       ],
       captureWrites: false,
-      queueClaims: false,
+      queueClaims: true,
+      categories: true,
+      independentReview: true,
     });
-  const documentResponse = await documentRoute(request, env, async () => {
+  const loadCaptures = async () => {
     const rows = await env.DB.prepare(
       `${captureSelection} FROM captures ORDER BY created_at,id`,
     ).all<CaptureRow>();
     return rows.results.map(publicCapture) as import("../web/types").Capture[];
-  });
+  };
+  await protectBlindParse(request, env);
+  const processingResponse = await processingRoute(request, env, loadCaptures);
+  if (processingResponse) return processingResponse;
+  const documentResponse = await documentRoute(request, env, loadCaptures);
   if (documentResponse) return documentResponse;
   const method = request.method;
   const issueResponse = await issueRoute(request, env);

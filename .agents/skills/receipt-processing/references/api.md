@@ -1,6 +1,7 @@
-# Document API
+# Legacy document records and owner-browser API
 
-Use the configured [direct API client](../../receipt-data-access/SKILL.md) for agents.
+For model writes use [claimed processing submissions](processing-api.md), not generic
+POST /api/documents. Use the configured [direct API client](../../receipt-data-access/SKILL.md) for agents.
 Browser requests instead use same-origin credentials, no-store cache and redirect:error;
 browser mutations need the Site Origin and `X-Scanner-Request: 1`. Both paths share validation.
 

@@ -1,4 +1,6 @@
-import { PDFDocument, degrees } from "pdf-lib";
+import { addReceiptPage } from "./receipt-pdf";
+import type { OcrArtifact } from "./ocr-data";
+import { PDFDocument } from "pdf-lib";
 import { api } from "./api";
 import { readOriginal } from "./original";
 import { sha256 } from "./checksum";
@@ -30,65 +32,49 @@ export async function saveDocuments(documents: ReceiptDocument[]) {
 
 export async function generateDocumentPdf(doc: ReceiptDocument) {
   const pdf = await PDFDocument.create();
-  // Source pixels are never enhanced, thresholded, or downsampled. Crop is opt-in.
-  for (const page of doc.pages) {
-    const { capture, blob } = await readOriginal(page.captureId);
-    if (capture.sha256 !== page.sha256)
-      throw new Error("Source hash changed; inspect the original.");
-    let imageBytes = await blob.arrayBuffer();
-    let type = blob.type;
-    if (page.crop) {
-      const source = await createImageBitmap(blob);
-      try {
-        const [left, top, right, bottom] = page.crop;
+  const { ReceiptOcr } = await import("./ocr");
+  const engine = new ReceiptOcr();
+  try {
+    for (const page of doc.pages) {
+      const { capture, blob } = await readOriginal(page.captureId);
+      if (capture.sha256 !== page.sha256)
+        throw Error("Source hash changed; inspect the original.");
+      let ocr: OcrArtifact | null = null;
+      const detail = await api<{
+        artifacts: { kind: string; sha256: string }[];
+      }>(`/api/captures/${page.captureId}`);
+      for (const artifact of detail.artifacts.filter((a) => a.kind === "ocr")) {
+        const value = await api<OcrArtifact>(
+          `/api/files/${page.captureId}/ocr?version=${artifact.sha256}`,
+        );
         if (
-          left < 0 ||
-          top < 0 ||
-          right > source.width ||
-          bottom > source.height ||
-          right <= left ||
-          bottom <= top
-        )
-          throw new Error("Crop exceeds the original image.");
-        const canvas = new OffscreenCanvas(
-          Math.ceil(right - left),
-          Math.ceil(bottom - top),
-        );
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("Image rendering unavailable.");
-        ctx.drawImage(
-          source,
-          left,
-          top,
-          right - left,
-          bottom - top,
-          0,
-          0,
-          canvas.width,
-          canvas.height,
-        );
-        imageBytes = await (
-          await canvas.convertToBlob({ type: "image/png" })
-        ).arrayBuffer();
-        type = "image/png";
-      } finally {
-        source.close();
+          value.source?.sha256 === page.sha256 &&
+          value.source.captureId === page.captureId &&
+          typeof value.provenance?.engine === "string" &&
+          value.provenance.engine.startsWith("tesseract.js") &&
+          value.text_only_pdf_layers?.length
+        ) {
+          ocr = value;
+          break;
+        }
       }
-    }
-    const embedded =
-      type === "image/png"
-        ? await pdf.embedPng(imageBytes)
-        : await pdf.embedJpg(imageBytes);
-    const scale = Math.min(1, 559 / embedded.width);
-    const width = embedded.width * scale,
-      height = embedded.height * scale;
-    if (height + 36 > 14400)
-      throw new Error(
-        "Receipt is too long for a standard PDF page; prepare a reviewed split layout.",
+      if (!ocr) {
+        const result = await engine.transcribe(page.captureId);
+        ocr = await api<OcrArtifact>(
+          `/api/files/${page.captureId}/ocr?version=${result.sha256}`,
+        );
+      }
+      await addReceiptPage(
+        pdf,
+        new Uint8Array(await blob.arrayBuffer()),
+        blob.type,
+        page.rotation,
+        page.crop,
+        ocr,
       );
-    const sheet = pdf.addPage([width + 36, height + 36]);
-    sheet.drawImage(embedded, { x: 18, y: 18, width, height });
-    sheet.setRotation(degrees(page.rotation));
+    }
+  } finally {
+    await engine.close();
   }
   const data = await pdf.save();
   if (data.length > 32 * 1024 * 1024)

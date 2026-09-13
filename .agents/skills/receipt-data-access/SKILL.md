@@ -29,24 +29,37 @@ A 401/403 is an access failure, not a missing original. Do not spoof identity he
 - Read a capture's `artifacts` then use `get '/api/files/ID/ocr?version=SHA'` to retrieve
   a pinned attempt. Latest OCR is not necessarily an approved extraction.
 
-## Save results
+## Process and save
 
-Read [the document contract](../receipt-processing/references/api.md) before editing.
-`save-documents PRIVATE_JSON_FILE` accepts `{documents:[...]}` with complete records
-and current revisions. A 409 requires rereading and reconciling. Page transfers include
-both changed documents atomically. Original uploads and camera controls are not permitted.
+For routine work prefer `prepare CAPTURE_ID`: it verifies the original, reuses source-matched
+ordinary OCR or runs the local CPU pass, saves and verifies the OCR artifact, and returns only
+paths/hashes. Inspect the original image and read the OCR JSON's text/lines without printing
+its embedded PDF base64. `pdf DOCUMENT_ID` prepares missing OCR, generates from the saved page
+order, uploads and verifies the searchable PDF, returning its local path and pinned hash.
+These deterministic helpers make no model calls. Astra uses `original` alone before its blind
+checkpoint; use prepare and read OCR only after the draft is saved.
 
-`save-extraction CAPTURE_ID PRIVATE_JSON_FILE` stores immutable extraction JSON and returns
-its hash. Record that hash in the private run manifest and read back the pinned artifact.
-Include model, schema version, source IDs/hashes, document revision, certainty and extraction.
-This stores unverified evidence; it does not promote a record to reviewed accounting data.
 
-`save-pdf DOCUMENT_ID REVISION PRIVATE_PDF_FILE` uploads a generated PDF for that revision.
-Follow the processing skill for generation and visual verification. Download a pinned PDF
-with `file /api/documents/ID/pdf?revision=N&version=SHA SHA PRIVATE_DESTINATION`
-(quote the API path in the shell). The client verifies its expected SHA and never overwrites
-a different existing artifact.
+`post /api/processing/ENDPOINT PRIVATE_JSON_FILE` submits a private JSON body. Read the
+[processing contract](../receipt-processing/references/processing-api.md). Model document
+changes require claim → inspect → submit. Generic machine document writes are denied;
+owner browser edits remain available. Renew a claim before its 20-minute expiry. An
+expired/stale claim requires rereading the current assignment, never force-saving it.
 
-Check `status` capabilities. Version 1 has no database queue claims or category registry.
-Do not invent endpoints or enable overlapping scheduled runs. A single assigned batch can
-use the private extraction ledger. Shared queue and review rollout are separate.
+`save-ocr CAPTURE_ID PRIVATE_JSON_FILE` stores an immutable ordinary OCR artifact.
+`node scripts/receipt_ocr.mjs PRIVATE_SOURCE_JSON PRIVATE_OCR_JSON` runs local Tesseract
+with installed Danish/English models and no inference API. The source manifest is the
+client's `original` result. Its output path must be new; keep prior artifacts for provenance.
+Read back the saved artifact using its hash. Do not print the PDF-layer base64 payload.
+
+`node scripts/receipt_pdf.mjs PRIVATE_PAGES_JSON PRIVATE_PDF` generates a searchable PDF.
+The manifest contains ordered `pages` with captureId, sha256, path, rotation, crop and
+ocr_path. Generate using the saved document pages; each original and OCR source hash is
+checked. `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` uploads for the exact revision.
+Download it using `file '/api/documents/ID/pdf?revision=N&version=SHA' SHA PRIVATE_PATH`,
+inspect it, then post document_id, current revision, sha256 and inspection evidence to
+`/api/processing/pdf-review`. This attests only the pinned PDF, not human review.
+
+Version 2 exposes shared claims, private categories, model confidences and human review.
+Work requires a verified secure credential pipe; a browser password store alone does not
+provide shell access. No MCP server is installed by this workflow.

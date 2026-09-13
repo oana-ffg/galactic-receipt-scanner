@@ -1,3 +1,8 @@
+import {
+  documentTypes,
+  financialTypes,
+  processingDisposition,
+} from "../web/extraction";
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
 import {
@@ -30,7 +35,7 @@ type FileRow = {
   payload: string;
 };
 
-async function storedDocuments(env: Env): Promise<ReceiptDocument[]> {
+export async function storedDocuments(env: Env): Promise<ReceiptDocument[]> {
   const rows = await env.DB.prepare(
     "SELECT v.payload FROM document_heads h JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision",
   ).all<{ payload: string }>();
@@ -49,6 +54,19 @@ function chooseName(
 ): string | null {
   const base = filenameBase(doc);
   if (!base) return null;
+  // Keep previously reserved filenames stable while new documents use date_vendor.
+  const legacyBase = base.replace(/^(\d{4}-\d{2}-\d{2})_/, "$1-");
+  const prior = reserved.find(
+    (r) =>
+      r.document_id === doc.id &&
+      (doc.processing ? [base] : [base, legacyBase]).some(
+        (b) =>
+          r.filename === `${b}.pdf` ||
+          (r.filename.startsWith(`${b}_`) &&
+            /^\d+\.pdf$/.test(r.filename.slice(b.length + 1))),
+      ),
+  );
+  if (prior) return prior.filename;
   for (let suffix = 1; suffix < 100000; suffix++) {
     const name = `${base}${suffix === 1 ? "" : `_${suffix}`}.pdf`;
     const existing = reserved.find((row) => row.filename === name);
@@ -81,7 +99,7 @@ function validate(
     "Use a real YYYY-MM-DD receipt date.",
   );
   requireThat(
-    ["unknown", "receipt", "invoice", "credit-note"].includes(d.kind) &&
+    documentTypes.includes(d.kind) &&
       (d.reference === null || str(d.reference, 200)),
     400,
     "Invalid document type or reference.",
@@ -139,6 +157,11 @@ function validate(
     );
   };
   for (const page of d.pages) {
+    requireThat(
+      page.type === undefined || documentTypes.includes(page.type),
+      400,
+      "Invalid page classification.",
+    );
     const source = captures.find((c) => c.id === page.captureId);
     requireThat(
       source && HASH.test(page.sha256) && source.sha256 === page.sha256,
@@ -194,7 +217,7 @@ function validate(
     );
   if (d.invoice !== null) {
     requireThat(
-      d.kind === "invoice" || d.kind === "credit-note",
+      financialTypes.includes(d.kind),
       400,
       "Invoice components require invoice or credit-note type.",
     );
@@ -235,6 +258,7 @@ export async function documentRoute(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
+  commit?: { statements: D1PreparedStatement[]; trustedProcessing: boolean },
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/documents")) return null;
@@ -257,7 +281,7 @@ export async function documentRoute(
   const reserved = await names(env);
   const fileRows = (
     await env.DB.prepare(
-      "SELECT f.*,v.payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ORDER BY f.created_at DESC,f.sha256 DESC",
+      "SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ORDER BY f.created_at DESC,f.sha256 DESC",
     ).all<FileRow>()
   ).results;
   function view(d: ReceiptDocument): DocumentView {
@@ -358,6 +382,19 @@ export async function documentRoute(
               pageIds: v.pages.map((p) => p.captureId),
               scannedAt: v.scannedAt,
               handwriting: v.handwriting,
+              processing: v.processing
+                ? {
+                    not_invoice: v.processing.not_invoice,
+                    has_handwriting: v.processing.has_handwriting,
+                    small_model_certainty: v.processing.small_model_certainty,
+                    large_model_confidence: v.processing.large_model_confidence,
+                    has_human_review: v.processing.has_human_review,
+                    category_id: v.processing.extraction.category_id,
+                    total_minor: v.processing.extraction.total_minor,
+                    currency: v.processing.extraction.currency,
+                    disposition: processingDisposition(v.processing),
+                  }
+                : null,
               duplicateOf: v.duplicateOf,
               filename: v.filename,
               pdf: v.pdf,
@@ -389,6 +426,46 @@ export async function documentRoute(
     const changed = changes as ReceiptDocument[];
     for (const d of changed) {
       const previous = stored.find((s) => s.id === d.id);
+      if (!commit?.trustedProcessing) {
+        // Old clients may omit processing; never let a round-trip forge or erase it.
+        if (d.processing !== undefined)
+          requireThat(
+            JSON.stringify(d.processing) ===
+              JSON.stringify(previous?.processing),
+            400,
+            "Use the processing or human-review endpoint to change extraction fields.",
+          );
+        if (previous?.processing) {
+          d.processing = structuredClone(previous.processing);
+          const semantic = (v: ReceiptDocument) =>
+            JSON.stringify({
+              pages: v.pages,
+              vendor: v.vendor,
+              receiptDate: v.receiptDate,
+              kind: v.kind,
+              reference: v.reference,
+              text: v.text,
+              handwriting: v.handwriting,
+              annotations: v.annotations,
+              uncertainties: v.uncertainties,
+              broken: v.broken,
+              invoice: v.invoice,
+              duplicateOf: v.duplicateOf,
+              mergedInto: v.mergedInto,
+            });
+          if (semantic(d) !== semantic(previous)) {
+            d.processing.needs_reparse = true;
+            d.processing.has_human_review = false;
+            d.processing.human_review_revision = null;
+            d.processing.large_model_confidence = null;
+          }
+          d.processing.has_human_review = false;
+          d.processing.human_review_revision = null;
+        } else delete d.processing;
+      }
+    }
+    for (const d of changed) {
+      const previous = stored.find((s) => s.id === d.id);
       if (previous && !d.mergedInto) {
         const before = previous.pages.map((p) => p.captureId);
         const after = d.pages.map((p) => p.captureId);
@@ -410,14 +487,13 @@ export async function documentRoute(
       if (d.checks.pdf) {
         const filename = chooseName(d, reserved);
         requireThat(
-          fileRows.some(
+          fileRows.find(
             (f) =>
-              f.sha256 === d.reviewedPdfSha256 &&
               f.document_id === d.id &&
               f.filename === filename &&
               JSON.stringify(JSON.parse(f.payload).pages) ===
                 JSON.stringify(d.pages),
-          ),
+          )?.sha256 === d.reviewedPdfSha256,
           400,
           "Generate and inspect the PDF for these exact pages and filename before confirming it.",
         );
@@ -500,7 +576,7 @@ export async function documentRoute(
         }
       }
     }
-    const batch: D1PreparedStatement[] = [];
+    const batch: D1PreparedStatement[] = [...(commit?.statements ?? [])];
     const at = new Date().toISOString();
     for (const d of changed) {
       const saved = { ...d, revision: d.revision + 1 };
@@ -531,16 +607,16 @@ export async function documentRoute(
       }
     }
     for (const d of changed)
-      for (const p of d.pages)
+      for (const [index, p] of d.pages.entries())
         batch.push(
           env.DB.prepare(
-            "INSERT INTO document_pages(capture_id,document_id) VALUES(?,?)",
-          ).bind(p.captureId, d.id),
+            "INSERT INTO document_pages(capture_id,document_id,page_index,type) VALUES(?,?,?,?)",
+          ).bind(p.captureId, d.id, index, p.type ?? null),
         );
     try {
       await env.DB.batch(batch);
     } catch (error) {
-      if (String(error).includes("UNIQUE constraint"))
+      if (/UNIQUE constraint|CHECK constraint/.test(String(error)))
         throw new HttpError(
           409,
           "Concurrent document or filename change. Reload and retry.",

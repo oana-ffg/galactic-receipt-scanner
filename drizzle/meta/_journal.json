@@ -50,6 +50,27 @@
       "when": 1789248212460,
       "tag": "0006_true_firestar",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789305162168,
+      "tag": "0007_black_spacker_dave",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1789305492441,
+      "tag": "0008_premium_thing",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789306292203,
+      "tag": "0009_milky_cannonball",
+      "breakpoints": true
     }
   ]
 }
