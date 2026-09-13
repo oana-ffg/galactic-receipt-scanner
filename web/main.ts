@@ -42,7 +42,7 @@ if (location.pathname === "/agent-access") {
     ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label><button id="test-audio" class="secondary">Test audio</button>'}<button id="force" class="secondary" disabled>Force take</button><button id="set-background" class="secondary" title="Clear all paper and hands first. Set again after moving the phone or changing the lighting." disabled>Set empty desk</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label><button id="test-audio" class="secondary">Test audio</button>'}<button id="force" class="secondary" disabled>Force take</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
     ${isCamera ? "" : '<p id="audio-warning" class="error" role="status"></p>'}
     <p id="background-status" class="detail" role="status" hidden></p>
     <p id="save-recovery" class="error save-recovery" role="alert" hidden></p><p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
@@ -95,19 +95,15 @@ function renderState(state: ScanState): void {
     Boolean(state.activeId) ||
     state.recovery === "upload" ||
     Boolean(retakePending);
-  element<HTMLButtonElement>("set-background").disabled =
-    !state.supportsBackground ||
+  // Keep reset available for an already-open phone running the old client.
+  element<HTMLButtonElement>("clear-background").hidden =
+    !state.backgroundReady || !state.supportsBackgroundReset;
+  element<HTMLButtonElement>("clear-background").disabled =
+    !state.supportsBackgroundReset ||
     !state.cameraConnected ||
     !state.detectorReady ||
     Boolean(state.activeId) ||
     state.recovery === "upload";
-  element<HTMLButtonElement>("clear-background").hidden =
-    !state.backgroundReady || !state.supportsBackgroundReset;
-  element<HTMLButtonElement>("clear-background").disabled =
-    element<HTMLButtonElement>("set-background").disabled ||
-    !state.supportsBackgroundReset;
-  element<HTMLButtonElement>("set-background").textContent =
-    state.backgroundReady ? "Recalibrate empty desk" : "Set empty desk";
   element("background-status").textContent = state.backgroundMessage ?? "";
   element("background-status").hidden = !state.backgroundMessage;
   element<HTMLButtonElement>("cancel-retake").hidden = !state.selectedRetake;
@@ -201,7 +197,6 @@ function disconnected(reason = "Connection lost. Waiting to reconnect…"): void
     "recover",
     "force",
     "cancel-retake",
-    "set-background",
     "clear-background",
   ]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
@@ -259,8 +254,6 @@ function mountCamera(): void {
     }
   };
   element("recover").onclick = () => void camera.recover();
-  element("set-background").onclick = () => camera.setBackground();
-  element("clear-background").onclick = () => camera.clearBackground();
   element("retake").onclick = () => camera.retake();
   element("force").onclick = () => void camera.force();
   element("cancel-retake").onclick = () =>
@@ -623,7 +616,6 @@ function mountDashboard(): void {
     "recover",
     "force",
     "cancel-retake",
-    "set-background",
     "clear-background",
   ]) {
     element(id).onclick = async () => {

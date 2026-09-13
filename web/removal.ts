@@ -5,6 +5,8 @@ export class RemovalEvidence {
   private since: number | undefined;
   private strongSince: number | undefined;
   private last: number | undefined;
+  private bridged = false;
+  private uncertain = false;
   private started: number | undefined;
   private lastObserved: number | undefined;
   private samples = 0;
@@ -25,6 +27,7 @@ export class RemovalEvidence {
   reset() {
     this.epoch++;
     this.since = this.strongSince = this.last = undefined;
+    this.bridged = this.uncertain = false;
     this.started = undefined;
     this.lastObserved = undefined;
     this.samples =
@@ -52,6 +55,7 @@ export class RemovalEvidence {
       this.resetClearMs = (this.last ?? this.since) - this.since;
     }
     this.since = this.strongSince = this.last = undefined;
+    this.bridged = this.uncertain = false;
   }
 
   observe(q: Quality, now: number): boolean {
@@ -82,7 +86,8 @@ export class RemovalEvidence {
     const record = (
       gate: NonNullable<ScanState["removalDiagnostics"]>["gate"],
     ) => {
-      const clearMs = this.since === undefined ? 0 : now - this.since;
+      const clearMs =
+        this.since === undefined ? 0 : (this.last ?? this.since) - this.since;
       this.maxClearMs = Math.max(this.maxClearMs, clearMs);
       const key = `${gate}:${q.removalDiagnostics?.geometry}:${this.resets}`;
       if (key !== this.transitionKey) {
@@ -113,12 +118,32 @@ export class RemovalEvidence {
         gate,
         gapMs,
         elapsedMs: now - this.started!,
-        clearMs: this.since === undefined ? 0 : now - this.since,
+        clearMs,
         strongMs: this.strongSince === undefined ? 0 : now - this.strongSince,
         samples: this.samples,
         resets: this.resets,
       };
     };
+    // One near-cutoff sample may interrupt an already established clear run.
+    // It cannot start or complete removal, extend freshness, or use the fast path.
+    if (
+      !q.empty &&
+      q.emptyUncertain &&
+      !q.quad &&
+      q.handsChecked === true &&
+      !q.hands.length &&
+      !this.bridged &&
+      this.since !== undefined &&
+      this.last !== undefined &&
+      this.last - this.since >= 150 &&
+      now > this.last &&
+      now - this.last <= 350
+    ) {
+      this.bridged = this.uncertain = true;
+      this.strongSince = undefined;
+      record("uncertain");
+      return false;
+    }
     if (!q.empty || q.handsChecked !== true || q.hands.length) {
       this.clearEvidence(
         q.hands.length
@@ -136,6 +161,12 @@ export class RemovalEvidence {
       );
       return false;
     }
+    if (this.uncertain && this.last !== undefined) {
+      if (gapMs !== undefined && gapMs <= 0)
+        this.clearEvidence("nonmonotonic-frame");
+      else if (now - this.last > 350) this.clearEvidence("frame-gap");
+    }
+    this.uncertain = false;
     if (this.last !== undefined && (now <= this.last || now - this.last > 750))
       this.clearEvidence(now <= this.last ? "nonmonotonic-frame" : "frame-gap");
     // The fast path requires consecutive strong frames close together. Slower

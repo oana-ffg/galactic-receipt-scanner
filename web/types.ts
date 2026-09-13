@@ -56,6 +56,8 @@ export interface Quality {
   empty?: boolean;
   /** Last paper area is clear even at the most inclusive segmentation cut. */
   emptyStrong?: boolean;
+  /** No outline, substantially darker old paper area, near the empty cutoff. */
+  emptyUncertain?: boolean;
   motion?: number;
   focus?: number;
   contrast?: number;
@@ -116,6 +118,7 @@ export interface ScanState {
       | "hands-unchecked"
       | "hands-present"
       | "confirming"
+      | "uncertain"
       | "removed";
     elapsedMs: number;
     gapMs?: number;

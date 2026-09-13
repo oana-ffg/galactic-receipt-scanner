@@ -49,12 +49,14 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
             ctx.fill();
           }
           if (document.documentElement?.dataset.paper === "folded") {
+            // Keep a sizeable folded paper inside the prior receipt area.
+            // A sub-threshold speck outside it represents removal, not folding.
             ctx.fillStyle = "#c8c8c8";
             ctx.beginPath();
-            ctx.moveTo(1740, 300);
-            ctx.lineTo(1920, 850);
-            ctx.lineTo(1780, 1300);
-            ctx.lineTo(1680, 800);
+            ctx.moveTo(820, 300);
+            ctx.lineTo(1480, 850);
+            ctx.lineTo(1180, 1800);
+            ctx.lineTo(680, 1000);
             ctx.closePath();
             ctx.fill();
             return;
@@ -77,17 +79,17 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         const post = Worker.prototype.postMessage;
         Worker.prototype.postMessage = function (message, ...rest) {
           if (
-            message.calibrate &&
-            document.documentElement.dataset.failCalibration === "true"
+            message.preview &&
+            document.documentElement.dataset.failAnalysis === "true"
           ) {
-            delete document.documentElement.dataset.failCalibration;
+            delete document.documentElement.dataset.failAnalysis;
             message.bitmap?.close();
             queueMicrotask(() =>
               this.dispatchEvent(
                 new MessageEvent("message", {
                   data: {
                     id: message.id,
-                    error: "Synthetic calibration interruption",
+                    error: "Synthetic analysis interruption",
                   },
                 }),
               ),
@@ -141,6 +143,8 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
           : route.continue(),
       );
       await page.goto("/camera");
+      await expect(page.locator("#set-background")).toHaveCount(0);
+      await expect(page.locator("#clear-background")).toBeHidden();
 
       await page
         .getByRole("button", { name: "Enable camera", exact: true })
@@ -158,9 +162,8 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       await expect(page.locator("#phase")).toHaveText("WAIT");
       if (photoApi === "unavailable") {
         await page.evaluate(() => {
-          document.documentElement.dataset.failCalibration = "true";
+          document.documentElement.dataset.failAnalysis = "true";
         });
-        await page.locator("#set-background").click();
         await expect(page.locator("#phase")).toHaveText("CAMERA STOPPED");
         await page
           .getByRole("button", { name: "Enable camera", exact: true })
@@ -168,10 +171,6 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         await expect(page.locator("#phase")).toHaveText("WAIT", {
           timeout: 20000,
         });
-        await page.locator("#set-background").click();
-        await expect(page.locator("#set-background")).toHaveText(
-          "Recalibrate empty desk",
-        );
       }
       await page.evaluate(() => {
         document.documentElement.dataset.paper = "true";
@@ -226,12 +225,6 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       expect(after.length).toBe(before + 1);
       expect(after[0].status).toBe("accepted");
       expect(after[0].outputs).toEqual({ image: false, pdf: false });
-      if (photoApi === "unavailable") {
-        await page.locator("#set-background").click();
-        await expect(page.locator("#background-status")).toContainText(
-          "Clear all paper and hands",
-        );
-      }
       await page.waitForTimeout(1800);
       expect(
         (await (await request.get("/api/captures")).json()).captures.length,
@@ -254,25 +247,6 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         document.documentElement.dataset.paper = "false";
         document.documentElement.dataset.deskChanged = "true";
       });
-      if (photoApi === "unavailable") {
-        // Reproduce a stale reference blocking an otherwise clear desk, then
-        // disable it without forcing a retake, resetting capture state or reloading.
-        await page.waitForTimeout(1200);
-        await expect(page.locator("#phase")).toHaveText("SAVED · NEXT");
-        await page
-          .getByRole("button", {
-            name: "Disable empty-desk calibration",
-            exact: true,
-          })
-          .click();
-        await expect(page.locator("#background-status")).toContainText(
-          "Normal receipt detection restored",
-        );
-        await expect(page.locator("#clear-background")).toBeHidden();
-        await expect(page.locator("#set-background")).toHaveText(
-          "Set empty desk",
-        );
-      }
       await expect(page.locator("#status")).toHaveText(
         "Ready for the next receipt.",
       );

@@ -73,6 +73,19 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     const removed = await analyze({
       preview: { capture: false, removal: true },
     });
+    // Synthetic peripheral glare crosses the occupancy boundary while the
+    // previous paper area stays substantially darker. No real receipt data.
+    const glare = async (width: number, background = "#181818") => {
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, 2000, 2400);
+      ctx.fillStyle = "#c8c8c8";
+      ctx.fillRect(0, 0, width, 2400);
+      return analyze(removal);
+    };
+    const glareClear = await glare(760);
+    const glareBorderline = await glare(830);
+    const glareBlocked = await glare(920);
+    const glareBright = await glare(830, "#969696");
     worker.terminate();
     return {
       idle,
@@ -85,6 +98,10 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
       clipped,
       washedOut,
       removed,
+      glareClear,
+      glareBorderline,
+      glareBlocked,
+      glareBright,
     };
   }, `/assets/${workerFile}`);
   expect(result.idle).toMatchObject({ ok: false, handsChecked: false });
@@ -129,4 +146,19 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     handsChecked: true,
     hands: [],
   });
+  expect(result.glareClear).toMatchObject({ empty: true, emptyStrong: false });
+  expect(result.glareBorderline).toMatchObject({
+    empty: false,
+    emptyUncertain: true,
+    quad: null,
+    handsChecked: true,
+    hands: [],
+  });
+  for (const quality of [
+    result.glareBlocked,
+    result.glareBright,
+    result.moved,
+    result.clipped,
+  ])
+    expect(quality.emptyUncertain).not.toBe(true);
 });

@@ -11,10 +11,6 @@ import {
   refinePaperEdges,
   hasPlausiblePaperCorners,
 } from "./paper-geometry";
-import { DeskReference } from "./desk-reference";
-const deskReference = new DeskReference();
-const deskCanvas = new OffscreenCanvas(128, 128);
-const deskContext = deskCanvas.getContext("2d", { willReadFrequently: true })!;
 let cv: typeof CV;
 let hands: HandLandmarker;
 const handChecks = new HandChecks();
@@ -312,13 +308,21 @@ function analyze(
     };
     // A uniformly bright/washed-out frame can have no segmented regions too.
     // Fast removal also needs the old paper area to become substantially darker.
-    const stronglyClear = () =>
-      inclusiveOccupancy < 0.08 &&
+    const substantiallyDarker = () =>
       paperBrightness !== undefined &&
       paperBrightness - areaBrightness > Math.max(30, paperBrightness * 0.35);
-    if (!candidates.length) {
+    const removalQuality = () => {
       q.empty = clearOfPaper();
-      q.emptyStrong = q.empty && stronglyClear();
+      q.emptyStrong =
+        q.empty && inclusiveOccupancy < 0.08 && substantiallyDarker();
+      // An exposure/segmentation fluctuation close to the normal cutoff is
+      // uncertainty, not positive paper presence. Only the temporal gate can
+      // bridge one such hand-checked frame between clear observations.
+      q.emptyUncertain =
+        !q.empty && paperOccupancy() <= 0.35 && substantiallyDarker();
+    };
+    if (!candidates.length) {
+      removalQuality();
       if (large)
         q.reason =
           "Paper outline is unclear. Reduce glare and leave space around the paper.";
@@ -340,8 +344,7 @@ function analyze(
         Object.assign(removal, { geometry: "incomplete", complete: 0 });
       // Peripheral glare must not prevent rearming after the last paper's area
       // is clear. An edge region overlapping that area still blocks removal.
-      q.empty = clearOfPaper();
-      q.emptyStrong = q.empty && stronglyClear();
+      removalQuality();
       q.reason =
         "No complete paper outline. Keep the whole receipt inside the preview, away from glare.";
       return q;
@@ -528,7 +531,6 @@ async function process(
   full: boolean,
   outputs: boolean,
   preview?: PreviewChecks,
-  calibrate = false,
 ) {
   if (outputs) {
     // Saved originals are independent documents, not consecutive camera frames.
@@ -542,35 +544,15 @@ async function process(
     outputs,
     !full && !outputs && preview?.removal === true && !preview.capture,
   );
-  deskContext.drawImage(bitmap, 0, 0, 128, 128);
-  const deskPixels = deskContext.getImageData(0, 0, 128, 128).data;
   if (quality.removalDiagnostics)
     Object.assign(quality.removalDiagnostics, {
       naturalEmpty: quality.empty,
       naturalStrong: quality.emptyStrong,
+      calibration: "disabled",
     });
-  if (!full && !outputs && !calibrate) {
-    const matches = deskReference.matches(deskPixels, 128);
-    if (quality.removalDiagnostics)
-      Object.assign(quality.removalDiagnostics, {
-        calibration:
-          matches === undefined ? "disabled" : matches ? "match" : "mismatch",
-        referenceDifference: deskReference.lastCheck?.difference,
-        referenceTileDifference: deskReference.lastCheck?.tileDifference,
-      });
-    if (matches !== undefined) {
-      quality.empty = matches;
-      quality.emptyStrong = matches;
-      if (matches) {
-        quality.ok = false;
-        quality.quad = null;
-        quality.reason = "Ready for the next receipt.";
-      }
-    }
-  }
   handChecks.apply(
     quality,
-    full || outputs || calibrate ? undefined : preview,
+    full || outputs ? undefined : preview,
     performance.now(),
     () => {
       sceneContext.drawImage(canvas, 0, 0, 32, 32);
@@ -579,22 +561,6 @@ async function process(
     () =>
       hands.detect(canvas).landmarks.map((hand) => hand.map((p) => [p.x, p.y])),
   );
-  if (calibrate) {
-    const plausible =
-      quality.quad &&
-      hasPlausiblePaperCorners(
-        quality.quad.map(([x, y]) => [x * canvas.width, y * canvas.height]),
-      );
-    if (quality.hands.length || plausible)
-      return {
-        quality,
-        backgroundError:
-          "Clear all paper and hands from the desk, then calibrate the empty desk again.",
-      };
-    deskReference.set(deskPixels);
-    previous = undefined;
-    return { quality, backgroundSet: true };
-  }
   if (quality.ok && quality.quad) {
     paperBrightness = quality.paperBrightness;
     paperBounds = [
@@ -677,12 +643,10 @@ self.onmessage = async (
     full?: boolean;
     outputs?: boolean;
     encode?: boolean;
-    calibrate?: boolean;
-    clearBackground?: boolean;
     preview?: PreviewChecks;
   }>,
 ) => {
-  const { id, bitmap, full, outputs, encode, preview, calibrate } = event.data;
+  const { id, bitmap, full, outputs, encode, preview } = event.data;
   try {
     if (encode && bitmap) {
       const photo = new OffscreenCanvas(bitmap.width, bitmap.height);
@@ -702,14 +666,12 @@ self.onmessage = async (
     }
     ready ??= initialize();
     await ready;
-    if (event.data.clearBackground) deskReference.clear();
     const result = bitmap
-      ? await process(bitmap, !!full, !!outputs, preview, calibrate)
+      ? await process(bitmap, !!full, !!outputs, preview)
       : {};
     self.postMessage({
       id,
       ...result,
-      backgroundCleared: event.data.clearBackground === true,
     });
   } catch (error) {
     self.postMessage({

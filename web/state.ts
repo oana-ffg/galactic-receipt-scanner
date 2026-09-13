@@ -14,8 +14,8 @@ export class CaptureState {
     retakeOf: null,
     supportsTargetedRetake: true,
     supportsForce: true,
-    supportsBackground: true,
-    supportsBackgroundReset: true,
+    supportsBackground: false,
+    supportsBackgroundReset: false,
     selectedRetake: false,
     armed: true,
     cameraConnected: true,
@@ -64,6 +64,8 @@ export class CaptureState {
     }
   }
   control(action: string) {
+    // Older dashboards can have a calibration command already in flight.
+    if (action === "set-background" || action === "clear-background") return;
     this.value.removalDiagnostics = undefined;
     this.feedback = null;
     if (this.value.activeId) return;

@@ -190,6 +190,7 @@ export function recordScanState(state: ScanState) {
         armed: state.armed,
         empty: q.empty,
         strong: q.emptyStrong,
+        uncertain: q.emptyUncertain,
         handsChecked: q.handsChecked,
         hands: q.hands.length,
       },

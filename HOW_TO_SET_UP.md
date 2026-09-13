@@ -81,12 +81,8 @@ is needed; both devices need Internet access.
   Leave a brief visible gap: clearly empty, hand-free frames can confirm removal after
   150 ms; ambiguous backgrounds need 450 ms. Actual timing also depends on the phone's
   processing speed. A swap without an observed clear gap stays locked to prevent duplicates.
-- On reflective desks, clear all paper and hands and choose **Set empty desk**.
-  The reference remains in memory on that phone for the current camera session.
-  Matching desk frames still require fresh hand checks and continuous removal evidence.
-  Keep a visible clear gap between receipts; swapping without a clear gap remains locked.
-  Use **Reset empty desk** after moving the phone or changing lighting. If setup detects
-  paper or hands, clear the desk and try again.
+  One borderline, hand-checked frame can preserve an established clear interval;
+  a fresh clear frame must follow promptly before removal is confirmed.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
 - The desktop shows the latest saved original with the outline detected in that photo.
   Use **Inspect full size** and **Actual pixels** to check fine print; the outline is an

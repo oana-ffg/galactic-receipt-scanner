@@ -32,6 +32,17 @@ function saved() {
   return state;
 }
 
+it("ignores retired calibration commands without disturbing saved or manual-review state", () => {
+  const state = saved();
+  state.saved("manual", 2, true);
+  const before = structuredClone(state.value);
+  state.control("set-background");
+  state.control("clear-background");
+  expect(state.value).toEqual(before);
+  expect(state.value.supportsBackground).toBe(false);
+  expect(state.value.supportsBackgroundReset).toBe(false);
+});
+
 it("rearms after a short confirmed gap, then requires full new-paper stability and acknowledgement", () => {
   const state = saved();
   state.observe(empty, 0);
@@ -171,4 +182,48 @@ it("retains a brief empty transition and the observed duration lost to a reset",
     ]),
   );
   expect(evidence.diagnostics?.transitions?.length).toBeLessThanOrEqual(8);
+});
+
+it("keeps established removal evidence through one checked segmentation flicker", () => {
+  const state = saved();
+  const clear = { ...empty, emptyStrong: false };
+  for (const now of [0, 150, 300]) state.observe(clear, now);
+  state.observe({ ...clear, empty: false, emptyUncertain: true }, 450);
+  expect(state.value.armed).toBe(false);
+  state.observe(clear, 600);
+  expect(state.value.armed).toBe(true);
+  for (const now of [750, 1050, 1350])
+    expect(state.observe(paper, now)).toBeNull();
+  const id = state.observe(paper, 1650);
+  expect(id).toBeTruthy();
+  state.saved(id!);
+  for (const now of [1800, 2100, 3000, 6000])
+    expect(state.observe(paper, now)).toBeNull();
+  expect(state.value.count).toBe(2);
+});
+
+it("never rearms from uncertain frames, hands, paper, or a processing gap", () => {
+  const clear = { ...empty, emptyStrong: false };
+  const uncertain = { ...clear, empty: false, emptyUncertain: true };
+  for (const interrupted of [
+    { q: { ...uncertain, quad: paper.quad }, at: 450, next: 600 },
+    { q: { ...uncertain, hands: [[[0.3, 0.4]]] }, at: 450, next: 600 },
+    { q: { ...uncertain, handsChecked: false }, at: 450, next: 600 },
+    { q: uncertain, at: 700, next: 850 },
+    { q: uncertain, at: 450, next: 900 },
+    { q: uncertain, at: 450, next: 450 },
+    { q: uncertain, at: 450, next: 400 },
+    { q: uncertain, at: 300, next: 450 },
+  ]) {
+    const state = saved();
+    for (const now of [0, 150, 300]) state.observe(clear, now);
+    state.observe(interrupted.q, interrupted.at);
+    state.observe(clear, interrupted.next);
+    expect(state.value.armed).toBe(false);
+  }
+  const state = saved();
+  for (const now of [0, 150, 300]) state.observe(clear, now);
+  for (const now of [450, 600, 750, 900]) state.observe(uncertain, now);
+  state.observe(clear, 1050);
+  expect(state.value.armed).toBe(false);
 });
