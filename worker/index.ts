@@ -1,3 +1,4 @@
+import { outlineRoute, outlineSelection } from "./outlines";
 import { Timing } from "../web/save-timing";
 import {
   recoveryProvenance,
@@ -141,6 +142,7 @@ interface CaptureRow {
   image_available?: number;
   pdf_available?: number;
   accepted_count?: number;
+  manual_outline?: string | null;
 }
 function publicCapture(row: CaptureRow) {
   return {
@@ -157,6 +159,12 @@ function publicCapture(row: CaptureRow) {
     bytes: row.bytes,
     content_type: row.content_type,
     metadata: JSON.parse(row.metadata),
+    manual_outline:
+      row.manual_outline === undefined
+        ? undefined
+        : row.manual_outline
+          ? JSON.parse(row.manual_outline)
+          : null,
     ocr_status: row.ocr_available ? "unverified" : "awaiting Work",
     ocr_error: null,
     outputs: {
@@ -261,7 +269,7 @@ async function route(
     });
   const loadCaptures = async () => {
     const rows = await env.DB.prepare(
-      `${captureSelection} FROM captures ORDER BY created_at,id`,
+      `${captureSelection}, ${outlineSelection} FROM captures ORDER BY created_at,id`,
     ).all<CaptureRow>();
     return rows.results.map(publicCapture) as import("../web/types").Capture[];
   };
@@ -271,6 +279,8 @@ async function route(
   const documentResponse = await documentRoute(request, env, loadCaptures);
   if (documentResponse) return documentResponse;
   const method = request.method;
+  const outlineResponse = await outlineRoute(request, env);
+  if (outlineResponse) return outlineResponse;
   const issueResponse = await issueRoute(request, env);
   if (issueResponse) return issueResponse;
   if (path === "/api/me" && method === "GET")
@@ -285,7 +295,7 @@ async function route(
     const cursor = (url.searchParams.get("before") ?? "9999|").split("|");
     requireThat(cursor.length === 2, 400, "Invalid cursor.");
     const rows = await env.DB.prepare(
-      `${captureSelection} FROM captures WHERE (created_at,id) < (?,?) ${url.searchParams.get("current") === "1" ? `AND (${currentTake})` : ""} ORDER BY created_at DESC,id DESC LIMIT ?`,
+      `${captureSelection}, ${outlineSelection} FROM captures WHERE (created_at,id) < (?,?) ${url.searchParams.get("current") === "1" ? `AND (${currentTake})` : ""} ORDER BY created_at DESC,id DESC LIMIT ?`,
     )
       .bind(cursor[0], cursor[1], limit + 1)
       .all<CaptureRow>();
@@ -304,6 +314,13 @@ async function route(
     requireThat(UUID.test(id), 400, "Invalid capture ID.");
     if (method === "GET") {
       const row = await captureRow(env, id);
+      row.manual_outline = (
+        await env.DB.prepare(
+          `SELECT ${outlineSelection} FROM captures WHERE id=?`,
+        )
+          .bind(id)
+          .first<{ manual_outline: string }>()
+      )?.manual_outline;
       const versions = await env.DB.prepare(
         "SELECT kind,sha256,created_at FROM artifacts WHERE capture_id=? ORDER BY created_at DESC,sha256 DESC",
       )

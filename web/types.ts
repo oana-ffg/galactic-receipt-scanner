@@ -143,6 +143,13 @@ export interface Capture {
   ocr_error: string | null;
   outputs: { image: boolean; pdf: boolean };
   acceptedCount?: number;
+  manual_outline?: {
+    id: string;
+    source_sha256: string;
+    quad: number[][];
+    note: string;
+    created_at: string;
+  } | null;
   metadata: { quality?: Quality; sourcePixels?: number[] };
 }
 

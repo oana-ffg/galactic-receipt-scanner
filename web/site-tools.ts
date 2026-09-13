@@ -118,6 +118,55 @@ export function registerSiteTools(refresh: () => Promise<void>) {
     },
   });
   context.registerTool({
+    name: "save_receipt_outline",
+    description:
+      "After inspecting the hash-verified original, save a manual outline correction with a margin around every paper edge. Preserves original pixels, original capture checks and previous corrections. This does not approve accounting data or regenerate crops/PDFs. Read capture.manual_outline first and supply its id as previous_id, or null.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string" },
+        id: {
+          type: "string",
+          description: "New UUID; reuse unchanged for retries.",
+        },
+        source_sha256: { type: "string" },
+        previous_id: { type: ["string", "null"] },
+        quad: {
+          type: "array",
+          minItems: 4,
+          maxItems: 4,
+          items: {
+            type: "array",
+            minItems: 2,
+            maxItems: 2,
+            items: { type: "number", minimum: 0, maximum: 1 },
+          },
+        },
+        note: { type: "string" },
+      },
+      required: [
+        "capture_id",
+        "id",
+        "source_sha256",
+        "previous_id",
+        "quad",
+        "note",
+      ],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, untrustedContentHint: true },
+    async execute(input) {
+      const { capture_id, ...correction } = input;
+      const result = await api(`/api/captures/${id(capture_id)}/outlines`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(correction),
+      });
+      await refresh();
+      return result;
+    },
+  });
+  context.registerTool({
     name: "prepare_receipt_outputs",
     description:
       "After scanning, create a crop and image PDF from one saved original. Verifies the original checksum, preserves it unchanged, and stores separate derivatives. Never part of the capture loop.",

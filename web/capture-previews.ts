@@ -50,6 +50,7 @@ export class CapturePreviews {
         capture &&
         capture.sha256 === entry.capture.sha256 &&
         capture.status === entry.capture.status &&
+        capture.manual_outline?.id === entry.capture.manual_outline?.id &&
         JSON.stringify(capture.metadata) ===
           JSON.stringify(entry.capture.metadata)
       )
@@ -65,7 +66,9 @@ export class CapturePreviews {
       element.dataset.capture = capture.id;
       const original = document.createElement("figure");
       const label = document.createElement("figcaption");
-      label.textContent = "Original · saved outline";
+      label.textContent = capture.manual_outline
+        ? "Original · corrected outline"
+        : "Original · saved outline";
       const stage = document.createElement("span");
       stage.className = "saved-image";
       const image = document.createElement("img");

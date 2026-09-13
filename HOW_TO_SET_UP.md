@@ -186,3 +186,17 @@ when ready to activate new controls. Do not reload during an upload. The issue-r
 only adds separate tables; it does not rewrite receipts. The friendlier wrong-account page
 applies when the application handles access denial. The Sites sign-in/access gateway may
 intercept a visitor before the application can display its page.
+
+### Manual outline corrections
+
+After inspecting a saved original, `save_receipt_outline` records a separate manual
+outline with an inspection note. The normalized corners run clockwise around all paper
+edges, including protruding folds, with a margin. Corrections are append-only and tied
+to the original checksum; capture status, quality checks and original pixels stay intact.
+Saved-photo viewers show the corrected outline. This does not regenerate derivatives
+or certify financial content.
+
+Owner-session clients can read correction history at `GET /api/captures/{id}/outlines`
+and append with `POST` using `id` (a new UUID reused for retries), `source_sha256`,
+`previous_id` (latest correction ID or null), `quad` and `note`. Concurrent edits return
+409 and require rereading. Scoped processing connections cannot write these owner edits.

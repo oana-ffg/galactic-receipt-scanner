@@ -1,7 +1,7 @@
 import type { Capture } from "./types";
 
 export function edgeOverlay(capture: Capture): SVGSVGElement {
-  const points = capture.metadata.quality?.quad;
+  const points = capture.manual_outline?.quad ?? capture.metadata.quality?.quad;
   return outlineOverlay(
     points?.length === 4
       ? [
