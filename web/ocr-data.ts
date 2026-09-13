@@ -1,3 +1,4 @@
+import { detectedReceiptCrop } from "./receipt-crop.ts";
 import { PSM, type Worker, type Page, type ImageLike } from "tesseract.js";
 function linesOf(data: Page) {
   return (data.blocks ?? []).flatMap((b) =>
@@ -22,41 +23,31 @@ export async function recognizeReceipt(
   source: { captureId: string; sha256: string; pixels: number[] },
   models: { dan: string; eng: string },
   quad?: number[][] | null,
+  reviewedCrop?: [number, number, number, number] | null,
 ) {
-  let rectangle;
+  const crop =
+    reviewedCrop === undefined
+      ? detectedReceiptCrop(source.pixels, quad)
+      : reviewedCrop;
   if (
-    quad?.length === 4 &&
-    quad.every(
-      (point) =>
-        point.length === 2 &&
-        point.every(
-          (value) => Number.isFinite(value) && value >= 0 && value <= 1,
-        ),
-    )
-  ) {
-    const margin = Math.min(...source.pixels) * 0.01;
-    const left = Math.max(
-      0,
-      Math.floor(
-        Math.min(...quad.map((p) => p[0])) * source.pixels[0] - margin,
-      ),
-    );
-    const top = Math.max(
-      0,
-      Math.floor(
-        Math.min(...quad.map((p) => p[1])) * source.pixels[1] - margin,
-      ),
-    );
-    const right = Math.min(
-      source.pixels[0],
-      Math.ceil(Math.max(...quad.map((p) => p[0])) * source.pixels[0] + margin),
-    );
-    const bottom = Math.min(
-      source.pixels[1],
-      Math.ceil(Math.max(...quad.map((p) => p[1])) * source.pixels[1] + margin),
-    );
-    rectangle = { left, top, width: right - left, height: bottom - top };
-  }
+    crop &&
+    (!crop.every(Number.isFinite) ||
+      crop[0] < 0 ||
+      crop[1] < 0 ||
+      crop[2] > source.pixels[0] ||
+      crop[3] > source.pixels[1] ||
+      crop[2] <= crop[0] ||
+      crop[3] <= crop[1])
+  )
+    throw Error("Invalid OCR crop.");
+  const rectangle = crop
+    ? {
+        left: crop[0],
+        top: crop[1],
+        width: crop[2] - crop[0],
+        height: crop[3] - crop[1],
+      }
+    : undefined;
   await worker.setParameters({
     tessedit_pageseg_mode: PSM.AUTO,
     preserve_interword_spaces: "1",

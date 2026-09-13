@@ -16,10 +16,23 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 LIMIT = 32 * 1024 * 1024
+AUTO_CROP = object()
 
 
 class ClientError(Exception):
     pass
+
+
+def matches_ocr_region(value, crop):
+    if crop is AUTO_CROP:
+        return True
+    source = value.get("source") or {}
+    if crop is None:
+        pixels = source.get("pixels")
+        if not isinstance(pixels, list) or len(pixels) != 2 or any(type(v) is not int or v <= 0 for v in pixels):
+            return False
+        crop = [0, 0, *pixels]
+    return source.get("region") == dict(left=crop[0], top=crop[1], width=crop[2]-crop[0], height=crop[3]-crop[1])
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -167,12 +180,46 @@ class ScannerClient:
                 "quad": ((meta.get("metadata") or {}).get("quality") or {}).get("quad")}
 
 
-    def prepare(self, capture_id, directory=".local/receipt-api"):
+    def image_pdf(self, pages, directory):
+        """Build a private pixel-only document preview with the production PDF layout."""
+        root = Path(directory)
+        artifact_directory(root)
+        stem = root / ("preview-" + os.urandom(8).hex())
+        manifest, output = stem.with_suffix(".pages.json"), stem.with_suffix(".pdf")
+        write_new_file(manifest, json.dumps({"mode": "image-only", "pages": pages}).encode("utf-8"))
+        result = subprocess.run(["node", "scripts/receipt_pdf.mjs", str(manifest), str(output)],
+                                capture_output=True, timeout=180)
+        if result.returncode:
+            raise ClientError("Pixel-only PDF preview failed; preserve the source layout.")
+        value = json.loads(result.stdout)
+        if value["sha256"] != hashlib.sha256(output.read_bytes()).hexdigest() or value["pages"] != len(pages):
+            raise ClientError("Pixel-only PDF preview does not match the requested pages.")
+        return value
+
+    def source_region(self, source, directory):
+        """Resolve default OCR bounds through the shared detector geometry, without OCR."""
+        stem = Path(directory) / ("source-layout-" + os.urandom(8).hex())
+        manifest, output = stem.with_suffix(".source.json"), stem.with_suffix(".json")
+        write_new_file(manifest, json.dumps(source).encode("utf-8"))
+        result = subprocess.run(["node", "scripts/receipt_ocr.mjs", str(manifest), str(output), "--layout-only"],
+                                capture_output=True, timeout=60)
+        if result.returncode:
+            raise ClientError("Could not resolve source dimensions and detected OCR region.")
+        return json.loads(output.read_text(encoding="utf-8"))["crop"]
+
+    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP):
         """Verify an original and reuse or run CPU OCR, returning bounded references."""
         root = Path(directory)
         original = self.original(capture_id, root / "originals")
         meta = self.get("/api/captures/" + capture_id)
         artifact_directory(root)
+        if crop is AUTO_CROP:
+            crop = self.source_region(original, root)
+        if crop is not AUTO_CROP:
+            if crop is not None and (not isinstance(crop, list) or len(crop) != 4 or
+                    any(type(v) is not int for v in crop) or not (0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3])):
+                raise ClientError("Invalid OCR crop bounds.")
+            original["crop"] = crop
         for artifact in meta.get("artifacts", []):
             if artifact.get("kind") != "ocr":
                 continue
@@ -185,7 +232,7 @@ class ScannerClient:
                 value = json.loads(destination.read_text())
             except (ValueError, UnicodeError):
                 continue
-            if matches_ocr(value, capture_id, original["sha256"]):
+            if matches_ocr(value, capture_id, original["sha256"]) and matches_ocr_region(value, crop):
                 return {**original, "ocr_path": str(destination.absolute()), "ocr_sha256": sha}
         run = root / (capture_id + "-" + os.urandom(8).hex())
         manifest = run.with_suffix(".source.json")
@@ -195,7 +242,7 @@ class ScannerClient:
         if process.returncode:
             raise ClientError("Local OCR failed; preserve the source and inspect the local runtime before retrying.")
         data = output.read_bytes()
-        if not matches_ocr(json.loads(data), capture_id, original["sha256"]):
+        if not matches_ocr(json.loads(data), capture_id, original["sha256"]) or not matches_ocr_region(json.loads(data), crop):
             raise ClientError("Generated OCR does not match the verified source.")
         if len(data) > 1024 * 1024:
             raise ClientError("OCR artifact exceeds 1 MB; preserve the local result for review.")
@@ -215,7 +262,7 @@ class ScannerClient:
         root = Path(directory)
         pages = []
         for page in document["pages"]:
-            source = self.prepare(page["captureId"], directory)
+            source = self.prepare(page["captureId"], directory, crop=page["crop"])
             if source["sha256"] != page["sha256"]:
                 raise ClientError("Document source hash mismatch.")
             pages.append({**page, "path": source["path"], "ocr_path": source["ocr_path"]})

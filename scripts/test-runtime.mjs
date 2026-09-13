@@ -1,5 +1,6 @@
 import { Miniflare } from "miniflare";
 import { readdir, readFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 export const origin = "http://127.0.0.1:8766";
 export const ownerHeaders = {
   "oai-authenticated-user-id": "synthetic-owner",
@@ -12,9 +13,13 @@ export async function runtime({
   processingTokenSha256,
   sitesGatewayToken,
 } = {}) {
+  const configuredDist = process.env.RECEIPT_TEST_DIST_ROOT;
+  if (configuredDist && !isAbsolute(configuredDist))
+    throw Error("RECEIPT_TEST_DIST_ROOT must be an absolute path.");
+  const distRoot = configuredDist || "dist";
   const mf = new Miniflare({
     modules: true,
-    scriptPath: "dist/server/index.js",
+    scriptPath: join(distRoot, "server", "index.js"),
     compatibilityDate: "2026-08-01",
     bindings: {
       OWNER_EMAIL: "owner@example.test",
@@ -28,7 +33,7 @@ export async function runtime({
     d1Databases: ["DB"],
     r2Buckets: ["BUCKET"],
     assets: {
-      directory: "dist/client",
+      directory: join(distRoot, "client"),
       binding: "ASSETS",
       routerConfig: {
         invoke_user_worker_ahead_of_assets: true,

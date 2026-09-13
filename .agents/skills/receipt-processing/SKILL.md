@@ -47,6 +47,33 @@ For Luna on a host with the configured bounded worker, use [the Luna protocol](r
 It supplies the full approved workflow without ad hoc shell scripts. The older runbook remains
 for Astra and hosts without that helper; do not mix its inline scripts into a bounded Luna run.
 
+## Document flow
+
+1. Luna inspects **detected document crops by default**, using the saved outline with a
+   paper margin. It groups related pages/slips and extracts their printed fields with its
+   own vision. Raw originals are available on request when the crop, completeness or
+   association is uncertain; do not feed full camera photos by default. Preserve original
+   bytes and record the chosen crop/rotation against their source hashes.
+2. Finalize the ordered document layout and save Luna's first extraction plus an
+   **image-only PDF before ordinary OCR**. Inspect all retained pages. This fixes which
+   pixels belong to the document before later comparison; a single first-page preview
+   is insufficient for a multipage document.
+3. Run/reuse prepared Tesseract for those finalized page regions, compare its numeric
+   observations with Luna, and embed its invisible searchable layer in the same visible
+   PDF layout. Save grouping, crops and extraction to the database, then upload and attest
+   the searchable PDF using server hash/revision acknowledgement.
+4. Independent model review reads **all finalized pages without the Tesseract layer**:
+   use the saved image-only PDF if supported, otherwise its ordered page images. Do not
+   provide Luna's extraction or Tesseract text before saving the independent reading.
+   Astra can inspect raw originals if the crops leave a question unresolved. Compare only
+   after the independent checkpoint, preserving each reading and explicit disagreements.
+
+Local model confirmation is currently an owner-requested experiment, **not a required
+production stage**. Do not install, select or invoke a local model during normal Luna
+processing. Experimental results do not silently replace saved Luna/Astra results.
+For a full-flow test, claim the next unprocessed small-stage document; reusing already
+processed documents is a separate comparison experiment, not a fresh Luna test.
+
 ## Coordinator
 
 Use **Terra (`gpt-5.6-terra`) for coordination**, including WebMCP authorization when
@@ -75,11 +102,16 @@ to the owner. Release a known active, unsubmitted claim when safely possible; re
 uncertain submission state for reconciliation instead of assuming it was not saved.
 Wait for explicit owner direction before resuming the batch. A successfully saved
 model-review/awaiting-page/broken disposition is a document outcome, not by itself a
-worker execution failure.
+worker execution failure. **Continue with the next pending Luna document after such
+a saved outcome**, including low/medium certainty, OCR disagreement and arithmetic
+questions routed to Astra. Do not ask the owner to approve individual review flags.
+The daily Astra stage handles its review queue separately. In reports, distinguish
+"saved; queued for Astra" from a failed or uncertain network/journal operation.
 
 Check `/api/processing/access`: version 2 must advertise queueClaims. Use the shared
-20-minute renewable lease, one document per fresh worker. An hourly run handles at most
-10 Luna documents; a daily run handles at most 10 Astra exceptions. Stop a run when the
+20-minute renewable lease, one document per fresh worker. Use 10-document batches as checkpoints. An explicitly requested continuous/day/overnight
+run continues with further batches within its execution budget; 10 is not a daily quota.
+The daily Astra run likewise drains eligible exceptions within its budget. Stop a run when the
 queue is empty/busy. Do not spin or launch a second coordinator. Schedule only after the
 host's credential access and managed model spawning have been verified.
 
@@ -139,7 +171,7 @@ Use `scripts/receipt_pdf.mjs` with verified originals and ordinary OCR artifacts
 searchable image PDFs. Text is invisible and may be inaccurate; never redraw or replace
 visible receipt text with model output. Unknown date/vendor remains unresolved.
 
-Optional crops need visually verified original-pixel bounds with paper margin, retaining faint
+Default detected crops need visually verified original-pixel bounds with paper margin, retaining faint
 text and handwriting. No generative cleanup. Compare the upload response's server-computed
 hash and revision with the generated PDF, then inspect every page of that same local file
 before checking PDF review. Do not download it again during normal processing. For an

@@ -14,6 +14,7 @@ from receipt_api import ScannerClient, ClientError, NoRedirect, main
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.client = ScannerClient({"origin": "https://scanner.example.test", "sites_token": "synthetic-sites", "processing_token": "rsc_" + "s" * 43})
+        self.client.source_region = Mock(return_value=[0,0,100,200])
         self.id = "00000000-0000-4000-8000-000000000001"
         self.body = b"\xff\xd8\xffsynthetic"
         self.sha = hashlib.sha256(self.body).hexdigest()
@@ -140,7 +141,7 @@ class ClientTests(unittest.TestCase):
 
 
     def ocr_fixture(self):
-        return {"text": "Synthetic shop 12,34", "source": {"captureId": self.id, "sha256": self.sha},
+        return {"text": "Synthetic shop 12,34", "source": {"captureId": self.id, "sha256": self.sha, "pixels": [100,200], "region": dict(left=0,top=0,width=100,height=200)},
                 "provenance": {"engine": "tesseract.js synthetic"},
                 "text_only_pdf_layers": [{"base64": "c3ludGhldGlj", "sha256": "f" * 64}]}
 
@@ -175,6 +176,28 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(Path(result["ocr_path"]).name, self.id + "-" + sha + ".ocr.json")
             self.assertEqual(Path(result["ocr_path"]).read_bytes(), data)
             self.assertEqual(self.client.request.call_count, 2)
+
+    def test_prepare_does_not_reuse_ocr_from_another_crop(self):
+        old = self.ocr_fixture()
+        old["source"]["region"] = dict(left=0, top=0, width=100, height=200)
+        new = self.ocr_fixture()
+        new["source"]["region"] = dict(left=10, top=20, width=70, height=150)
+        old_bytes, new_bytes = json.dumps(old).encode(), json.dumps(new).encode()
+        old_sha, new_sha = hashlib.sha256(old_bytes).hexdigest(), hashlib.sha256(new_bytes).hexdigest()
+        self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
+        self.client.get = Mock(return_value={"artifacts": [{"kind": "ocr", "sha256": old_sha}]})
+        def request(path, body=None):
+            return json.dumps({"sha256": new_sha}).encode() if body is not None else (old_bytes if old_sha in path else new_bytes)
+        self.client.request = Mock(side_effect=request)
+        def generate(args, **kwargs):
+            manifest = json.loads(Path(args[-2]).read_text())
+            self.assertEqual(manifest["crop"], [10,20,80,170])
+            Path(args[-1]).write_bytes(new_bytes)
+            return Mock(returncode=0)
+        with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=generate) as run:
+            result = self.client.prepare(self.id, directory, crop=[10,20,80,170])
+            self.assertEqual(result["ocr_sha256"], new_sha)
+            run.assert_called_once()
 
     def test_pdf_verifies_upload_without_redownloading_and_preserves_errors(self):
         self.client.get = Mock(return_value={"document": {"id": self.id, "revision": 3, "filename": "2026-01-01_synthetic.pdf", "pages": [{"captureId": self.id, "sha256": self.sha, "rotation": 0, "crop": None}]}})

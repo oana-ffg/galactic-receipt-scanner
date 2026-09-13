@@ -3,6 +3,7 @@
 import argparse
 from copy import deepcopy
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -20,8 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from receipt_api import ScannerClient, ClientError, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
+WINDOWS_REPLACE_ATTEMPTS = 7
+WINDOWS_TRANSIENT_REPLACE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EBUSY}
+WINDOWS_TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
 OPERATIONS = {
-    "status", "claim", "context", "document", "originals", "prepare", "categories",
+    "status", "claim", "context", "document", "originals", "previews", "draft", "prepare", "categories",
     "category", "validate", "submit", "pdf", "render", "attest", "renew", "release",
     "retry-submit", "retry-pdf", "reconcile", "quit",
 }
@@ -45,6 +49,18 @@ class InputError(Exception):
     """A rejected protocol input; no remote mutation has started."""
 
 
+class JournalCheckpointError(OSError):
+    """A local journal replacement failed before the associated request began."""
+
+    def __init__(self, error):
+        self.error_type = type(error).__name__
+        self.errno = error.errno
+        super().__init__(error.errno, "journal checkpoint failed")
+
+    def diagnostic(self):
+        return f"Journal checkpoint failed ({self.error_type}, errno={self.errno})."
+
+
 class Once(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         if getattr(namespace, self.dest, None) is not None:
@@ -60,6 +76,21 @@ def require(condition, message):
 def verify(condition, message):
     if not condition:
         raise ClientError(message)
+
+
+def replace_journal_file(temporary, destination):
+    """Replace a journal file, retrying only transient Windows sharing/access failures."""
+    for attempt in range(WINDOWS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, destination)
+            return
+        except OSError as error:
+            transient = (os.name == "nt"
+                         and error.errno in WINDOWS_TRANSIENT_REPLACE_ERRNOS
+                         and getattr(error, "winerror", None) in (None, *WINDOWS_TRANSIENT_REPLACE_WINERRORS))
+            if not transient or attempt == WINDOWS_REPLACE_ATTEMPTS - 1:
+                raise JournalCheckpointError(error) from None
+            time.sleep(0.025 * (2 ** attempt))
 
 
 def clean(value):
@@ -162,7 +193,7 @@ class Worker:
             self.checkpoint()
         temporary = base / ("active-" + uuid.uuid4().hex + ".json")
         write_new_file(temporary, json.dumps({"run_id": run_id}).encode())
-        os.replace(temporary, pointer)
+        replace_journal_file(temporary, pointer)
 
     def load(self, name):
         return json.loads((self.work / name).read_text(encoding="utf-8"))
@@ -173,7 +204,23 @@ class Worker:
     def checkpoint(self):
         temporary = self.work / ("state-" + uuid.uuid4().hex + ".json")
         write_new_file(temporary, json.dumps(self.state, ensure_ascii=False).encode("utf-8"))
-        os.replace(temporary, self.work / "state.json")
+        replace_journal_file(temporary, self.work / "state.json")
+
+    def checkpoint_intent(self, previous_state):
+        """Persist a pre-request intent or leave its in-memory phase confirmed."""
+        try:
+            self.checkpoint()
+        except OSError as error:
+            self.rollback_pre_request_state(previous_state)
+            if isinstance(error, JournalCheckpointError):
+                raise
+            raise JournalCheckpointError(error) from None
+
+    def rollback_pre_request_state(self, previous_state):
+        """Restore a confirmed phase without reusing an already-written journal sequence."""
+        current_sequence = self.state.get("sequence", 0)
+        self.state = previous_state
+        self.state["sequence"] = max(self.state.get("sequence", 0), current_sequence)
 
     def record(self, label, value):
         self.state["sequence"] += 1
@@ -188,8 +235,8 @@ class Worker:
         return {"run_id": self.state["run_id"], "phase": self.state["phase"], "work_dir": str(self.work),
                 "document_id": (document or {}).get("id"), "revision": (document or {}).get("revision"),
                 "pages": len((document or {}).get("pages", [])), "status": (document or {}).get("status"),
-                "claim_active": self.state["phase"] == "claimed",
-                "claim_state": ("active" if self.state["phase"] == "claimed" else "possibly-active"
+                "claim_active": self.state["phase"] in {"claimed", "drafted"},
+                "claim_state": ("active" if self.state["phase"] in {"claimed", "drafted"} else "possibly-active"
                     if self.state["phase"] in {"claim-uncertain", "submit-uncertain"} else "closed"),
                 "claim_expires": (claim or {}).get("expires"), "failure": self.state.get("failed"),
                 "viewer_preflight": str(self.work / "viewer-preflight.png")}
@@ -208,8 +255,28 @@ class Worker:
         return json.loads(self.client.request("/api/processing/" + endpoint, payload))
 
     def active(self):
-        require(self.state["phase"] == "claimed", "This operation needs the active document claim.")
+        require(self.state["phase"] in {"claimed", "drafted"}, "This operation needs the active document claim.")
         return self.state["claim"]
+
+    def page(self, capture_id):
+        """Return a discovered current page record without accepting caller-made geometry."""
+        for document_id in self.state["document_ids"]:
+            document = self.get_document(document_id)
+            for page in document.get("pages", []):
+                if page["captureId"] == capture_id:
+                    return page
+        raise InputError("Capture page was not discovered in this receipt context.")
+
+    def render_file(self, path, pages, dpi, label):
+        require(dpi in (150, 300), "Rendering supports 150 or 300 dpi.")
+        prefix = self.work / (label + "-" + uuid.uuid4().hex)
+        process = subprocess.run([self.renderer, "-r", str(dpi), "-jpeg", path, str(prefix)],
+            capture_output=True, timeout=180, cwd=self.repo, env=self.env)
+        if process.returncode:
+            raise ClientError("Prepared PDF renderer failed.")
+        paths = sorted(self.work.glob(prefix.name + "-*.jpg"), key=lambda p: int(p.stem.rsplit("-", 1)[1]))
+        require(len(paths) == pages, "PDF rendered page count differs from saved source pages.")
+        return [str(p) for p in paths]
 
     def renew_if_needed(self):
         claim = self.active()
@@ -289,24 +356,72 @@ class Worker:
                 and sum(len(d["pages"]) for d in [target] + donors) == len(pages), "Grouping did not preserve every source page exactly once.")
         return [target] + donors
 
+    def draft(self, message):
+        require(self.state["phase"] == "claimed", "Freeze one Luna draft before OCR preparation.")
+        require(set(message) <= {"op", "extraction", "grouping"}, "Unknown draft option.")
+        extraction = deepcopy(message["extraction"])
+        validation = self.check("validate", extraction=extraction)
+        if validation["errors"]:
+            return {"validation": validation, "drafted": False}
+        claim = self.active()
+        documents = self.grouping(message["grouping"], extraction) if message.get("grouping") else [deepcopy(self.get_document(claim["document"]["id"]))]
+        target = next(d for d in documents if d["id"] == claim["document"]["id"])
+        layouts = self.state.get("layouts", {})
+        retained = [p["captureId"] for p in target["pages"]]
+        require(set(retained) <= layouts.keys(), "Preview every retained page before freezing the Luna draft.")
+        for document in documents:
+            for page in document["pages"]:
+                if page["captureId"] in layouts:
+                    layout = layouts[page["captureId"]]
+                    verify(layout["sha256"] == page["sha256"], "Preview source differs from the grouped page.")
+                    page["crop"], page["rotation"] = layout["crop"], layout["rotation"]
+        validation = self.check("validate", extraction=extraction)
+        require(not validation["errors"], "Grouping exceeded extraction limits; revise the extraction.")
+        pages = [{**p, "path": self.state["sources"][p["captureId"]]["path"]} for p in target["pages"]]
+        pixel_pdf = self.client.image_pdf(pages, self.work / "draft")
+        verify(pixel_pdf["pages"] == len(pages) and pixel_pdf["layouts"] == [layouts[cid] for cid in retained],
+               "Frozen pixel layout differs from the reviewed previews.")
+        rendered = self.render_file(pixel_pdf["path"], pixel_pdf["pages"], 300, "draft-page")
+        layout_changed = target["pages"] != claim["document"]["pages"]
+        frozen = {"extraction": extraction, "grouping": deepcopy(message.get("grouping")),
+                  "target": deepcopy(target),
+                  "documents": documents if message.get("grouping") or layout_changed else None,
+                  "layouts": [layouts[cid] for cid in retained], "pixel_pdf": pixel_pdf, "rendered": rendered}
+        self.state["draft_file"] = self.record("luna-draft", frozen)
+        self.state["draft"] = frozen
+        self.state["phase"] = "drafted"
+        self.checkpoint()
+        return {"drafted": True, "document_id": target["id"], "pages": len(retained),
+                "pixel_pdf_sha256": pixel_pdf["sha256"], "rendered": rendered, "layouts": frozen["layouts"]}
+
     def submit(self, message):
         claim = self.active()
-        extraction = deepcopy(message["extraction"])
-        result = self.check("validate", extraction=extraction)
-        if result["errors"]:
-            return {"validation": result, "submitted": False}
+        require(self.state["phase"] == "drafted" and self.state.get("draft"), "Freeze and inspect the Luna draft before submission.")
+        require(set(message) == {"op"}, "Submit reuses the frozen Luna draft without changing its reading or grouping.")
+        frozen = self.state["draft"]
+        extraction = deepcopy(frozen["extraction"])
         body = {"token": claim["token"], "model": "gpt-5.6-luna", "extraction": extraction}
-        if message.get("grouping"):
-            body["documents"] = self.grouping(message["grouping"], extraction)
+        if frozen["documents"] is not None:
+            body["documents"] = deepcopy(frozen["documents"])
         result = self.check("validate", extraction=extraction)
         require(not result["errors"], "Grouping exceeded extraction limits; revise the extraction.")
-        target = next((d for d in body.get("documents", []) if d["id"] == claim["document"]["id"]), claim["document"])
+        target = next((d for d in body.get("documents", []) if d["id"] == claim["document"]["id"]), frozen["target"])
         require({p["captureId"] for p in target["pages"]} <= self.state["prepared"].keys(), "Prepare OCR for every retained page before submitting.")
+        for page in target["pages"]:
+            prepared = self.state["prepared"][page["captureId"]]
+            require(prepared.get("crop") == page["crop"], "Prepared OCR does not use the frozen page crop.")
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         require(len(payload) <= MAX_INPUT, "Processing request exceeds 512 KiB.")
-        self.state["submit_request"] = self.record("submit-request", body)
-        self.state["phase"] = "submit-uncertain"
-        self.checkpoint()
+        previous_state = deepcopy(self.state)
+        try:
+            self.state["submit_request"] = self.record("submit-request", body)
+            self.state["phase"] = "submit-uncertain"
+            self.checkpoint_intent(previous_state)
+        except OSError as error:
+            self.rollback_pre_request_state(previous_state)
+            if isinstance(error, JournalCheckpointError):
+                raise
+            raise JournalCheckpointError(error) from None
         response = json.loads(self.client.request("/api/processing/submit", payload))
         return self.finish_submit(body, response)
 
@@ -346,10 +461,10 @@ class Worker:
         self.checkpoint()
         return {"pages": self.state["rendered"], "dpi": dpi, "sha256": pdf["sha256"]}
 
-    def pdf_intent(self, value):
+    def pdf_intent(self, value, previous_state):
         self.state["pdf_intent"] = value
         self.state["phase"] = "pdf-uncertain"
-        self.checkpoint()
+        self.checkpoint_intent(previous_state)
 
     def restore_pdf(self):
         intent = self.state["pdf_intent"]
@@ -432,9 +547,10 @@ class Worker:
         if op == "claim":
             require(self.state["phase"] == "ready", "One claim only per worker process; start no replacement document.")
             require(message.get("viewer_checked") is True, "Open the synthetic image before claiming.")
+            previous_state = deepcopy(self.state)
             self.state["phase"] = "claim-uncertain"
             self.state["claim_started"] = time.time()
-            self.checkpoint()
+            self.checkpoint_intent(previous_state)
             result = self.post("claim", {"stage": "small"})
             self.state["claim"] = result["claim"]
             self.state["phase"] = "claimed" if result["claim"] else "empty"
@@ -443,11 +559,11 @@ class Worker:
             self.record("claim-response", result)
             return {**clean(result), **self.summary()}
         if op == "document":
-            require(self.state["phase"] in {"claimed", "submitted", "pdf", "complete"}, "No confirmed document is available.")
-            if self.state["phase"] == "claimed":
+            require(self.state["phase"] in {"claimed", "drafted", "submitted", "pdf", "complete"}, "No confirmed document is available.")
+            if self.state["phase"] in {"claimed", "drafted"}:
                 self.renew_if_needed()
             return clean(self.get_document(message["document_id"]))
-        if op in {"context", "originals", "prepare", "categories", "category", "submit", "renew"}:
+        if op in {"context", "originals", "previews", "draft", "prepare", "categories", "category", "submit", "renew"}:
             self.renew_if_needed()
         if op == "renew":
             claim = self.active()
@@ -497,13 +613,72 @@ class Worker:
                     self.state["sources"][cid] = source
                     values.append(source)
                 else:
+                    require(self.state["phase"] == "drafted", "Freeze and inspect the Luna draft before OCR preparation.")
                     require(cid in self.state["sources"], "Fetch and view original pixels before OCR preparation.")
-                    source = self.client.prepare(cid, self.work / "ocr")
+                    retained = {layout["captureId"]: layout for layout in self.state["draft"]["layouts"]}
+                    require(cid in retained, "Prepare only pages retained in the frozen Luna draft.")
+                    source = self.client.prepare(cid, self.work / "ocr", crop=retained[cid]["crop"])
                     verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR original differs from the claimed source hash.")
+                    source["crop"] = retained[cid]["crop"]
                     self.state["prepared"][cid] = source
                     ocr = json.loads(Path(source["ocr_path"]).read_text(encoding="utf-8"))
                     values.append({**source, "text": ocr.get("text"), "lines": ocr.get("lines")})
                 self.checkpoint()
+            return values
+        if op == "previews":
+            require(self.state["phase"] == "claimed", "Review page layouts before freezing the Luna draft.")
+            ids = message.get("capture_ids", [])
+            overrides = message.get("layouts", {})
+            require(set(message) <= {"op", "capture_ids", "layouts"}, "Unknown preview option.")
+            require(isinstance(ids, list) and 0 < len(ids) <= 100 and len(ids) == len(set(ids))
+                    and set(ids) <= set(self.state["capture_ids"]), "Use unique capture IDs discovered in the claimed context.")
+            require(isinstance(overrides, dict) and set(overrides) <= set(ids), "Layout overrides must belong to requested pages.")
+            values = []
+            self.state.setdefault("layouts", {})
+            for cid in ids:
+                self.renew_if_needed()
+                source = self.client.original(cid, self.work / "originals")
+                verify(source["sha256"] == self.state["capture_hashes"][cid], "Original differs from the claimed source hash.")
+                self.state["sources"][cid] = source
+                page = self.page(cid)
+                override = overrides.get(cid)
+                if override is not None:
+                    require(isinstance(override, dict) and set(override) <= {"crop", "rotation"}, "Unknown page layout option.")
+                    rotation = override.get("rotation", page.get("rotation", 0))
+                    require(rotation in (0, 90, 180, 270), "Page rotation must be 0, 90, 180 or 270.")
+                    layout_page = {**page, "path": source["path"], "rotation": rotation, "quad": source.get("quad")}
+                    if "crop" in override:
+                        crop = override["crop"]
+                        require(crop is None or (isinstance(crop, list) and len(crop) == 4
+                                and all(type(v) is int for v in crop) and 0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3]),
+                                "Page crop must be null or four ordered original-pixel integers.")
+                        layout_page["crop"] = crop
+                    elif page.get("crop") is None:
+                        layout_page.pop("crop", None)
+                else:
+                    layout_page = {**page, "path": source["path"], "rotation": page.get("rotation", 0)}
+                    if page.get("crop") is None:
+                        layout_page.pop("crop", None)
+                    layout_page["quad"] = source.get("quad")
+                preview = self.client.image_pdf([layout_page], self.work / "previews")
+                layout = preview["layouts"][0]
+                verify(layout["captureId"] == cid and layout["sha256"] == source["sha256"], "Preview layout source differs.")
+                pixels = layout.get("pixels")
+                verify(isinstance(pixels, list) and len(pixels) == 2 and all(type(v) is int and v > 0 for v in pixels),
+                       "Preview returned invalid source dimensions.")
+                detected = layout.get("crop")
+                verify(detected is None or (isinstance(detected, list) and len(detected) == 4
+                       and all(type(v) is int for v in detected) and 0 <= detected[0] < detected[2] <= pixels[0]
+                       and 0 <= detected[1] < detected[3] <= pixels[1]), "Preview returned invalid crop bounds.")
+                require(detected is not None or (override is not None and "crop" in override and override["crop"] is None),
+                        "No reliable crop was detected; review the original and explicitly choose crop bounds or raw full-page layout.")
+                if override is not None and "crop" in override and override["crop"] is None:
+                    layout["crop"] = [0, 0, pixels[0], pixels[1]]
+                rendered = self.render_file(preview["path"], 1, 300, "crop-preview")
+                self.state["layouts"][cid] = layout
+                self.checkpoint()
+                values.append({"captureId": cid, "preview": rendered[0], "layout": layout,
+                               "pixel_pdf_sha256": preview["sha256"]})
             return values
         if op == "categories":
             return self.client.get("/api/processing/categories")
@@ -513,6 +688,8 @@ class Worker:
             return self.post("categories", {k: message[k] for k in ("name", "description")})
         if op == "validate":
             return self.check("validate", extraction=message["extraction"])
+        if op == "draft":
+            return self.draft(message)
         if op == "submit":
             return self.submit(message)
         if op == "pdf":
@@ -521,9 +698,11 @@ class Worker:
             if not doc.get("filename") or doc.get("duplicateOf") or doc.get("mergedInto"):
                 self.state["phase"] = "complete"
                 return {**self.summary(), "pdf_applicable": False}
+            previous_state = deepcopy(self.state)
             self.state["phase"] = "pdf-preparing"
-            self.checkpoint()
-            pdf = self.client.pdf(doc["id"], self.work / "pdf", before_upload=self.pdf_intent)
+            self.checkpoint_intent(previous_state)
+            pdf = self.client.pdf(doc["id"], self.work / "pdf",
+                                  before_upload=lambda value: self.pdf_intent(value, previous_state))
             require(pdf["revision"] == doc["revision"], "Document changed before PDF generation; reconcile.")
             self.state["pdf"] = pdf
             self.state["phase"] = "pdf"
@@ -542,9 +721,16 @@ class Worker:
             require(current["pages"] == doc["pages"] and len(current["pages"]) == pdf["pages"], "Document pages changed; reconcile.")
             require(hashlib.sha256(Path(pdf["path"]).read_bytes()).hexdigest() == pdf["sha256"], "Local PDF changed; reconcile.")
             body = {"document_id": doc["id"], "revision": doc["revision"], "sha256": pdf["sha256"], "evidence": evidence}
-            self.record("attestation-request", body)
-            self.state["phase"] = "attestation-uncertain"
-            self.checkpoint()
+            previous_state = deepcopy(self.state)
+            try:
+                self.record("attestation-request", body)
+                self.state["phase"] = "attestation-uncertain"
+                self.checkpoint_intent(previous_state)
+            except OSError as error:
+                self.rollback_pre_request_state(previous_state)
+                if isinstance(error, JournalCheckpointError):
+                    raise
+                raise JournalCheckpointError(error) from None
             response = self.post("pdf-review", body)
             self.record("attestation-response", response)
             final = self.get_document(doc["id"])
@@ -553,7 +739,7 @@ class Worker:
             return {**self.summary(), "pdf_review_attested": True}
 
     def release(self):
-        if self.state["phase"] == "claimed":
+        if self.state["phase"] in {"claimed", "drafted"}:
             result = self.post("release", {"token": self.state["claim"]["token"]})
             require(result.get("released") is True, "Claim release was not confirmed.")
             self.state["phase"] = "released"
@@ -581,11 +767,16 @@ class Worker:
 
     def handle(self, message):
         op = message.get("op") if isinstance(message, dict) else None
-        self.record("input", message)
         try:
+            self.record("input", message)
             result = self.dispatch(message)
             self.record("result", result)
             return {"ok": True, "op": op, "result": clean(result), "at": datetime.now(timezone.utc).isoformat()}
+        except JournalCheckpointError as error:
+            diagnostic = error.diagnostic()
+            # The journal could not record the failure, but this process must still stop.
+            self.state["failed"] = {"operation": op, "error": diagnostic}
+            return {"ok": False, "blocking": True, "op": op, "error": diagnostic, **self.summary()}
         except InputError as error:
             # If a write was already attempted, this is a workflow failure, not an editable input.
             if self.state["phase"] not in {"submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:
@@ -604,7 +795,7 @@ class Worker:
     def heartbeat(self):
         while not self.stop_heartbeat.wait(60):
             with self.mutex:
-                if self.state["phase"] == "claimed" and not self.state.get("failed"):
+                if self.state["phase"] in {"claimed", "drafted"} and not self.state.get("failed"):
                     try:
                         self.renew_if_needed()
                     except (ClientError, OSError, ValueError, KeyError, InputError):
@@ -642,7 +833,7 @@ def main():
     finally:
         worker.stop_heartbeat.set()
         heartbeat.join(timeout=95)
-        if worker.state["phase"] == "claimed":
+        if worker.state["phase"] in {"claimed", "drafted"}:
             try:
                 worker.release()
             except (ClientError, OSError, ValueError, InputError):

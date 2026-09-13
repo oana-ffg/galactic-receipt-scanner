@@ -85,7 +85,8 @@ printed components of a complete financial document and confirming an actual dis
 
 POST `/api/processing/submit` with `{token,model,extraction,documents?,ocr_resolution?}`.
 Use the actual model: gpt-5.6-luna for small, gpt-6-astra for large. **Omit documents when
-grouping is unchanged**; extraction is not a legacy document record.
+grouping and page layout are unchanged**; include copied document records when saving
+new crop/rotation bounds. Extraction is not a legacy document record.
 
 The server saves provenance, computes arithmetic and compares numeric readings with saved
 plain OCR. Missing OCR or unresolved disagreements cap high certainty at medium. Astra

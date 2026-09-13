@@ -103,6 +103,42 @@ def post_saved(route, request_name, response_name):
     return result
 ```
 
+### Pixel-only previews for the fallback path
+
+Use the prepared PDF layout code before any OCR, including Astra's independent reading.
+`client.image_pdf(pages, directory)` creates no searchable layer and makes no server write.
+Its page inputs contain verified `path`, `captureId`, `sha256`, `rotation`, and optional
+`crop`/`quad`. Omit `crop` to use the detected outline plus margin; explicit null means
+the complete source and requires a deliberate visual choice. Reuse a saved non-null
+crop. Save returned `layouts` and apply them to the copied database page records.
+
+```python
+def preview_pages(pages, sources, label):
+    by_id = {source["capture_id"]: source for source in sources}
+    inputs = []
+    for page in pages:
+        source = by_id[page["captureId"]]
+        assert source["sha256"] == page["sha256"]
+        item = {**page, "path": source["path"], "quad": source.get("quad")}
+        if item.get("crop") is None:
+            item.pop("crop", None)
+        inputs.append(item)
+    result = client.image_pdf(inputs, work / label)
+    save(label + "-layout.json", result)
+    prefix = work / label / "page"
+    subprocess.run([os.environ["RECEIPT_PDF_RENDERER"], "-r", "300", "-jpeg",
+                    result["path"], str(prefix)], check=True)
+    renders = sorted((work / label).glob("page-*.jpg"))
+    assert len(renders) == len(pages)
+    print(json.dumps({"previews": [str(path) for path in renders]}))
+    return result
+```
+
+Open every returned crop preview by default. Raw `source["path"]` remains available
+when a crop, grouping or completeness question requires it. For lookahead, construct
+provisional page objects from source IDs/hashes with rotation 0; a preview is not a
+grouping decision. Verify all retained crops before freezing the final ordered layout.
+
 Files are created without overwriting earlier attempts. Use a new attempt filename after
 a rejected request. Do not print credentials, the claim token, full OCR JSON (which contains
 base64 PDF text layers), or financial payloads into the coordinator's context.
@@ -126,7 +162,7 @@ Context returns `document`, `next_images`, `candidates`, rejected associations a
 truncation flags. Category listing is a JSON array, not an object with a `categories` key.
 Stop on a null claim. Never obtain a second claim to check the first one's status.
 
-### 2. Download and inspect originals, then prepare OCR
+### 2. Verify sources and inspect crop previews
 
 ```python
 claim = load("claim-response.json")["claim"]
@@ -139,14 +175,18 @@ sources = [client.original(cid, work / "originals") for cid in capture_ids]
 save("originals.json", sources)
 ```
 
-Open the returned `path` values with the worker's image-viewing tool and use your own
-vision. Each result already verifies source size/hash and includes `scanned_at`.
+Call `preview_pages` for the claimed pages and discovered lookahead, then inspect the
+returned crop images using your own vision. Original results verify source size/hash
+and include `scanned_at`; loading them privately does not require viewing full photos.
 Lookahead is inspection only; fetching an image does not attach or consume it. Inspect
 related candidates as required by the grouping rules; leave unrelated pages unconsumed.
 
-After choosing the retained pages from verified records, run
-`client.prepare(capture_id, work / "ocr")` for each retained page and save the returned
-metadata. This reuses source-matched OCR or runs the prepared CPU Tesseract, uploads its
+After visual grouping and saving `extraction-first-reading.json`, call `preview_pages`
+on exactly the retained ordered pages to freeze the image-only document PDF. Save its
+layouts into the copied document page records. Only then run
+`client.prepare(capture_id, work / "ocr", crop=final_page["crop"])` for every retained
+page and save the returned metadata. This reuses source/region-matched OCR or runs the
+prepared CPU Tesseract, uploads its
 artifact and verifies readback. Read only the OCR `text`/`lines` needed for comparison,
 never dump `text_only_pdf_layers`. Do not separately run/save OCR again after prepare
 succeeds. No installation or model download is part of this phase.
@@ -172,7 +212,10 @@ node --input-type=module -e 'import {readFileSync} from "node:fs"; import {join}
 ```
 
 Arithmetic output is comparison evidence, not permission to change printed digits.
-Correct malformed fields locally before a production POST. For unchanged grouping:
+Correct malformed fields locally before a production POST. Complete the frozen-layout
+and OCR sequence above before submission. The abbreviated call below applies only when
+grouping AND saved crop/rotation are unchanged. Otherwise include copied document records
+with the exact finalized page layouts, as in the grouping recipe, even if no pages move:
 
 ```python
 claim = load("claim-response.json")["claim"]
@@ -425,7 +468,10 @@ save("originals.json", sources)
 save("categories.json", client.get("/api/processing/categories"))
 ```
 
-Open those originals with your own vision; do not fetch context or OCR yet.
+Call `preview_pages(claim["document"]["pages"], sources, "astra-independent")` and
+inspect every returned crop with your own vision; use raw originals when needed.
+Do not fetch context or OCR yet. Save chosen layouts and carry them into the reconciled
+document record after the independent checkpoint.
 After the independent visual reading, write `astra-draft-extraction.json` and validate
 it with the same local validator, changing only its input filename. Then:
 

@@ -10,24 +10,34 @@ if (!manifestPath || !outputPath)
   );
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const pdf = await PDFDocument.create();
+const layouts = [];
+if (manifest.mode !== undefined && manifest.mode !== "image-only")
+  throw Error("Invalid PDF mode.");
 for (const page of manifest.pages) {
   const bytes = await readFile(page.path);
   if (createHash("sha256").update(bytes).digest("hex") !== page.sha256)
     throw Error("Original checksum mismatch.");
-  const ocr = JSON.parse(await readFile(page.ocr_path, "utf8"));
+  const ocr =
+    manifest.mode === "image-only"
+      ? undefined
+      : JSON.parse(await readFile(page.ocr_path, "utf8"));
   if (
-    ocr.source?.sha256 !== page.sha256 ||
-    ocr.source?.captureId !== page.captureId
+    ocr &&
+    (ocr.source?.sha256 !== page.sha256 ||
+      ocr.source?.captureId !== page.captureId)
   )
     throw Error("OCR belongs to another source.");
-  await addReceiptPage(
+  const layout = await addReceiptPage(
     pdf,
     bytes,
     bytes[0] === 137 ? "image/png" : "image/jpeg",
     page.rotation,
     page.crop,
     ocr,
+    page.quad,
+    manifest.mode === "image-only",
   );
+  layouts.push({ captureId: page.captureId, sha256: page.sha256, ...layout });
 }
 const bytes = await pdf.save();
 if (bytes.length > 32 * 1024 * 1024)
@@ -41,6 +51,7 @@ console.log(
     pages: pdf.getPageCount(),
     sha256: createHash("sha256").update(bytes).digest("hex"),
     bytes: bytes.length,
-    searchable: true,
+    searchable: manifest.mode !== "image-only",
+    layouts,
   }),
 );

@@ -24,7 +24,7 @@ export class ReceiptOcr {
       return worker;
     }));
   }
-  async transcribe(id: string) {
+  async transcribe(id: string, crop?: [number, number, number, number] | null) {
     const { capture, blob } = await readOriginal(id);
     if (!capture.is_current || capture.status !== "accepted")
       throw new Error("Choose the current accepted take before transcription.");
@@ -40,6 +40,7 @@ export class ReceiptOcr {
         eng: models["ocr/eng.traineddata.gz"].sha256,
       },
       capture.metadata.quality?.quad,
+      crop,
     );
     const body = JSON.stringify(artifact);
     const expected = await sha256(new TextEncoder().encode(body));

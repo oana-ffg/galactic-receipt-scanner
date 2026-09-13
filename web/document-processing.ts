@@ -39,6 +39,21 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
       const { capture, blob } = await readOriginal(page.captureId);
       if (capture.sha256 !== page.sha256)
         throw Error("Source hash changed; inspect the original.");
+      const bitmap = await createImageBitmap(blob);
+      const pixels = [bitmap.width, bitmap.height];
+      bitmap.close();
+      const crop = page.crop ?? [0, 0, ...pixels];
+      const matchesRegion = (value: OcrArtifact) => {
+        const region = value.source?.region;
+        return (
+          value.source?.pixels?.[0] === pixels[0] &&
+          value.source.pixels[1] === pixels[1] &&
+          region?.left === crop[0] &&
+          region.top === crop[1] &&
+          region.width === crop[2] - crop[0] &&
+          region.height === crop[3] - crop[1]
+        );
+      };
       let ocr: OcrArtifact | null = null;
       const detail = await api<{
         artifacts: { kind: string; sha256: string }[];
@@ -52,18 +67,21 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
           value.source.captureId === page.captureId &&
           typeof value.provenance?.engine === "string" &&
           value.provenance.engine.startsWith("tesseract.js") &&
-          value.text_only_pdf_layers?.length
+          value.text_only_pdf_layers?.length &&
+          matchesRegion(value)
         ) {
           ocr = value;
           break;
         }
       }
       if (!ocr) {
-        const result = await engine.transcribe(page.captureId);
+        const result = await engine.transcribe(page.captureId, page.crop);
         ocr = await api<OcrArtifact>(
           `/api/files/${page.captureId}/ocr?version=${result.sha256}`,
         );
       }
+      if (!matchesRegion(ocr))
+        throw Error("OCR does not match the final PDF page region.");
       await addReceiptPage(
         pdf,
         new Uint8Array(await blob.arrayBuffer()),
@@ -95,15 +113,8 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
   });
   if (result.sha256 !== (await sha256(data as Uint8Array<ArrayBuffer>)))
     throw new Error("PDF save checksum mismatch.");
-  const response = await fetch(
-    `/api/documents/${doc.id}/pdf?revision=${result.revision}&version=${result.sha256}`,
-    { credentials: "same-origin", cache: "no-store", redirect: "error" },
-  );
-  if (
-    !response.ok ||
-    (await sha256(await response.arrayBuffer())) !== result.sha256
-  )
-    throw new Error("Stored PDF could not be verified.");
+  if (result.revision !== doc.revision)
+    throw Error("PDF save revision mismatch.");
   return result;
 }
 

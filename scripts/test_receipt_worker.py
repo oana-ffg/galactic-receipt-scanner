@@ -1,5 +1,7 @@
 """Synthetic protocol/state tests; never contact a deployed scanner."""
 from copy import deepcopy
+from contextlib import contextmanager
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -16,6 +18,23 @@ DID = "00000000-0000-4000-8000-000000000001"
 OTHER = "00000000-0000-4000-8000-000000000002"
 FOREIGN = "00000000-0000-4000-8000-000000000003"
 TOKEN = "synthetic-claim-token"
+
+
+@contextmanager
+def windows_replace_failure(*, fail_at, retry_once=False):
+    """Make one journal replace transiently or permanently unavailable on Windows."""
+    real_replace = module.os.replace
+    calls = 0
+
+    def replace(temporary, destination):
+        nonlocal calls
+        calls += 1
+        if calls == fail_at or (not retry_once and calls >= fail_at):
+            raise PermissionError(errno.EACCES, "synthetic access denied")
+        return real_replace(temporary, destination)
+
+    with patch.object(module.os, "name", "nt"), patch.object(module.os, "replace", side_effect=replace), patch.object(module.time, "sleep"):
+        yield lambda: calls
 
 
 def extraction():
@@ -46,6 +65,7 @@ class FakeScanner:
         self.lost_pdf = False
         self.lost_pdf_before_storage = False
         self.pdf_uploads = []
+        self.pdf_calls = 0
         self.lost_claim = False
 
     def get(self, path):
@@ -112,15 +132,29 @@ class FakeScanner:
         path.write_bytes(self.raw[cid])
         return {"capture_id": cid, "path": str(path), "sha256": hashlib.sha256(self.raw[cid]).hexdigest()}
 
-    def prepare(self, cid, directory):
+    def image_pdf(self, pages, directory):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / ("pixel-" + str(len(list(directory.glob("*.pdf")))) + ".pdf")
+        path.write_bytes(b"%PDF-synthetic-pixels")
+        layouts = []
+        for page in pages:
+            crop = page.get("crop", [1, 2, 9, 18])
+            layouts.append(dict(captureId=page["captureId"], sha256=page["sha256"],
+                                pixels=[10, 20], crop=crop, rotation=page.get("rotation", 0)))
+        return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    pages=len(pages), layouts=layouts, searchable=False)
+
+    def prepare(self, cid, directory, *, crop=None):
         result = self.original(cid, directory)
         ocr = Path(directory) / (cid + ".json")
         ocr.write_text(json.dumps({"text": "Synthetic text", "lines": [], "text_only_pdf_layers": [{"base64": "must-not-escape"}]}))
-        return {**result, "ocr_path": str(ocr)}
+        return {**result, "ocr_path": str(ocr), "crop": crop}
 
     def pdf(self, did, directory, before_upload=None):
+        self.pdf_calls += 1
         directory = Path(directory)
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, exist_ok=True)
         path = directory / "synthetic.pdf"
         path.write_bytes(b"%PDF-synthetic-test-only")
         sha = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -167,6 +201,7 @@ class WorkerTests(unittest.TestCase):
             worker.state["rendered"] = ["synthetic-render"] * worker.state["pdf"]["pages"]
             return {"pages": worker.state["rendered"], "dpi": dpi}
         worker.render = render
+        worker.render_file = lambda path, pages, dpi, label: [f"synthetic-{label}-{i + 1}.jpg" for i in range(pages)]
         return worker
 
     def send(self, op, **fields):
@@ -180,17 +215,20 @@ class WorkerTests(unittest.TestCase):
         self.send("claim", viewer_checked=True)
         self.send("context")
 
-    def prepared(self, ids=(DID,)):
+    def prepared(self, ids=(DID,), *, grouping=None, value=None, layouts=None):
         self.claimed()
-        self.send("originals", capture_ids=list(ids))
+        self.send("previews", capture_ids=list(ids), **({"layouts": layouts} if layouts else {}))
+        self.send("draft", extraction=value or extraction(), **({"grouping": grouping} if grouping else {}))
         self.send("prepare", capture_ids=list(ids))
 
     def test_complete_one_document_protocol(self):
         self.prepared()
+        self.assertEqual(self.worker.state["draft"]["layouts"][0]["crop"], [1, 2, 9, 18])
+        self.assertEqual(self.worker.state["draft"]["target"]["pages"][0]["crop"], [1, 2, 9, 18])
         self.send("categories")
         self.send("category", name="Synthetic category", description="Synthetic category description")
         self.send("validate", extraction=extraction())
-        self.send("submit", extraction=extraction())
+        self.send("submit")
         self.send("document", document_id=DID)
         self.send("pdf")
         result = self.send("attest", all_pages_inspected=True, evidence="Synthetic page inspected.")
@@ -199,6 +237,54 @@ class WorkerTests(unittest.TestCase):
         self.send("quit")
         self.assertNotIn(("POST", "/api/processing/release"), self.fake.calls)
         self.assertFalse(self.worker.handle({"op": "claim", "viewer_checked": True})["ok"])
+        self.worker.lock.close()
+        self.worker = self.make_worker()
+        self.assertEqual(self.worker.state["phase"], "ready")
+
+    def test_explicit_raw_preview_freezes_full_original_pixel_bounds(self):
+        self.claimed()
+        result = self.send("previews", capture_ids=[DID], layouts={DID: {"crop": None, "rotation": 90}})
+        self.assertEqual(result[0]["layout"]["crop"], [0, 0, 10, 20])
+        self.assertEqual(result[0]["layout"]["rotation"], 90)
+        self.send("draft", extraction=extraction())
+        self.send("prepare", capture_ids=[DID])
+        self.assertEqual(self.worker.state["prepared"][DID]["crop"], [0, 0, 10, 20])
+        self.send("submit")
+        self.assertEqual(self.fake.documents[DID]["pages"][0]["crop"], [0, 0, 10, 20])
+        self.assertEqual(self.fake.documents[DID]["pages"][0]["rotation"], 90)
+
+    def test_rotation_only_override_cannot_authorize_undetected_raw_layout(self):
+        self.claimed()
+        original_image_pdf = self.fake.image_pdf
+
+        def undetected(pages, directory):
+            result = original_image_pdf(pages, directory)
+            result["layouts"][0]["crop"] = None
+            return result
+
+        self.fake.image_pdf = undetected
+        result = self.worker.handle({"op": "previews", "capture_ids": [DID],
+                                     "layouts": {DID: {"rotation": 90}}})
+        self.assertFalse(result["ok"])
+        self.assertIn("explicitly choose crop bounds or raw", result["input_error"])
+        self.assertNotIn(DID, self.worker.state["layouts"])
+
+    def test_invalid_preview_override_stops_before_draft_or_remote_write(self):
+        self.claimed()
+        before = len(self.fake.calls)
+        result = self.worker.handle({"op": "previews", "capture_ids": [DID],
+                                     "layouts": {DID: {"crop": [0, 0, 11, 20], "rotation": 0}}})
+        self.assertTrue(result["blocking"])
+        self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertFalse(self.worker.state.get("draft"))
+        self.assertNotIn(("POST", "/api/processing/submit"), self.fake.calls[before:])
+
+    def test_prepare_requires_frozen_draft(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        result = self.worker.handle({"op": "prepare", "capture_ids": [DID]})
+        self.assertFalse(result["ok"])
+        self.assertNotIn(DID, self.worker.state["prepared"])
 
     def test_unknown_operations_and_undiscovered_sources_never_call_network(self):
         self.claimed()
@@ -232,7 +318,7 @@ class WorkerTests(unittest.TestCase):
     def test_lost_submit_response_preserves_exact_bytes_for_owner_resume(self):
         self.prepared()
         self.fake.lost_submit = True
-        failed = self.worker.handle({"op": "submit", "extraction": extraction()})
+        failed = self.worker.handle({"op": "submit"})
         self.assertTrue(failed["blocking"])
         self.assertEqual(self.worker.state["phase"], "submit-uncertain")
         self.assertFalse(self.send("release")["released"])
@@ -251,27 +337,28 @@ class WorkerTests(unittest.TestCase):
     def test_grouping_preserves_sources_and_annotations(self):
         self.fake.documents[OTHER]["annotations"] = [{"captureId": OTHER, "text": "synthetic prior annotation"}]
         self.fake.documents[OTHER]["handwriting"] = "present"
-        self.prepared((DID, OTHER))
         e = extraction()
         e["has_handwriting"] = True
-        self.send("submit", extraction=e, grouping={"donor_ids": [OTHER], "capture_ids": [DID, OTHER], "evidence": "Synthetic continuation page match."})
+        grouping = {"donor_ids": [OTHER], "capture_ids": [DID, OTHER], "evidence": "Synthetic continuation page match."}
+        self.prepared((DID, OTHER), grouping=grouping, value=e)
+        self.send("submit")
         self.assertEqual([p["captureId"] for p in self.fake.documents[DID]["pages"]], [DID, OTHER])
         self.assertEqual(len(self.fake.documents[DID]["annotations"]), 1)
         self.assertEqual(self.fake.documents[OTHER]["pages"], [])
         self.assertEqual(self.fake.documents[OTHER]["mergedInto"], DID)
 
     def test_valid_no_filename_outcome_finishes_without_pdf(self):
-        self.prepared()
         e = extraction()
         e["vendor"] = None
-        self.send("submit", extraction=e)
+        self.prepared(value=e)
+        self.send("submit")
         result = self.send("pdf")
         self.assertFalse(result["pdf_applicable"])
         self.assertEqual(result["phase"], "complete")
 
     def test_pdf_attestation_refuses_changed_local_bytes(self):
         self.prepared()
-        self.send("submit", extraction=extraction())
+        self.send("submit")
         self.send("pdf")
         Path(self.worker.state["pdf"]["path"]).write_bytes(b"corrupted")
         result = self.worker.handle({"op": "attest", "all_pages_inspected": True, "evidence": "Synthetic inspection."})
@@ -295,9 +382,76 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.state["phase"], "released")
         self.assertNotIn(("POST", "/api/processing/release"), self.fake.calls)
 
+    def test_transient_windows_claim_checkpoint_retries_before_the_request(self):
+        with windows_replace_failure(fail_at=2, retry_once=True) as calls:
+            self.send("claim", viewer_checked=True)
+
+        self.assertEqual(calls(), 5)  # input, failed intent, retry, result, response
+        self.assertEqual(self.fake.calls.count(("POST", "/api/processing/claim")), 1)
+        self.assertEqual(self.worker.state["phase"], "claimed")
+
+    def test_permanent_claim_checkpoint_failure_never_posts_or_becomes_possibly_active(self):
+        with windows_replace_failure(fail_at=2):
+            result = self.worker.handle({"op": "claim", "viewer_checked": True})
+
+        self.assertTrue(result["blocking"])
+        self.assertEqual(result["phase"], "ready")
+        self.assertEqual(result["claim_state"], "closed")
+        self.assertNotIn(("POST", "/api/processing/claim"), self.fake.calls)
+        self.assertIn("PermissionError, errno=13", result["error"])
+        self.assertNotIn("synthetic access denied", result["error"])
+        self.assertFalse(self.worker.handle({"op": "claim", "viewer_checked": True})["ok"])
+        self.assertTrue(self.send("quit")["released"] is False)
+
+    def test_claim_checkpoint_write_failure_never_posts_or_becomes_possibly_active(self):
+        real_write = module.write_new_file
+        calls = 0
+
+        def write(path, value):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise PermissionError(errno.EACCES, "synthetic access denied")
+            return real_write(path, value)
+
+        with patch.object(module, "write_new_file", side_effect=write):
+            result = self.worker.handle({"op": "claim", "viewer_checked": True})
+
+        self.assertTrue(result["blocking"])
+        self.assertEqual(result["phase"], "ready")
+        self.assertEqual(result["claim_state"], "closed")
+        self.assertNotIn(("POST", "/api/processing/claim"), self.fake.calls)
+
+    def test_submit_intent_checkpoint_failure_does_not_send_a_write(self):
+        self.prepared()
+        with windows_replace_failure(fail_at=3):
+            submit = self.worker.handle({"op": "submit"})
+        self.assertEqual(submit["phase"], "drafted")
+        self.assertNotIn(("POST", "/api/processing/submit"), self.fake.calls)
+        self.assertTrue(self.send("release")["released"])
+
+    def test_pdf_intent_checkpoint_failure_does_not_upload(self):
+        self.prepared()
+        self.send("submit")
+        with windows_replace_failure(fail_at=3):
+            pdf = self.worker.handle({"op": "pdf"})
+        self.assertEqual(pdf["phase"], "submitted")
+        self.assertEqual(self.fake.pdf_calls, 1)
+        self.assertNotIn("pdf", self.fake.documents[DID])
+
+    def test_attestation_intent_checkpoint_failure_does_not_send_a_write(self):
+        self.prepared()
+        self.send("submit")
+        self.send("pdf")
+        with windows_replace_failure(fail_at=3):
+            attest = self.worker.handle({"op": "attest", "all_pages_inspected": True,
+                                         "evidence": "Synthetic inspection."})
+        self.assertEqual(attest["phase"], "pdf")
+        self.assertNotIn(("POST", "/api/processing/pdf-review"), self.fake.calls)
+
     def test_lost_pdf_ack_recovers_local_file_without_upload_or_regeneration(self):
         self.prepared()
-        self.send("submit", extraction=extraction())
+        self.send("submit")
         self.fake.lost_pdf = True
         result = self.worker.handle({"op": "pdf"})
         self.assertEqual(result["phase"], "pdf-uncertain")
@@ -311,15 +465,15 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(all(call[0] == "GET" for call in self.fake.calls[before:]))
 
     def test_submit_readback_failure_resumes_without_replaying_mutation(self):
-        self.prepared((DID, OTHER))
+        grouping = {"donor_ids": [OTHER], "capture_ids": [DID, OTHER], "evidence": "Synthetic merge."}
+        self.prepared((DID, OTHER), grouping=grouping)
         original_get = self.fake.get
         def get(path):
             if self.fake.submitted and path == "/api/documents/" + OTHER:
                 raise ClientError("Synthetic readback failure")
             return original_get(path)
         self.fake.get = get
-        result = self.worker.handle({"op": "submit", "extraction": extraction(),
-            "grouping": {"donor_ids": [OTHER], "capture_ids": [DID, OTHER], "evidence": "Synthetic merge."}})
+        result = self.worker.handle({"op": "submit"})
         self.assertEqual(result["phase"], "submit-readback")
         self.fake.get = original_get
         self.worker.lock.close()
@@ -330,7 +484,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_missing_pdf_retries_identical_saved_bytes_after_explicit_resume(self):
         self.prepared()
-        self.send("submit", extraction=extraction())
+        self.send("submit")
         self.fake.lost_pdf_before_storage = True
         self.assertTrue(self.worker.handle({"op": "pdf"})["blocking"])
         intent = self.worker.state["pdf_intent"]
@@ -343,7 +497,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_pdf_recovery_never_uploads_over_a_different_server_artifact(self):
         self.prepared()
-        self.send("submit", extraction=extraction())
+        self.send("submit")
         self.fake.lost_pdf = True
         self.assertTrue(self.worker.handle({"op": "pdf"})["blocking"])
         self.fake.documents[DID]["pdf"]["sha256"] = "f" * 64
