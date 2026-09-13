@@ -4,6 +4,7 @@ import config from "./playwright.config";
 export default defineConfig({
   ...config,
   testMatch: [
+    "**/audio.spec.ts",
     "**/quality.spec.ts",
     "**/generated.spec.ts",
     "**/layout.spec.ts",

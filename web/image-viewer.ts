@@ -49,7 +49,10 @@ export function inspectImage(options: {
     check.onchange = () => {
       svg.style.visibility = check.checked ? "visible" : "hidden";
     };
-    edges.append(check, "Detected edges");
+    edges.append(
+      check,
+      options.capture?.manual_outline ? "Corrected outline" : "Detected edges",
+    );
     controls.append(edges);
   }
   const fit = () => {

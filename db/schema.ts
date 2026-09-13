@@ -206,3 +206,22 @@ export const processingConfirmations = sqliteTable("processing_confirmations", {
   sha256: text("sha256").notNull(),
   created_at: text("created_at").notNull(),
 });
+// Append-only manual outlines; capture metadata and source bytes stay immutable.
+export const captureOutlines = sqliteTable(
+  "capture_outlines",
+  {
+    id: text("id").primaryKey(),
+    capture_id: text("capture_id")
+      .notNull()
+      .references(() => captures.id),
+    payload: text("payload").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    index("capture_outlines_capture_created").on(
+      table.capture_id,
+      table.created_at,
+      table.id,
+    ),
+  ],
+);

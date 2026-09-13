@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "92e8044e-87a0-43e6-ab2c-d1430566ba38",
-  "prevId": "ec5217e6-d763-4926-9a80-8d82336fce73",
+  "id": "a3361ecf-6b43-439a-b351-0f3001a0ce86",
+  "prevId": "92e8044e-87a0-43e6-ab2c-d1430566ba38",
   "tables": {
     "agent_connections": {
       "name": "agent_connections",
@@ -792,6 +792,65 @@
           "value": "\"processing_commits\".\"valid\" = 1"
         }
       }
+    },
+    "processing_confirmations": {
+      "name": "processing_confirmations",
+      "columns": {
+        "token": {
+          "name": "token",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "document_id": {
+          "name": "document_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "request": {
+          "name": "request",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "payload": {
+          "name": "payload",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "sha256": {
+          "name": "sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
     },
     "processing_drafts": {
       "name": "processing_drafts",

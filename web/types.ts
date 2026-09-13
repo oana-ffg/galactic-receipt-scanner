@@ -56,6 +56,8 @@ export interface Quality {
   empty?: boolean;
   /** Last paper area is clear even at the most inclusive segmentation cut. */
   emptyStrong?: boolean;
+  /** No outline, substantially darker old paper area, near the empty cutoff. */
+  emptyUncertain?: boolean;
   motion?: number;
   focus?: number;
   contrast?: number;
@@ -116,6 +118,7 @@ export interface ScanState {
       | "hands-unchecked"
       | "hands-present"
       | "confirming"
+      | "uncertain"
       | "removed";
     elapsedMs: number;
     gapMs?: number;
@@ -140,6 +143,13 @@ export interface Capture {
   ocr_error: string | null;
   outputs: { image: boolean; pdf: boolean };
   acceptedCount?: number;
+  manual_outline?: {
+    id: string;
+    source_sha256: string;
+    quad: number[][];
+    note: string;
+    created_at: string;
+  } | null;
   metadata: { quality?: Quality; sourcePixels?: number[] };
 }
 

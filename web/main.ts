@@ -1,3 +1,4 @@
+import { ScannerAudio } from "./audio";
 import { clockNow } from "./delivery-timing";
 import QRCode from "qrcode";
 import { api } from "./api";
@@ -5,11 +6,19 @@ import { StateOrder } from "./state-order";
 import { PhoneCamera } from "./camera";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
 import { messageOf } from "./errors";
+// Reporting must stay available when a deployment replaces lazy asset URLs.
+import { mountIssues, reportIssue } from "./issues";
 import type { ScanState } from "./types";
 import { CaptureLibrary } from "./library";
 import "./style.css";
-import { diagnostics, recordScanState, startDiagnostics } from "./diagnostics";
+import {
+  audioDiagnostics,
+  diagnostics,
+  recordScanState,
+  startDiagnostics,
+} from "./diagnostics";
 import { MediaRate } from "./media-diagnostics";
+import { PreviewOverlay } from "./preview-overlay";
 
 startDiagnostics();
 
@@ -18,23 +27,25 @@ const isCamera = location.pathname === "/camera";
 let library: CaptureLibrary | undefined;
 let lastState: ScanState | undefined;
 let retakePending: string | null = null;
+let previewOverlay: PreviewOverlay | undefined;
 
 if (location.pathname === "/agent-access") {
   void import("./agent-access").then((module) => module.mountAgentAccess(app));
 } else if (location.pathname === "/review") {
   void import("./review").then((module) => module.mountReview(app));
 } else if (location.pathname === "/issues") {
-  void import("./issues").then((module) => module.mountIssues(app));
+  void mountIssues(app);
 } else {
   app.classList.toggle("camera-page", isCamera);
   app.innerHTML = `
-    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/review">Review receipts</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a><button id="report-issue" class="secondary">Report issue</button><a href="/signout-with-chatgpt">Sign out</a></header>
+    <header><div><h1>Galactic receipt scanner</h1><p>${isCamera ? "Phone camera" : "Private capture station"}</p></div><div class="counter" title="Current saved pictures; retakes count once"><strong id="count" aria-label="Saved count not loaded">—</strong><span>saved pics</span></div><a href="/review">Review receipts</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a><div class="report-control"><button id="report-issue" class="secondary">Report issue</button><p id="report-error" class="error" role="alert" hidden></p></div><a href="/signout-with-chatgpt">Sign out</a></header>
     <section id="signal" class="signal red" role="status" aria-live="polite"><span id="light"></span><div><strong id="phase">${isCamera ? "ENABLE CAMERA" : "CONNECTING"}</strong><p id="status">${isCamera ? "Tap Enable camera below, then allow camera access." : "Connecting to your private scanner…"}</p></div></section>
     ${isCamera ? '<div class="camera-start"><button id="enable">Enable camera</button><p>Scanning starts automatically once the camera is ready.</p></div>' : ""}
     ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label>'}<button id="force" class="secondary" disabled>Force take</button><button id="set-background" class="secondary" title="Clear all paper and hands first. Set again after moving the phone or changing the lighting." disabled>Set empty desk</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label><button id="test-audio" class="secondary">Test audio</button>'}<button id="force" class="secondary" disabled>Force take</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    ${isCamera ? "" : '<p id="audio-warning" class="error" role="status"></p>'}
     <p id="background-status" class="detail" role="status" hidden></p>
     <p id="save-recovery" class="error save-recovery" role="alert" hidden></p><p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
     ${isCamera ? "" : '<aside><section id="saved-photo" class="saved-photo"><h2>Last photo saved</h2><p>No photo saved yet.</p></section><details><summary>Connect your phone</summary><canvas id="qr"></canvas><p>Scan with the phone camera, then tap <strong>Enable camera</strong>.</p><a id="phone-link">Open camera page</a><p class="muted">Sign in with your owner account on both devices.</p></details><details><summary>Capture checks</summary><p>Paper outline, stable view, detected hands, print contrast, focus and saved image dimensions.</p><p>Green means the image passed these checks and was saved. Check your first few scans for missed fingers, glare and tiny print.</p></details></aside>'}
@@ -42,13 +53,19 @@ if (location.pathname === "/agent-access") {
     ${isCamera ? "" : '<section class="library"><div class="library-heading"><h2>Recent captures</h2><span>Originals stay intact · OCR is unverified</span></div><div id="captures"><p class="muted">No captures yet.</p></div><nav class="pagination" aria-label="Capture pages"><button id="captures-previous" class="secondary" disabled>Newer</button><span id="captures-page">Page 1</span><button id="captures-next" class="secondary" disabled>Older</button></nav></section>'}`;
   element("report-issue").onclick = async () => {
     const button = element<HTMLButtonElement>("report-issue");
+    const feedback = element("report-error");
+    feedback.hidden = true;
+    feedback.textContent = "";
     button.disabled = true;
+    button.textContent = "Preparing report…";
     try {
-      await (await import("./issues")).reportIssue(lastState);
+      await reportIssue(lastState);
     } catch (problem) {
-      error(`Could not prepare the screenshot: ${messageOf(problem)}`);
+      feedback.textContent = `Could not prepare the report: ${messageOf(problem)} Tap Report issue to try again.`;
+      feedback.hidden = false;
     } finally {
       button.disabled = false;
+      button.textContent = "Report issue";
     }
   };
   if (isCamera) mountCamera();
@@ -74,6 +91,7 @@ function renderCount(count: number): void {
 function renderState(state: ScanState): void {
   recordScanState(state);
   lastState = state;
+  previewOverlay?.update(state);
   if (retakePending && state.selectedRetake && state.retakeOf === retakePending)
     retakePending = null;
   library?.updateState(state);
@@ -85,19 +103,15 @@ function renderState(state: ScanState): void {
     Boolean(state.activeId) ||
     state.recovery === "upload" ||
     Boolean(retakePending);
-  element<HTMLButtonElement>("set-background").disabled =
-    !state.supportsBackground ||
+  // Keep reset available for an already-open phone running the old client.
+  element<HTMLButtonElement>("clear-background").hidden =
+    !state.backgroundReady || !state.supportsBackgroundReset;
+  element<HTMLButtonElement>("clear-background").disabled =
+    !state.supportsBackgroundReset ||
     !state.cameraConnected ||
     !state.detectorReady ||
     Boolean(state.activeId) ||
     state.recovery === "upload";
-  element<HTMLButtonElement>("clear-background").hidden =
-    !state.backgroundReady || !state.supportsBackgroundReset;
-  element<HTMLButtonElement>("clear-background").disabled =
-    element<HTMLButtonElement>("set-background").disabled ||
-    !state.supportsBackgroundReset;
-  element<HTMLButtonElement>("set-background").textContent =
-    state.backgroundReady ? "Recalibrate empty desk" : "Set empty desk";
   element("background-status").textContent = state.backgroundMessage ?? "";
   element("background-status").hidden = !state.backgroundMessage;
   element<HTMLButtonElement>("cancel-retake").hidden = !state.selectedRetake;
@@ -181,6 +195,8 @@ function renderState(state: ScanState): void {
 }
 
 function disconnected(reason = "Connection lost. Waiting to reconnect…"): void {
+  previewOverlay?.update();
+  previewOverlay?.setMedia(null);
   diagnostics.record("network", { connected: false, source: "station" }, 2000);
   for (const id of [
     "start",
@@ -189,7 +205,6 @@ function disconnected(reason = "Connection lost. Waiting to reconnect…"): void
     "recover",
     "force",
     "cancel-retake",
-    "set-background",
     "clear-background",
   ]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
@@ -247,8 +262,6 @@ function mountCamera(): void {
     }
   };
   element("recover").onclick = () => void camera.recover();
-  element("set-background").onclick = () => camera.setBackground();
-  element("clear-background").onclick = () => camera.clearBackground();
   element("retake").onclick = () => camera.retake();
   element("force").onclick = () => void camera.force();
   element("cancel-retake").onclick = () =>
@@ -258,6 +271,7 @@ function mountCamera(): void {
 }
 
 function mountDashboard(): void {
+  previewOverlay = new PreviewOverlay(element("preview"));
   library = new CaptureLibrary(async (id) => {
     if (retakePending)
       throw new Error("Wait for the phone to acknowledge the selected retake.");
@@ -283,7 +297,6 @@ function mountDashboard(): void {
   let lastSaved: string | null = null;
   let lastError = "";
   let needsAttention = false;
-  let audio: AudioContext | null = null;
   const live = element<HTMLVideoElement>("live-feed");
   const stateOrder = new StateOrder();
   diagnostics.record("preview.latency", {
@@ -342,6 +355,7 @@ function mountDashboard(): void {
     (state, sentAt) => acceptState(state, "direct", sentAt),
     () => {},
     (stream) => {
+      previewOverlay?.setMedia(null);
       live.srcObject = stream;
       lastVideoFrame = 0;
       decodedFrames = 0;
@@ -362,41 +376,38 @@ function mountDashboard(): void {
   } catch {
     audioToggle.checked = true;
   }
-  function enableAudio() {
-    if (audioToggle.checked) {
-      audio ??= new AudioContext();
-      void audio.resume().catch(() => {});
-    }
-  }
-  document.addEventListener("pointerdown", enableAudio, { once: true });
-  document.addEventListener("keydown", enableAudio, { once: true });
+  const audio = new ScannerAudio(audioToggle.checked, (message) => {
+    element("audio-warning").textContent = message;
+  });
+  const recoverAudio = () => {
+    void audio.recover("gesture");
+  };
+  document.addEventListener("pointerdown", recoverAudio);
+  document.addEventListener("keydown", recoverAudio);
+  window.addEventListener("focus", () => {
+    void audio.recover("focus");
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void audio.recover("visible");
+  });
+  navigator.mediaDevices?.addEventListener("devicechange", () => {
+    void audio.recover("device-change");
+  });
+  const testAudio = element<HTMLButtonElement>("test-audio");
+  testAudio.disabled = !audioToggle.checked;
+  testAudio.onclick = () => {
+    void audio.play(true, "test");
+  };
   audioToggle.onchange = () => {
     try {
       localStorage.setItem("scanner-audio", audioToggle.checked ? "on" : "off");
     } catch {
       /* Keep the current choice when browser storage is unavailable. */
     }
-    enableAudio();
+    testAudio.disabled = !audioToggle.checked;
+    audio.setEnabled(audioToggle.checked);
   };
-  function sound(success: boolean): void {
-    if (!audioToggle.checked || !audio) return;
-    for (let i = 0; i < (success ? 1 : 3); i++) {
-      const oscillator = audio.createOscillator();
-      const gain = audio.createGain();
-      const start = audio.currentTime + i * 0.3;
-      oscillator.type = success ? "sine" : "sawtooth";
-      oscillator.frequency.setValueAtTime(success ? 880 : 180, start);
-      if (!success)
-        oscillator.frequency.exponentialRampToValueAtTime(80, start + 0.22);
-      gain.gain.setValueAtTime(0.001, start);
-      gain.gain.linearRampToValueAtTime(success ? 0.12 : 0.09, start + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.22);
-      oscillator.connect(gain);
-      gain.connect(audio.destination);
-      oscillator.start(start);
-      oscillator.stop(start + 0.24);
-    }
-  }
+  void audio.recover("startup");
   let deliveryPhase = "";
   function acceptState(
     state: ScanState,
@@ -426,7 +437,14 @@ function mountDashboard(): void {
     if (state.needsAttention && !needsAttention) void refreshLibrary();
     needsAttention = !!state.needsAttention;
     if (state.lastSaved && state.lastSaved !== lastSaved) {
-      if (lastState) sound(!state.manualReview);
+      if (lastState)
+        void audio.play(!state.manualReview, "saved", state.stateRevision);
+      else
+        audioDiagnostics.record("audio", {
+          action: "skipped",
+          reason: "initial-state",
+          revision: state.stateRevision,
+        });
       void refreshLibrary();
     }
     if (
@@ -435,7 +453,7 @@ function mountDashboard(): void {
       lastState?.phase === "amber" &&
       !lastState.manualReview
     )
-      sound(false);
+      void audio.play(false, "rejected", state.stateRevision);
     lastSaved = state.lastSaved;
     lastError = state.message;
     renderState(state);
@@ -511,6 +529,7 @@ function mountDashboard(): void {
     const started = performance.now();
     if (!videoFresh()) {
       live.hidden = true;
+      previewOverlay?.setMedia(element<HTMLCanvasElement>("feed"));
       let status = 0;
       try {
         const response = await fetch("/api/station/preview", {
@@ -553,6 +572,7 @@ function mountDashboard(): void {
         );
         if (!videoFresh()) {
           element("feed").hidden = true;
+          previewOverlay?.setMedia(null);
           element("empty-preview").hidden = false;
           element("connection-warning").textContent =
             `Preview unavailable. ${messageOf(problem)}`;
@@ -562,6 +582,7 @@ function mountDashboard(): void {
       live.hidden = false;
       element("feed").hidden = true;
       element("empty-preview").hidden = true;
+      previewOverlay?.setMedia(live);
     }
     if (started - deliverySampleAt >= 2000) {
       deliverySampleAt = started;
@@ -603,7 +624,6 @@ function mountDashboard(): void {
     "recover",
     "force",
     "cancel-retake",
-    "set-background",
     "clear-background",
   ]) {
     element(id).onclick = async () => {
@@ -632,23 +652,7 @@ async function drawPreview(blob: Blob): Promise<void> {
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
   element("empty-preview").hidden = true;
-  // The overlay and preview share the same pixel coordinate system and aspect ratio.
-  const quality = lastState?.quality;
-  if (!quality) return;
-  ctx.lineWidth = 3;
-  function polygon(points: number[][], colour: string) {
-    ctx.strokeStyle = colour;
-    ctx.beginPath();
-    points.forEach(([x, y], i) =>
-      i === 0
-        ? ctx.moveTo(x * canvas.width, y * canvas.height)
-        : ctx.lineTo(x * canvas.width, y * canvas.height),
-    );
-    ctx.closePath();
-    ctx.stroke();
-  }
-  if (quality.quad) polygon(quality.quad, quality.ok ? "#57e0a5" : "#ffbc54");
-  quality.hands?.forEach((points) => polygon(points, "#ff6f7e"));
+  previewOverlay?.setMedia(canvas);
 }
 
 async function refreshLibrary(): Promise<void> {

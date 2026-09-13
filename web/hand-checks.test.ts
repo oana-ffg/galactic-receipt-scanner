@@ -219,3 +219,25 @@ it("checks independent failed/manual photos regardless of preview cooldown", () 
   expect(detect).toHaveBeenCalledTimes(1);
   expect(photo).toMatchObject({ ok: false, handsChecked: true, hands: hand });
 });
+
+it("checks each borderline removal frame afresh without treating it as empty", () => {
+  const checks = new HandChecks();
+  const uncertain = () => ({ ...empty(), empty: false, emptyUncertain: true });
+  const detect = vi.fn().mockReturnValueOnce(hand).mockReturnValue([]);
+  const blocked = checks.apply(uncertain(), removal, 0, scene, detect);
+  expect(blocked).toMatchObject({
+    empty: false,
+    handsChecked: true,
+    hands: hand,
+  });
+  const clear = checks.apply(uncertain(), removal, 150, scene, detect);
+  expect(clear).toMatchObject({
+    empty: false,
+    emptyUncertain: true,
+    handsChecked: true,
+    hands: [],
+  });
+  expect(detect).toHaveBeenCalledTimes(2);
+  checks.apply(uncertain(), capture, 300, scene, detect);
+  expect(detect).toHaveBeenCalledTimes(2);
+});

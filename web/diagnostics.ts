@@ -1,6 +1,7 @@
 import type { ScanState } from "./types";
 
 type Event =
+  | "audio"
   | "page"
   | "visibility"
   | "network"
@@ -87,7 +88,8 @@ export class DiagnosticHistory {
   }
 }
 
-export const diagnostics = new DiagnosticHistory(() => Date.now(), 16000);
+export const diagnostics = new DiagnosticHistory(() => Date.now(), 12000);
+export const audioDiagnostics = new DiagnosticHistory(() => Date.now(), 4000);
 // A separate budget prevents network chatter from evicting removal evidence.
 export const removalDiagnostics = new DiagnosticHistory(
   () => Date.now(),
@@ -188,6 +190,7 @@ export function recordScanState(state: ScanState) {
         armed: state.armed,
         empty: q.empty,
         strong: q.emptyStrong,
+        uncertain: q.emptyUncertain,
         handsChecked: q.handsChecked,
         hands: q.hands.length,
       },
@@ -278,6 +281,7 @@ export function diagnosticSnapshot() {
     visibility: document.visibilityState,
     online: navigator.onLine,
     history: diagnostics.snapshot(),
+    audioHistory: audioDiagnostics.snapshot(),
     removalHistory: removalDiagnostics.snapshot(),
     removalTransitions: removalTransitions.snapshot(),
     saveHistory: saveTimings.snapshot(),

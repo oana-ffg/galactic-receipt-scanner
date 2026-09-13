@@ -31,6 +31,7 @@ export class HandChecks {
   ): Quality {
     const candidate = quality.ok;
     const empty = quality.empty === true;
+    const uncertain = quality.emptyUncertain === true;
     quality.ok = false;
     quality.empty = false;
     quality.handsChecked = false;
@@ -43,7 +44,7 @@ export class HandChecks {
       const captureDue =
         this.candidateSince !== undefined &&
         now - this.candidateSince >= HAND_CHECK_LEAD_MS;
-      if (!captureDue && !(preview.removal && empty)) {
+      if (!captureDue && !(preview.removal && (empty || uncertain))) {
         // Preserve empty-desk feedback after rearming without running idle ML.
         // Removal still requires handsChecked, which remains false here.
         quality.empty = empty;

@@ -202,6 +202,11 @@ it("assigns legacy receipt identity without rewriting originals, metadata or art
     expect(
       (await db.prepare("PRAGMA foreign_key_check").all()).results,
     ).toEqual([]);
+    // Current read APIs also expose separately stored manual outlines.
+    for (const sql of (
+      await readFile("drizzle/0011_noisy_vector.sql", "utf8")
+    ).split("--> statement-breakpoint"))
+      if (sql.trim()) await db.prepare(sql).run();
     const migrated = await (
       await legacy.dispatchFetch(origin + `/api/captures/${id}`, {
         headers: ownerHeaders,

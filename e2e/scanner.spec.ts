@@ -443,6 +443,8 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     timeout: 2000,
   });
   console.log("Original capture benchmark ms", Date.now() - started);
+  await expect(page.locator("#live-feed")).toBeVisible();
+  await expect(page.locator("#preview-overlay polygon").first()).toBeVisible();
   const { captures } = await (await request.get("/api/captures")).json();
   expect(captures[0].outputs).toEqual({ image: false, pdf: false });
   await expect(phone.locator("#count")).toHaveText(String(captures.length));
@@ -459,6 +461,7 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
   await expect(phone.locator("#status")).toHaveText(
     "Ready for the next receipt.",
   );
+  await expect(page.locator("#preview-overlay")).toBeHidden();
   await phone.evaluate(() => {
     (
       window as unknown as { scannerFixture: { paper: boolean } }
@@ -470,7 +473,13 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
       window as unknown as { scannerFixture: { paper: boolean } }
     ).scannerFixture.paper = false;
   });
-  await expect(phone.locator("#phase")).toHaveText("SAVED · NEXT");
+  // Paper was already removed, so green may clear before the next DOM poll.
+  // Assert the acknowledged count and durable original instead of that transient phase.
+  await expect(phone.locator("#count")).toHaveText(String(captures.length + 1));
+  const afterEarlyRemoval = (await (await request.get("/api/captures")).json())
+    .captures;
+  expect(afterEarlyRemoval).toHaveLength(captures.length + 1);
+  expect(afterEarlyRemoval[0].status).toBe("accepted");
   await expect(phone.locator("#status")).toHaveText(
     "Ready for the next receipt.",
   );

@@ -91,7 +91,8 @@ export class CaptureLibrary {
       if (
         this.followLatest &&
         this.latest &&
-        this.latest.id !== this.selected?.id
+        (this.latest.id !== this.selected?.id ||
+          this.latest.manual_outline?.id !== this.selected?.manual_outline?.id)
       )
         void this.show(this.latest);
       this.next = page.next;
@@ -221,7 +222,10 @@ export class CaptureLibrary {
     checkbox.onchange = () => {
       svg.style.visibility = checkbox.checked ? "visible" : "hidden";
     };
-    edges.append(checkbox, "Detected edges");
+    edges.append(
+      checkbox,
+      capture.manual_outline ? "Corrected outline" : "Detected edges",
+    );
     controls.append(zoom, edges);
     if (!this.followLatest) {
       const latest = document.createElement("button");
@@ -235,9 +239,11 @@ export class CaptureLibrary {
     }
     const note = document.createElement("p");
     note.className = "muted";
-    note.textContent = capture.metadata.quality?.quad
-      ? "Outline from this saved photo. Original pixels stay intact."
-      : "No paper outline was recorded for this photo.";
+    note.textContent = capture.manual_outline
+      ? "Manually corrected outline. Original pixels and capture checks stay intact."
+      : capture.metadata.quality?.quad
+        ? "Outline from this saved photo. Original pixels stay intact."
+        : "No paper outline was recorded for this photo.";
     this.panel.append(title, details, stage, controls, note);
     try {
       await img.decode();

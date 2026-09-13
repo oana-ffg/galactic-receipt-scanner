@@ -811,7 +811,8 @@ class Worker:
         access = self.client.get("/api/processing/access")
         require(access.get("version") == 2 and access.get("queueClaims") is True, "Scanner processing API v2 is required.")
         require(access.get("lunaReassessment") is True, "Deploy the Luna reassessment API before running this workflow.")
-        receipt_qwen.preflight()
+        if not (self.resumed and self.state["phase"] in {"draft-uncertain", "confirmation-uncertain"}):
+            receipt_qwen.preflight()
         self.check("validate", extraction={})
         # Verify prepared packages and model assets without fetching/installing anything.
         program = '''import {readFileSync} from "node:fs"; import {createHash} from "node:crypto";

@@ -499,6 +499,24 @@ export async function processingRoute(
       });
     }
   }
+  if (path === "/api/processing/draft" && method === "POST") {
+    const previous = await env.DB.prepare("SELECT model,payload FROM processing_drafts WHERE token=?").bind(input.token).first<{model:string;payload:string}>();
+    if (previous) {
+      const proposed = input.model === STAGE_MODEL.small
+        ? {version:1,extraction:input.extraction,documents:input.documents,pixel_pdf_sha256:input.pixel_pdf_sha256,images:input.images}
+        : input.extraction;
+      requireThat(previous.model===input.model && previous.payload===JSON.stringify(proposed),409,"Initial reading is immutable.");
+      return json({saved:true,replayed:true});
+    }
+  }
+  if (path === "/api/processing/confirmation" && method === "POST") {
+    const previous = await env.DB.prepare("SELECT request,payload,sha256 FROM processing_confirmations WHERE token=?").bind(input.token).first<any>();
+    if (previous) {
+      const saved=JSON.parse(previous.request);
+      requireThat(Object.keys(input).length===Object.keys(saved).length+1 && Object.keys(saved).every(k=>JSON.stringify(input[k])===JSON.stringify(saved[k])),409,"Confirmation is immutable.");
+      return json({saved:true,sha256:previous.sha256,...JSON.parse(previous.payload),replayed:true});
+    }
+  }
   const lock = await activeLock(env);
   requireThat(
     lock && lock.token === input.token,

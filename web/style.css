@@ -149,6 +149,10 @@ header p {
 #empty-preview[hidden] {
   display: none;
 }
+#preview-overlay {
+  position: absolute;
+  pointer-events: none;
+}
 .detail {
   height: 44px;
   overflow-y: auto;
@@ -718,4 +722,12 @@ header {
 .connection-row p {
   flex: 1;
   overflow-wrap: anywhere;
+}
+
+.report-control {
+  max-width: 100%;
+}
+.report-control .error {
+  max-width: 28rem;
+  white-space: normal;
 }

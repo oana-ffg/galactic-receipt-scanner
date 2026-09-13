@@ -133,7 +133,12 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
     images: [{ sha256: hash("b"), pixels: [1400, 2200] }],
   };
   await ok("/api/processing/draft", draft);
-  expect((await ok("/api/processing/draft", draft)).saved).toBe(true);
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
+    .bind(lease.token)
+    .run();
+  expect((await ok("/api/processing/draft", draft)).replayed).toBe(true);
   expect(
     (
       await request("/api/processing/draft", {
@@ -142,6 +147,12 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
       })
     ).status,
   ).toBe(409);
+  await db
+    .prepare(
+      "UPDATE processing_lock SET expires=unixepoch()*1000+1200000 WHERE token=?",
+    )
+    .bind(lease.token)
+    .run();
 
   const qwen = reading(1299);
   qwen.category_id = null;
@@ -164,9 +175,16 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
     confirmation,
   );
   expect(savedConfirmation.evidence.differing_fields).toContain("total_minor");
-  expect((await ok("/api/processing/confirmation", confirmation)).sha256).toBe(
-    savedConfirmation.sha256,
+  await db
+    .prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
+    .bind(lease.token)
+    .run();
+  const replayedConfirmation = await ok(
+    "/api/processing/confirmation",
+    confirmation,
   );
+  expect(replayedConfirmation.replayed).toBe(true);
+  expect(replayedConfirmation.sha256).toBe(savedConfirmation.sha256);
   expect(
     (
       await request("/api/processing/confirmation", {
@@ -175,6 +193,12 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
       })
     ).status,
   ).toBe(409);
+  await db
+    .prepare(
+      "UPDATE processing_lock SET expires=unixepoch()*1000+1200000 WHERE token=?",
+    )
+    .bind(lease.token)
+    .run();
 
   const final = reading(1299);
   const assessment = {

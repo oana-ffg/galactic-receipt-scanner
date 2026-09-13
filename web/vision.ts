@@ -2,9 +2,6 @@ import type { Quality } from "./types";
 import type { PreviewChecks } from "./hand-checks";
 export interface Analysis {
   quality: Quality;
-  backgroundSet?: boolean;
-  backgroundCleared?: boolean;
-  backgroundError?: string;
   image?: Blob;
   pdf?: Blob;
   original?: Blob;
@@ -30,9 +27,6 @@ export class Vision {
       else
         p.resolve({
           quality: e.data.quality,
-          backgroundSet: e.data.backgroundSet,
-          backgroundCleared: e.data.backgroundCleared,
-          backgroundError: e.data.backgroundError,
           image: e.data.image,
           pdf: e.data.pdf,
           original: e.data.original,
@@ -62,8 +56,6 @@ export class Vision {
       full?: boolean;
       outputs?: boolean;
       encode?: boolean;
-      calibrate?: boolean;
-      clearBackground?: boolean;
       preview?: PreviewChecks;
     } = {},
   ): Promise<Analysis> {

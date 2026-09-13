@@ -81,12 +81,8 @@ is needed; both devices need Internet access.
   Leave a brief visible gap: clearly empty, hand-free frames can confirm removal after
   150 ms; ambiguous backgrounds need 450 ms. Actual timing also depends on the phone's
   processing speed. A swap without an observed clear gap stays locked to prevent duplicates.
-- On reflective desks, clear all paper and hands and choose **Set empty desk**.
-  The reference remains in memory on that phone for the current camera session.
-  Matching desk frames still require fresh hand checks and continuous removal evidence.
-  Keep a visible clear gap between receipts; swapping without a clear gap remains locked.
-  Use **Reset empty desk** after moving the phone or changing lighting. If setup detects
-  paper or hands, clear the desk and try again.
+  One borderline, hand-checked frame can preserve an established clear interval;
+  a fresh clear frame must follow promptly before removal is confirmed.
 - **Retry upload** resends the exact retained bytes and ID after a failed connection.
 - The desktop shows the latest saved original with the outline detected in that photo.
   Use **Inspect full size** and **Actual pixels** to check fine print; the outline is an
@@ -190,3 +186,17 @@ when ready to activate new controls. Do not reload during an upload. The issue-r
 only adds separate tables; it does not rewrite receipts. The friendlier wrong-account page
 applies when the application handles access denial. The Sites sign-in/access gateway may
 intercept a visitor before the application can display its page.
+
+### Manual outline corrections
+
+After inspecting a saved original, `save_receipt_outline` records a separate manual
+outline with an inspection note. The normalized corners run clockwise around all paper
+edges, including protruding folds, with a margin. Corrections are append-only and tied
+to the original checksum; capture status, quality checks and original pixels stay intact.
+Saved-photo viewers show the corrected outline. This does not regenerate derivatives
+or certify financial content.
+
+Owner-session clients can read correction history at `GET /api/captures/{id}/outlines`
+and append with `POST` using `id` (a new UUID reused for retries), `source_sha256`,
+`previous_id` (latest correction ID or null), `quad` and `note`. Concurrent edits return
+409 and require rereading. Scoped processing connections cannot write these owner edits.
