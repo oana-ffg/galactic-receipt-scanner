@@ -43,13 +43,14 @@ def credentials(config_path, from_stdin=False):
         value = json.loads(sys.stdin.read(16384))
     else:
         config = json.loads(Path(config_path).read_text())
-        entry = config.get("gopass_entry")
-        if not isinstance(entry, str) or not entry or entry.startswith("-"):
-            raise ClientError("Configure a gopass_entry in the private client config.")
-        result = subprocess.run(["gopass", "show", entry], capture_output=True, text=True, check=False)
-        if result.returncode:
-            raise ClientError("Cannot unlock scanner credentials in gopass.")
-        value = json.loads(result.stdout)
+        filename = config.get("credential_file")
+        if not isinstance(filename, str) or not Path(filename).is_absolute():
+            raise ClientError("Create an agent connection from the signed-in Site; configure its private credential_file.")
+        credential_path = Path(filename)
+        if (credential_path.is_symlink() or not credential_path.is_file()
+                or (os.name != 'nt' and credential_path.stat().st_mode & 0o077)):
+            raise ClientError("Credentials must be stored in a private regular file.")
+        value = json.loads(credential_path.read_text())
         if value.get("origin") != config.get("origin"):
             raise ClientError("Credential origin differs from configured Site.")
     return value
@@ -128,10 +129,10 @@ class ScannerClient:
             write_new_file(target, body)
         return {"path": str(target.absolute()), "sha256": sha, "bytes": len(body), "cached": cached}
 
-    def original(self, capture_id, directory):
+    def original(self, capture_id, directory, metadata=None):
         if not UUID.fullmatch(capture_id):
             raise ClientError("Invalid capture ID.")
-        meta = self.get("/api/captures/" + capture_id)
+        meta = metadata if metadata is not None else self.get("/api/captures/" + capture_id)
         sha = meta.get("sha256", "")
         size = meta.get("bytes")
         if (meta.get("id") != capture_id or not SHA.fullmatch(sha)

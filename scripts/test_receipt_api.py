@@ -39,6 +39,16 @@ class ClientTests(unittest.TestCase):
                 self.client.original(self.id, directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
+    def test_snapshot_metadata_avoids_per_image_lookup_but_still_verifies_bytes(self):
+        self.client.get = Mock(side_effect=AssertionError('Unexpected metadata request'))
+        self.client.request = Mock(return_value=self.body)
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.client.original(self.id, directory, metadata=self.meta)
+            self.assertEqual(Path(result['path']).read_bytes(), self.body)
+            self.assertTrue(self.client.original(self.id, directory, metadata=self.meta)['cached'])
+            self.client.get.assert_not_called()
+            self.client.request.assert_called_once()
+
     def test_pinned_artifact_is_verified_and_never_overwrites_existing_data(self):
         self.client.request = Mock(return_value=self.body)
         with tempfile.TemporaryDirectory() as directory:

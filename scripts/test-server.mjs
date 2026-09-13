@@ -43,7 +43,10 @@ export async function startTestServer(port = 0) {
   });
   origin = `http://127.0.0.1:${server.address().port}`;
   try {
-    mf = await runtime({ appOrigin: origin });
+    mf = await runtime({
+      appOrigin: origin,
+      sitesGatewayToken: "synthetic-gateway",
+    });
   } catch (error) {
     await new Promise((resolve) => server.close(resolve));
     throw error;

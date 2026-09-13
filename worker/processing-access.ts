@@ -40,6 +40,7 @@ export async function authorizeProcessor(
     APP_ORIGIN: string;
     OWNER_EMAIL: string;
     PROCESSING_TOKEN_SHA256?: string;
+    DB?: D1Database;
   },
 ): Promise<void> {
   requireThat(
@@ -64,7 +65,7 @@ export async function authorizeProcessor(
     "Cross-site request denied.",
   );
   requireThat(
-    /^[0-9a-f]{64}$/.test(env.PROCESSING_TOKEN_SHA256 ?? ""),
+    env.DB || /^[0-9a-f]{64}$/.test(env.PROCESSING_TOKEN_SHA256 ?? ""),
     401,
     "Processing access is disabled.",
   );
@@ -73,11 +74,36 @@ export async function authorizeProcessor(
     ?.match(/^Bearer (rsc_[A-Za-z0-9_-]{43})$/)?.[1];
   requireThat(token, 401, "Processing credential required.");
   const actual = await digest(new Uint8Array(new TextEncoder().encode(token)));
-  let different = 0;
+  let different = actual.length ^ (env.PROCESSING_TOKEN_SHA256 ?? "").length;
   for (let i = 0; i < actual.length; i++)
     different |=
-      actual.charCodeAt(i) ^ env.PROCESSING_TOKEN_SHA256!.charCodeAt(i);
-  requireThat(different === 0, 401, "Invalid processing credential.");
+      actual.charCodeAt(i) ^ (env.PROCESSING_TOKEN_SHA256 ?? "").charCodeAt(i);
+  let scope = "processing";
+  if (different !== 0) {
+    const row = await env.DB?.prepare(
+      "SELECT id,scope,last_used_at FROM agent_connections WHERE token_sha256=? AND revoked_at IS NULL AND expires_at>?",
+    )
+      .bind(actual, Date.now())
+      .first<{ id: string; scope: string; last_used_at: number | null }>();
+    requireThat(row, 401, "Invalid processing credential.");
+    scope = row.scope;
+    if (!row.last_used_at || row.last_used_at < Date.now() - 3600000)
+      await env
+        .DB!.prepare("UPDATE agent_connections SET last_used_at=? WHERE id=?")
+        .bind(Date.now(), row.id)
+        .run();
+  }
+  const path = new URL(request.url).pathname;
+  if (scope === "backup") {
+    requireThat(
+      request.method === "GET" &&
+        (["/api/processing/access", "/api/captures"].includes(path) ||
+          /^\/api\/captures\/[0-9a-f-]{36}$/.test(path) ||
+          /^\/api\/files\/[0-9a-f-]{36}\/raw$/.test(path)),
+      403,
+      "Route is outside backup read access.",
+    );
+  } else requireThat(scope === "processing", 403, "Unknown connection scope.");
   requireThat(
     processingRouteAllowed(request.method, new URL(request.url).pathname),
     403,

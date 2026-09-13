@@ -1,67 +1,83 @@
-# Direct receipt processing access
+# Agent connections
 
-The Site remains owner-private. Browser capture uses Sites owner identity and the existing
-same-origin checks. Optional machine access uses two credentials: a platform Sites access
-token in `OAI-Sites-Authorization` and a scanner processing token in `Authorization`.
-No model API is called by the server or client.
+The Site remains owner-private. Signed-in browser access uses the Sites owner identity.
+Machine requests use a Sites gateway token in `OAI-Sites-Authorization` plus a scoped
+scanner credential in `Authorization`. No model API is called by the server or client.
 
-## Provision one private instance
+## Instance setup
 
-1. Resolve `.openai/hosting.json` and read its Site metadata. Confirm the exact origin,
-   owner role and owner-only visitor policy. Preserve any existing platform token; generating
-   another rotates it and invalidates clients using the old one. Request a new Sites bypass
-   token only when the owner asks for that setup and no usable token exists.
-2. Generate a cryptographically random 32-byte URL-safe token, without base64 padding,
-   prefixed `rsc_`. Store only its lowercase SHA-256 as the secret runtime value
-   `PROCESSING_TOKEN_SHA256` through Sites environment management. Leave other settings alone.
-   Deploy the reviewed version to apply the setting. Absence of this setting disables
-   machine access and does not affect owner browser capture.
-3. Store a JSON credential object with keys `origin`, `sites_token`, `processing_token`
-   in the owner's authorized secret store. On a local gopass host, create an agreed entry
-   using a direct input pipe, with no secrets in shell arguments or printed output.
-4. Write only `origin` and `gopass_entry` to ignored `.local/processing-access.json`.
-   Keep instance addresses and entry names out of public source. The client requires Python 3
-   and gopass on PATH, with access to the host's normal credential agent.
-5. Run `python3 scripts/receipt_api.py status`, then list captures and download one original.
-   Verify its hash and scan timestamp against metadata. Production verification is read-only;
-   test write/read-back, conflicts and bad credentials with isolated synthetic storage.
-6. Verify anonymous, forged-identity and incorrect-token requests cannot retrieve data.
-   Verify processing credentials cannot call capture uploads, station controls or private issues.
-   Confirm the saved visitor policy remains owner-only. The gateway token alone must not
-   authorize processing routes without either the owner session or scanner credential.
+Resolve `.openai/hosting.json` and the Site's metadata using the owner's Sites tools.
+Confirm the exact origin and owner-only visitor policy. Preserve the existing Sites
+access token: generating another rotates it and invalidates existing connections.
+Request a new token only when the owner authorizes provisioning and none exists.
 
-## Work and other hosts
+Set `SITES_GATEWAY_TOKEN` as a **secret** runtime environment value using that existing
+Sites token, passing it directly between tools without printing it. Deploy the reviewed
+version to apply the environment change. Never export browser cookies or put a token in
+source, prompts, command arguments, logs, or an environment file. Keep the deployed
+Worker behind Sites; its owner headers are trusted only through that gateway.
 
-The same client supports `--credentials-stdin`: an authorized secret provider pipes the
-credential JSON directly to stdin. This does not require gopass or a private config file.
-Verify that host's secret facility and network access before scheduling anything. Browser
-sign-in/password storage is not proof that shell scripts can obtain credentials. Never
-put tokens in chat, source, a command argument, a shared project file or model-visible output.
+This secret lets the owner authorize encrypted connection bundles from the signed-in
+site. It is not a new public endpoint or a change to the Site audience. The gateway
+credential alone does not authorize scanner data access.
 
-MCP is not installed by this change. An MCP adapter can reuse the processing routes later;
-it must solve its own supported authentication and unattended write permission path.
+## Connect a processing host
 
-## Scope and rotation
+1. Use the [data-access skill](.agents/skills/receipt-data-access/SKILL.md). The Node helper
+   creates a host-local RSA key pair and a public request bound to the Site and purpose.
+2. Terra uses `create_processing_connection` on `/agent-access`. The owner can instead
+   upload the request file on that page and download its encrypted response. Both paths
+   use the same owner-authorized route and validations.
+3. The response uses RSA-OAEP/SHA-256 to wrap an AES-256-GCM key. Only the requesting
+   host can decrypt the credential bundle; browser/model-visible results contain ciphertext.
+   Repeating the exact request returns the same response, not a second credential.
+4. Complete the handoff with the helper. The Python API client reads its private config,
+   which points to the private credential file. There is **no gopass dependency**. POSIX
+   permissions are checked; on Windows use a user-private directory with an appropriate ACL.
+5. Verify access with `status` and a downloaded original whose hash/size match metadata.
+   Test writes, revocation and wrong credentials only against synthetic isolated storage.
 
-Machine GET access covers captures, original/artifact downloads, documents/history and
-processing categories/context. Model changes use `/api/processing/claim`, renewal, draft,
-submit, release and supported detach. Generic machine document POST is denied. PDF upload
-and pinned inspection use document PDF routes and `/api/processing/pdf-review`; immutable
-ordinary OCR uses capture OCR artifacts. Human approval requires the owner browser session.
-Camera uploads/control, private issues and UI/assets remain outside machine access.
+Credentials last 1–365 days, as requested when connecting. The owner manages named
+connections, scope, expiry, last use and revocation on `/agent-access`. The server stores
+only the scanner credential's hash, plus an encrypted handoff response for safe retries.
+Revocation/expiry applies to every subsequent authenticated request. In-flight operations
+already authorized may finish. Last-use timestamps update at most hourly.
 
-The processing credential belongs to the owner and authorizes reading all receipt data and
-editing processing decisions. Treat it accordingly. Rotate by replacing the secret-store token
-and hosted hash, then deploying and verifying the new token works and the old one fails.
-Removing the hosted hash disables machine access after deployment. Platform-token rotation is
-separate. There is one processing credential per instance in this version; per-agent keys and
-revocation records are not implemented.
+## Scope
 
-## Current capabilities
+- **Processing:** capture/original/artifact reads, document/context/category reads, shared
+  queue claims, drafts/submission, supported detach, immutable OCR and PDF operations.
+- **Backup:** GET-only capture history/metadata and original bytes; no processing writes.
+- Neither credential permits camera uploads, station controls, private issues, arbitrary
+  document writes, human approval, or creating/revoking other connections.
 
-API v2 has atomic renewable per-document claims, immutable independent Astra checkpoints,
-private purchase categories, structured amounts, arithmetic and ordinary OCR comparisons,
-revision-pinned human review and searchable image PDF helpers. Read the project
-[processing skill](.agents/skills/receipt-processing/SKILL.md) for worker/scheduling instructions.
-A current local Codex worker can use gopass directly. Work still needs its own verified secure
-credential provider; no MCP server or assumed browser-to-shell password access is provided.
+The old `PROCESSING_TOKEN_SHA256` setting remains temporarily supported for existing
+clients during migration. Remove it only after its users have migrated and new access is
+verified. Legacy clients need the new private-file config or an explicitly authorized
+stdin provider; there is no implicit personal secret-store lookup.
+
+Rotating Sites' gateway token requires updating this runtime secret and reconnecting
+clients. Existing encrypted responses contain the old gateway token; they cannot repair
+that rotation automatically. Individual scanner connections can be revoked without
+rotating the shared gateway token or affecting other connections.
+
+## Runtime and scheduling
+
+Terra coordinates using compact metadata and authorizes access through WebMCP. Fresh
+Luna workers inspect images, with independent Astra workers reviewing exceptions.
+Ordinary CPU OCR and PDF helpers run outside the capture/save path. Count complete
+documents, including all their pages, toward the batch limit.
+
+Current development and verification are local Codex. Cloud Work remains the deployment
+target; its browser tool support, private credential persistence and scheduled managed
+worker spawning require later end-to-end validation. WebMCP does not itself provide a
+persistent secret vault. A remote MCP server is not required by this design.
+
+## Optional personal backup
+
+`scripts/receipt_backup.py` creates append-only originals and metadata snapshots on an
+explicitly mounted external volume. It enumerates all takes, verifies every original,
+resumes verified files and reports missing remote captures without deleting local copies.
+A partial run is a failure even though successfully verified files remain available.
+Use `--credentials-stdin` with an authorized private provider, or a private connection
+config. Personal scheduler and secret-store configuration belongs outside Git.

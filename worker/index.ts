@@ -21,10 +21,18 @@ import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
 import { authorizeProcessor } from "./processing-access";
+import { connectionRoute } from "./connections";
 import { isControlCommand, retakeTarget } from "../web/control-command";
-const APP_PAGES = new Set(["/", "/camera", "/issues", "/review"]);
+const APP_PAGES = new Set([
+  "/",
+  "/camera",
+  "/issues",
+  "/review",
+  "/agent-access",
+]);
 export interface Env {
   PROCESSING_TOKEN_SHA256?: string;
+  SITES_GATEWAY_TOKEN?: string;
   RETIRED_CAPTURE_IDS?: string;
   DB: D1Database;
   BUCKET: R2Bucket;
@@ -145,6 +153,8 @@ function publicCapture(row: CaptureRow) {
     created_at: row.created_at,
     status: row.status,
     sha256: row.sha256,
+    bytes: row.bytes,
+    content_type: row.content_type,
     metadata: JSON.parse(row.metadata),
     ocr_status: row.ocr_available ? "unverified" : "awaiting Work",
     ocr_error: null,
@@ -224,6 +234,8 @@ function requireQuality(metadata: Record<string, unknown>) {
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  const connection = await connectionRoute(request, env);
+  if (connection) return connection;
   if (path === "/api/processing/access" && request.method === "GET")
     return json({
       version: 2,

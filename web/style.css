@@ -699,3 +699,23 @@ header {
   font-weight: 700;
   background: #fff2e4;
 }
+
+.agent-access {
+  max-width: 70rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+.agent-access section {
+  margin: 2rem 0;
+}
+.connection-row {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  border-bottom: 1px solid #34444f;
+  padding: 1rem 0;
+}
+.connection-row p {
+  flex: 1;
+  overflow-wrap: anywhere;
+}

@@ -13,8 +13,17 @@ scan timestamp, source hash, retake and derivative revision.
 
 ## Coordinator
 
-Prefer Luna for routine coordination when selectable; a skill cannot switch its caller's
-model. Spawn managed workers **one at a time**, each with `fork_turns: none`: use
+Use **Terra (`gpt-5.6-terra`) for coordination**, including WebMCP authorization when
+needed. A skill cannot switch its caller's model; select Terra when creating the task.
+The coordinator uses only connection status, public connection requests, encrypted
+responses, worker instructions and compact result metadata. Never load receipt images,
+PDF renders, full OCR text or full extraction payloads into its context. Read the access
+skill to create a named connection from the signed-in `/agent-access` page, then pass
+only the private client config path to workers, never credentials. Reuse a valid
+connection; if expired/revoked, obtain new owner-authorized access without silently
+falling back to a personal secret store.
+
+Spawn managed workers **one at a time**, each with `fork_turns: none`: use
 `gpt-5.6-luna` for the hourly small stage and `gpt-6-astra` for the daily large stage.
 Pass the repository location, worker instructions and a bounded source assignment, not
 conversation history or images. Each worker handles one document. Default batch: 10 documents.

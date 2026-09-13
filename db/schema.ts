@@ -8,6 +8,18 @@ import {
   uniqueIndex,
   type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
+export const agentConnections = sqliteTable("agent_connections", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  scope: text("scope").notNull(),
+  token_sha256: text("token_sha256").notNull().unique(),
+  created_at: integer("created_at").notNull(),
+  expires_at: integer("expires_at").notNull(),
+  revoked_at: integer("revoked_at"),
+  last_used_at: integer("last_used_at"),
+  request_hash: text("request_hash").notNull(),
+  envelope: text("envelope").notNull(),
+});
 export const captures = sqliteTable(
   "captures",
   {

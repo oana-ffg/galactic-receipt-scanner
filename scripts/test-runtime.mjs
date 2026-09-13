@@ -10,6 +10,7 @@ export async function runtime({
   migrationLimit,
   appOrigin = origin,
   processingTokenSha256,
+  sitesGatewayToken,
 } = {}) {
   const mf = new Miniflare({
     modules: true,
@@ -18,6 +19,7 @@ export async function runtime({
     bindings: {
       OWNER_EMAIL: "owner@example.test",
       APP_ORIGIN: appOrigin,
+      ...(sitesGatewayToken ? { SITES_GATEWAY_TOKEN: sitesGatewayToken } : {}),
       ...(processingTokenSha256
         ? { PROCESSING_TOKEN_SHA256: processingTokenSha256 }
         : {}),

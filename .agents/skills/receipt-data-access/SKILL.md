@@ -7,14 +7,41 @@ description: Fetch verified original scans and read or save receipt processing r
 
 Use `scripts/receipt_api.py` from the repository root. It performs no model inference.
 Read [API access setup](../../../PROCESSING_ACCESS.md) when provisioning another host.
-Load credentials through the configured secret store; never paste them into prompts,
+Load credentials through the private connection config; never paste them into prompts,
 command arguments, logs or source.
 
-Start with `python3 scripts/receipt_api.py status`. The ignored private
-`.local/processing-access.json` specifies the exact origin and gopass entry. In Work,
-use `--credentials-stdin` only when an authorized secret provider can pipe the credential
-JSON securely. Browser password storage is not proof of shell credential access.
+Start with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
+The connection helper creates a private config referring to its protected credential file.
+There is no gopass dependency. `--credentials-stdin` supports an explicitly authorized
+secret provider for optional personal integrations; browser password storage is not
+proof of shell credential access.
 A 401/403 is an access failure, not a missing original. Do not spoof identity headers.
+
+## Authorize a connection with Terra
+
+1. Resolve the Site's exact HTTPS origin. Create a new ignored private directory with
+   `node scripts/receipt_connection.mjs init PRIVATE_DIRECTORY SITE_ORIGIN CONNECTION_NAME processing 1`.
+   Its output contains only a public-key request and paths. The private key remains on
+   this host. On Windows, keep the directory in the user's private profile and ensure
+   other users cannot read it; POSIX private file modes are enforced by the helper/client.
+2. With Terra, open the normal `/agent-access` page in the owner's signed-in browser.
+   Invoke its `create_processing_connection` WebMCP tool with the returned `request`
+   object unchanged. The normal owner UI also accepts `request.json` when site tools
+   are unavailable. Authorization is a write operation and retains normal tool approvals.
+3. Save the tool's encrypted JSON result to a private response file, then run
+   `node scripts/receipt_connection.mjs complete PRIVATE_DIRECTORY RESPONSE_FILE`.
+   Only this helper decrypts it. It prints the client config path and expiry, never keys.
+4. Verify `status` and a hash-checked original through that config before claiming access
+   works. Terra should fetch verification facts only; Luna inspects the original pixels.
+   Pass the config path to each fresh worker. All client commands accept `--config` before
+   the subcommand. Original/PDF/OCR helpers launch locally and make no model API calls.
+5. The owner can list and revoke named connections on `/agent-access`. For scheduled jobs,
+   configure a suitable expiry and report expired/revoked access as an actionable failure.
+
+Local Codex is the current test environment. Cloud Work's browser/tool availability and
+private-file persistence need later end-to-end validation; do not block local iteration
+or claim cloud readiness prematurely. If the page says Sites access is not configured,
+follow PROCESSING_ACCESS.md; never export cookies or make the Site public.
 
 ## Read data and images
 
@@ -61,5 +88,5 @@ inspect it, then post document_id, current revision, sha256 and inspection evide
 `/api/processing/pdf-review`. This attests only the pinned PDF, not human review.
 
 Version 2 exposes shared claims, private categories, model confidences and human review.
-Work requires a verified secure credential pipe; a browser password store alone does not
-provide shell access. No MCP server is installed by this workflow.
+The encrypted browser handoff provides API credentials independently of browser password
+storage. No remote MCP server installation is needed for this WebMCP workflow.

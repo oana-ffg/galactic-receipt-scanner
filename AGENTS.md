@@ -44,6 +44,10 @@ onboarding contract. Do not assume a browser password manager is accessible to a
 shell without verifying the supported integration. An optional PC processing worker may
 supplement the cloud workflow, but must not become a prerequisite for cloud setup.
 
+An explicitly requested personal backup integration may use the owner's chosen secret
+store (including gopass) outside the repository, supplying credentials through the generic
+client's stdin. This exception does not change the product's portable onboarding contract.
+
 This project is participating in an **OpenAI hackathon**. Use the user's ChatGPT
 subscription through Work/Codex and managed model agents as much as possible. Avoid
 third-party AI/OCR APIs and additional API spending for now. Do not call the OpenAI API

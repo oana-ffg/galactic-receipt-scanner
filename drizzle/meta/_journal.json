@@ -71,6 +71,13 @@
       "when": 1789306292203,
       "tag": "0009_milky_cannonball",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789313718083,
+      "tag": "0010_far_scarecrow",
+      "breakpoints": true
     }
   ]
 }
