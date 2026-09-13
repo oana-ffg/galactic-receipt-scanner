@@ -86,6 +86,11 @@ class ExtractionTest(unittest.TestCase):
                 extraction.validate(self.result | change)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM extraction_results").fetchone()[0], 0)
 
+    def test_handwriting_presence_does_not_require_transcription(self):
+        self.result.update(has_handwriting=True, handwritten_notes=[])
+        from receipt_extraction import validate
+        validate(self.result)
+
     def test_handwriting_null_and_unclear_note_need_processing(self):
         self.result.update(has_handwriting=True, handwritten_notes=[{"text": None, "uncertain": True, "box": [1, 1, 10, 10]}])
         self.assertEqual(self.save()["processing_status"], "needs_processing")

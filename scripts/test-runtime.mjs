@@ -9,6 +9,7 @@ export async function runtime({
   retiredCaptureIds,
   migrationLimit,
   appOrigin = origin,
+  processingTokenSha256,
 } = {}) {
   const mf = new Miniflare({
     modules: true,
@@ -17,6 +18,9 @@ export async function runtime({
     bindings: {
       OWNER_EMAIL: "owner@example.test",
       APP_ORIGIN: appOrigin,
+      ...(processingTokenSha256
+        ? { PROCESSING_TOKEN_SHA256: processingTokenSha256 }
+        : {}),
       ...(retiredCaptureIds ? { RETIRED_CAPTURE_IDS: retiredCaptureIds } : {}),
     },
     d1Databases: ["DB"],

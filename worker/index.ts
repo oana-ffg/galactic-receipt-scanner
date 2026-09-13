@@ -14,9 +14,11 @@ import {
 import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
+import { authorizeProcessor } from "./processing-access";
 import { isControlCommand, retakeTarget } from "../web/control-command";
 const APP_PAGES = new Set(["/", "/camera", "/issues", "/review"]);
 export interface Env {
+  PROCESSING_TOKEN_SHA256?: string;
   RETIRED_CAPTURE_IDS?: string;
   DB: D1Database;
   BUCKET: R2Bucket;
@@ -119,6 +121,7 @@ interface CaptureRow {
   raw_key: string;
   metadata: string;
   content_type: string;
+  bytes: number;
   ocr_available?: number;
   image_available?: number;
   pdf_available?: number;
@@ -200,6 +203,20 @@ function requireQuality(metadata: Record<string, unknown>) {
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  if (path === "/api/processing/access" && request.method === "GET")
+    return json({
+      version: 1,
+      capabilities: [
+        "read_captures",
+        "read_originals",
+        "read_documents",
+        "save_documents",
+        "save_ocr_artifacts",
+        "save_document_pdfs",
+      ],
+      captureWrites: false,
+      queueClaims: false,
+    });
   const documentResponse = await documentRoute(request, env, async () => {
     const rows = await env.DB.prepare(
       `${captureSelection} FROM captures ORDER BY created_at,id`,
@@ -246,7 +263,12 @@ async function route(request: Request, env: Env): Promise<Response> {
       )
         .bind(id)
         .all();
-      return json({ ...publicCapture(row), artifacts: versions.results });
+      return json({
+        ...publicCapture(row),
+        bytes: row.bytes,
+        content_type: row.content_type,
+        artifacts: versions.results,
+      });
     }
     if (method === "POST") {
       requireThat(
@@ -732,17 +754,20 @@ async function route(request: Request, env: Env): Promise<Response> {
       retakeTarget(command) ||
       command === "cancel-retake" ||
       command === "force" ||
-      command === "set-background"
+      command === "set-background" ||
+      command === "clear-background"
     ) {
       const state = station.state ? JSON.parse(station.state) : null;
       requireThat(
         station.expires > Date.now() &&
           station.updated > Date.now() - 5000 &&
-          (command === "set-background"
-            ? state?.supportsBackground
-            : command === "force"
-              ? state?.supportsForce
-              : state?.supportsTargetedRetake) === true,
+          (command === "clear-background"
+            ? state?.supportsBackgroundReset
+            : command === "set-background"
+              ? state?.supportsBackground
+              : command === "force"
+                ? state?.supportsForce
+                : state?.supportsTargetedRetake) === true,
         409,
         "Enable or reload the phone camera before using this control.",
       );
@@ -772,7 +797,9 @@ async function route(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
-      authorize(request, env);
+      if (request.headers.has("authorization"))
+        await authorizeProcessor(request, env);
+      else authorize(request, env);
       return secure(
         await route(request, env),
         /^\/assets\/vision\.worker-[\w-]+\.js$/.test(

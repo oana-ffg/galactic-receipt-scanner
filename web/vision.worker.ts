@@ -545,7 +545,7 @@ async function process(
       return {
         quality,
         backgroundError:
-          "Clear all paper and hands from the desk, then choose Set empty desk again.",
+          "Clear all paper and hands from the desk, then calibrate the empty desk again.",
       };
     deskReference.set(deskPixels);
     previous = undefined;
@@ -634,6 +634,7 @@ self.onmessage = async (
     outputs?: boolean;
     encode?: boolean;
     calibrate?: boolean;
+    clearBackground?: boolean;
     preview?: PreviewChecks;
   }>,
 ) => {
@@ -657,10 +658,15 @@ self.onmessage = async (
     }
     ready ??= initialize();
     await ready;
+    if (event.data.clearBackground) deskReference.clear();
     const result = bitmap
       ? await process(bitmap, !!full, !!outputs, preview, calibrate)
       : {};
-    self.postMessage({ id, ...result });
+    self.postMessage({
+      id,
+      ...result,
+      backgroundCleared: event.data.clearBackground === true,
+    });
   } catch (error) {
     self.postMessage({
       id,

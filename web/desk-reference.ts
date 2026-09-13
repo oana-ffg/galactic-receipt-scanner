@@ -2,6 +2,9 @@
 // the background from a rejected paper frame or update it while scanning.
 export class DeskReference {
   private pixels?: Uint8ClampedArray;
+  clear() {
+    this.pixels = undefined;
+  }
   set(pixels: Uint8ClampedArray) {
     this.pixels = pixels.slice();
   }

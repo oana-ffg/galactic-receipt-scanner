@@ -2,18 +2,30 @@
 
 Galactic receipt scanner is one private installation per owner. Sites' saved visitor
 policy must remain owner-only. The Worker additionally denies requests without the
-Sites-authenticated user ID and exact configured owner email, or on an unexpected origin.
+Sites-authenticated user ID and exact configured owner email for browser access, or on an unexpected origin.
 Missing configuration fails closed. Real account settings live in hosted environment
 values and the ignored instance manifest, never public source.
 
 The trusted boundary is the Sites dispatcher. It authenticates users and supplies identity
 headers. A directly exposed Worker that accepts those headers from callers is unsafe.
-Do not add direct Worker routes, public R2 access, anonymous file links, bypass tokens,
+Do not add direct Worker routes, public R2 access, anonymous file links,
 client-side owner checks, or first-visitor ownership. Changes to this model need explicit
 owner direction and a new access review.
 
+Owner-authorized machine processing is an explicit second authentication path. Sites'
+platform access token admits the request through its gateway; the Worker independently
+checks a 256-bit scanner token against the configured `PROCESSING_TOKEN_SHA256`. Neither
+token substitutes for the other. A request with Authorization uses the machine path and
+cannot fall back to owner headers. Its route/method allowlist excludes capture writes,
+camera control, private issues and UI/assets. Missing configuration fails closed; no raw
+original mutation/deletion endpoint is granted. See PROCESSING_ACCESS.md for provisioning,
+revocation and required real-gateway verification. This credential is an owner-level
+receipt-data secret, even though its operation scope is narrower than browser access.
+
 All API responses and downloads use no-store, attachment downloads and nosniff. Mutations
-require an exact same-origin request and a custom header; cross-origin access is denied.
+from browser sessions require an exact same-origin request and a custom header. Machine
+requests require their bearer credential; supplied foreign Origins and cross-site browser
+requests are denied. No CORS access is granted.
 Uploads are bounded and IDs validated. Raw objects and artifact revisions are immutable,
 content-addressed and private. Untrusted text is rendered as text, never HTML. Models and
 WASM are served from the Site; receipt images are not sent to external inference hosts.

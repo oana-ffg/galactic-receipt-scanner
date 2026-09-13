@@ -90,7 +90,11 @@ in progress while you work. This is not a disposable development instance.**
 
 ## Accessing saved originals from Work/Codex
 
-**Use the owner's authenticated browser session to retrieve the actual image bytes.**
+**Prefer the configured processing API client for agent retrieval.** Read
+[receipt-data-access](.agents/skills/receipt-data-access/SKILL.md). Its scoped machine
+credential is explicitly authorized for receipt reads and processing writes; keep the
+Site owner-private. If direct access is not configured, use the owner's authenticated
+browser session to retrieve the actual image bytes as described below.
 This procedure has been verified with full-resolution originals and matching SHA-256
 hashes. A failed standalone download does not establish that saved scans are inaccessible.
 

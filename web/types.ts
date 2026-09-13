@@ -34,6 +34,7 @@ export interface ScanState {
   selectedRetake?: boolean;
   supportsForce?: boolean;
   supportsBackground?: boolean;
+  supportsBackgroundReset?: boolean;
   backgroundReady?: boolean;
   backgroundMessage?: string;
   manualReview?: boolean;

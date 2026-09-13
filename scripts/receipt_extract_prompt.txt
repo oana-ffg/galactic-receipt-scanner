@@ -27,9 +27,7 @@ item, including repeated items. If there is no complete set, mark fragment or
 uncertain, rather than asserting that the amounts reconcile.
 
 Detect handwriting independently of printed text. Set has_handwriting true, false
-or null if uncertain. Transcribe clear notes; retain unclear notes with null text
-and uncertain true. Include original-pixel [left,top,right,bottom] boxes; an unknown
-box must be null with uncertain true and a concrete location uncertainty. Note if
-handwriting belongs to an adjacent unrelated paper.
+or null if its presence is uncertain. Do not transcribe handwriting; return an empty
+handwritten_notes array. Handwriting presence alone is not an extraction failure.
 Capture uncertainties as a list of concrete uncertain readings, not generic
 disclaimers. Include short evidence describing the source of the key fields.

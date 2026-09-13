@@ -33,7 +33,10 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         canvas.height = 2400;
         const ctx = canvas.getContext("2d")!;
         const draw = () => {
-          ctx.fillStyle = "#181818";
+          ctx.fillStyle =
+            document.documentElement?.dataset.deskChanged === "true"
+              ? "#383838"
+              : "#181818";
           ctx.fillRect(0, 0, 2000, 2400);
           if (photoApi === "unavailable") {
             ctx.fillStyle = "#c8c8c8";
@@ -157,7 +160,7 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         });
         await page.locator("#set-background").click();
         await expect(page.locator("#set-background")).toHaveText(
-          "Reset empty desk",
+          "Recalibrate empty desk",
         );
       }
       await page.evaluate(() => {
@@ -205,7 +208,27 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       }
       await page.evaluate(() => {
         document.documentElement.dataset.paper = "false";
+        document.documentElement.dataset.deskChanged = "true";
       });
+      if (photoApi === "unavailable") {
+        // Reproduce a stale reference blocking an otherwise clear desk, then
+        // disable it without forcing a retake, resetting capture state or reloading.
+        await page.waitForTimeout(1200);
+        await expect(page.locator("#phase")).toHaveText("SAVED · NEXT");
+        await page
+          .getByRole("button", {
+            name: "Disable empty-desk calibration",
+            exact: true,
+          })
+          .click();
+        await expect(page.locator("#background-status")).toContainText(
+          "Normal receipt detection restored",
+        );
+        await expect(page.locator("#clear-background")).toBeHidden();
+        await expect(page.locator("#set-background")).toHaveText(
+          "Set empty desk",
+        );
+      }
       await expect(page.locator("#status")).toHaveText(
         "Ready for the next receipt.",
       );
@@ -269,6 +292,24 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       expect(
         (await (await request.get("/api/captures")).json()).captures.length,
       ).toBe(before + 1);
+      // Disabling the stale reference must allow another complete cycle,
+      // while a stationary paper must still be saved only once.
+      await page.evaluate(() => {
+        document.documentElement.dataset.paper = "true";
+      });
+      await expect(page.locator("#phase")).toHaveText("SAVED · NEXT", {
+        timeout: 15000,
+      });
+      await page.waitForTimeout(2500);
+      expect(
+        (await (await request.get("/api/captures")).json()).captures.length,
+      ).toBe(before + 2);
+      await page.evaluate(() => {
+        document.documentElement.dataset.paper = "false";
+      });
+      await expect(page.locator("#status")).toHaveText(
+        "Ready for the next receipt.",
+      );
       expect(errors).toEqual([]);
     } finally {
       try {

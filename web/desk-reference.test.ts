@@ -22,4 +22,6 @@ test("desk references reject local paper, scene motion and exposure changes", ()
     ),
   ).toBe(false);
   expect(reference.matches(new Uint8ClampedArray(16), 128)).toBe(false);
+  reference.clear();
+  expect(reference.matches(desk, 128)).toBeUndefined();
 });

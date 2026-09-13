@@ -65,6 +65,11 @@ headers is not authentication. The exact-origin check is defense in depth, not a
 
 ## Scan
 
+For optional direct Codex/Work processing without browser retrieval, follow
+[PROCESSING_ACCESS.md](PROCESSING_ACCESS.md) and the
+[receipt data access skill](.agents/skills/receipt-data-access/SKILL.md).
+This is separate from capture setup; it does not require reloading an active camera.
+
 Open the private Site on the Mac. Scan its QR code with the phone, sign in using the
 same owner account, and tap **Enable camera**. Mount the phone over a dark, matte surface.
 Keep Safari visible. Scanning starts automatically after **Enable camera**; use **Pause** and **Start scanning** on the Mac when needed. No LAN or certificate setup
@@ -137,8 +142,9 @@ metadata and final reports separately; a public Git repository is not a data bac
 After scanning, ask your Work/Codex session to inspect and process the batch. Capture itself performs no PDF creation, OCR or organisation. The Site
 exposes authenticated paginated metadata at `GET /api/captures`, capture metadata at
 `GET /api/captures/{id}`, and files at `GET /api/files/{id}/{raw|image|pdf|ocr}`.
-Requests must use the owner's authenticated browser/session. A public URL is not a file
-credential. No bearer-bypass tokens, public download links or embedded API keys are needed.
+Browser requests use the owner's authenticated session. For non-browser processing, configure
+the platform access token and scoped scanner credential through [PROCESSING_ACCESS.md](PROCESSING_ACCESS.md).
+An ordinary URL is not a file credential; keep downloads private and credentials in secret storage.
 
 Where supported, the open dashboard exposes these WebMCP tools:
 

@@ -457,3 +457,39 @@ it("leases fallback demand without stealing direct preview or carrying it to ano
   ).toBe(0);
   expect((await demand(camera)).status).toBe(409);
 });
+
+it("queues calibration disable only for a capable idle live camera", async () => {
+  const db = await mf.getD1Database("DB");
+  await db.prepare("INSERT OR IGNORE INTO station(id) VALUES(1)").run();
+  for (const state of [
+    {},
+    { supportsBackgroundReset: false },
+    { supportsBackgroundReset: true, activeId: crypto.randomUUID() },
+    { supportsBackgroundReset: true, recovery: "upload" },
+    { supportsBackgroundReset: true, activeId: null },
+  ]) {
+    await db
+      .prepare("UPDATE station SET state=?,expires=?,updated=? WHERE id=1")
+      .bind(JSON.stringify(state), Date.now() + 30000, Date.now())
+      .run();
+    const before = await db
+      .prepare("SELECT sequence FROM station WHERE id=1")
+      .first<{ sequence: number }>();
+    const response = await request("/api/control/clear-background", "POST");
+    const allowed =
+      "supportsBackgroundReset" in state &&
+      state.supportsBackgroundReset === true &&
+      !("activeId" in state && state.activeId) &&
+      !("recovery" in state && state.recovery === "upload");
+    expect(response.status).toBe(allowed ? 200 : 409);
+    const after = await db
+      .prepare("SELECT sequence,command FROM station WHERE id=1")
+      .first<{ sequence: number; command: string }>();
+    expect(after!.sequence).toBe(before!.sequence + (allowed ? 1 : 0));
+    if (allowed) expect(after!.command).toBe("clear-background");
+  }
+  await db.prepare("UPDATE station SET expires=0 WHERE id=1").run();
+  expect((await request("/api/control/clear-background", "POST")).status).toBe(
+    409,
+  );
+});

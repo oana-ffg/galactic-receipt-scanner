@@ -32,7 +32,7 @@ export class PhoneCamera {
   private vision: Vision | null = null;
   private running = false;
   private busy = false;
-  private calibrationPending = false;
+  private calibrationPending: "set" | "clear" | null = null;
   private connected = false;
   private previewRequestedUntil = 0;
   private camera = crypto.randomUUID();
@@ -49,6 +49,7 @@ export class PhoneCamera {
       if (command === "retry-upload") void this.recover();
       else if (command === "force") void this.force();
       else if (command === "set-background") this.setBackground();
+      else if (command === "clear-background") this.clearBackground();
       else this.machine.control(command);
       this.emitState();
     },
@@ -87,7 +88,7 @@ export class PhoneCamera {
       throw new Error(
         "Camera access requires HTTPS. Open the private Site in Safari.",
       );
-    this.calibrationPending = false;
+    this.calibrationPending = null;
     this.busy = false;
     this.machine = new CaptureState();
     this.camera = crypto.randomUUID();
@@ -175,6 +176,12 @@ export class PhoneCamera {
     this.emitState();
   }
   setBackground() {
+    this.changeBackground("set");
+  }
+  clearBackground() {
+    this.changeBackground("clear");
+  }
+  private changeBackground(mode: "set" | "clear") {
     if (
       !this.running ||
       !this.connected ||
@@ -183,8 +190,11 @@ export class PhoneCamera {
       this.machine.value.recovery === "upload"
     )
       return;
-    this.calibrationPending = true;
-    this.machine.value.backgroundMessage = "Checking the empty desk…";
+    this.calibrationPending = mode;
+    this.machine.value.backgroundMessage =
+      mode === "clear"
+        ? "Disabling empty-desk calibration…"
+        : "Checking the empty desk…";
     this.machine.interrupt();
     this.emitState();
   }
@@ -291,6 +301,8 @@ export class PhoneCamera {
           if (result.command === "retry-upload") void this.recover();
           else if (result.command === "force") void this.force();
           else if (result.command === "set-background") this.setBackground();
+          else if (result.command === "clear-background")
+            this.clearBackground();
           else this.machine.control(result.command);
         }
       } catch (error) {
@@ -373,17 +385,23 @@ export class PhoneCamera {
             frames.take()
           ) {
             drawFrame(this.video, this.canvas, 800);
-            const calibrate = this.calibrationPending;
-            this.calibrationPending = false;
-            if (calibrate) this.busy = true;
+            const calibration = this.calibrationPending;
+            const calibrate = calibration === "set";
+            const clearBackground = calibration === "clear";
+            this.calibrationPending = null;
+            if (calibration) this.busy = true;
             let analysis: Analysis;
             try {
               analysis = await this.vision!.request(
                 await createImageBitmap(this.canvas),
-                { preview: this.machine.previewChecks, calibrate },
+                {
+                  preview: this.machine.previewChecks,
+                  calibrate,
+                  clearBackground,
+                },
               );
             } finally {
-              if (calibrate && this.generation === generation)
+              if (calibration && this.generation === generation)
                 this.busy = false;
             }
             analyzed++;
@@ -395,12 +413,18 @@ export class PhoneCamera {
             );
             if (!this.running || this.generation !== generation) return;
             if (!this.connected || this.calibrationPending) continue;
-            if (calibrate) {
+            if (calibration) {
+              if (clearBackground && !analysis.backgroundCleared)
+                throw new Error("Empty-desk reset was not confirmed.");
+              if (analysis.backgroundCleared)
+                this.machine.value.backgroundReady = false;
               if (analysis.backgroundSet)
                 this.machine.value.backgroundReady = true;
               this.machine.value.backgroundMessage =
                 analysis.backgroundError ??
-                "Empty desk set. Keep the phone and lighting in the same position.";
+                (analysis.backgroundCleared
+                  ? "Empty-desk calibration disabled. Normal receipt detection restored."
+                  : "Empty desk set. Keep the phone and lighting in the same position.");
               this.machine.interrupt();
               this.emitState();
               continue;

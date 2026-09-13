@@ -174,12 +174,6 @@ function validate(
       "Annotation needs a page, original-pixel box, exact text or null and uncertainty.",
     );
   }
-  if (d.handwriting === "present")
-    requireThat(
-      d.annotations.length > 0,
-      400,
-      "Record the handwritten annotation, using null for unreadable text.",
-    );
   for (const target of [d.duplicateOf, d.mergedInto])
     requireThat(
       target === null ||

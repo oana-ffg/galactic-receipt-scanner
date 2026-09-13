@@ -15,6 +15,7 @@ export class CaptureState {
     supportsTargetedRetake: true,
     supportsForce: true,
     supportsBackground: true,
+    supportsBackgroundReset: true,
     selectedRetake: false,
     armed: true,
     cameraConnected: true,

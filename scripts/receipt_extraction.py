@@ -165,8 +165,6 @@ def validate(result):
                     0 <= box[0] < box[2] and 0 <= box[1] < box[3], "Invalid handwriting box")
     require(not result["handwritten_notes"] or result["has_handwriting"] is not False,
             "Notes contradict absent handwriting")
-    require(result["has_handwriting"] is not True or result["handwritten_notes"] or result["uncertainties"],
-            "Detected handwriting needs a note or concrete uncertainty")
     for uncertainty in result["uncertainties"]:
         text(uncertainty, "uncertainty")
 

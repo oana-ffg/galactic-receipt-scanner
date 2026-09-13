@@ -16,6 +16,7 @@ export function isControlCommand(command: unknown): command is string {
       "cancel-retake",
       "force",
       "set-background",
+      "clear-background",
     ].includes(command) ||
       retakeTarget(command) !== null)
   );
