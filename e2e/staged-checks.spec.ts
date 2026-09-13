@@ -112,6 +112,16 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
   expect(result.saved.sharpness).toBeUndefined();
   for (const quality of [result.moved, result.clipped])
     expect(quality.empty).toBe(false);
+  expect(result.saved.removalDiagnostics).toMatchObject({
+    geometry: "outline",
+    naturalEmpty: false,
+    calibration: "disabled",
+  });
+  expect(result.removed.removalDiagnostics).toMatchObject({
+    naturalEmpty: true,
+    calibration: "disabled",
+    cutHigh: expect.any(Number),
+  });
   expect(result.washedOut.emptyStrong).toBe(false);
   expect(result.removed).toMatchObject({
     empty: true,

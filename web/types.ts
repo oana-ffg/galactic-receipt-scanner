@@ -1,3 +1,26 @@
+export interface RemovalDiagnostics {
+  geometry: "no-candidates" | "incomplete" | "outline";
+  bounds?: string;
+  dark?: number;
+  bright?: number;
+  cutLow?: number;
+  cutHigh?: number;
+  regions?: number;
+  candidates?: number;
+  complete?: number;
+  inclusiveCoverage?: number;
+  coverage?: number;
+  previousBrightness?: number;
+  areaBrightness?: number;
+  naturalEmpty?: boolean;
+  naturalStrong?: boolean;
+  calibration?: "disabled" | "match" | "mismatch";
+  referenceDifference?: number;
+  referenceTileDifference?: number;
+  confirmedFrames?: boolean;
+  visionMs?: number;
+}
+
 export interface Quality {
   ok: boolean;
   quad: number[][] | null;
@@ -17,6 +40,7 @@ export interface Quality {
   noiseFloor?: number;
   glare?: boolean;
   receiptPixels?: number[];
+  removalDiagnostics?: RemovalDiagnostics;
 }
 
 export interface ScanState {
@@ -50,6 +74,20 @@ export interface ScanState {
   count: number;
   countKnown?: boolean;
   quality: Quality;
+  removalDiagnostics?: {
+    gate:
+      | "not-empty"
+      | "hands-unchecked"
+      | "hands-present"
+      | "confirming"
+      | "removed";
+    elapsedMs: number;
+    gapMs?: number;
+    clearMs: number;
+    strongMs: number;
+    samples: number;
+    resets: number;
+  };
 }
 
 export interface Capture {

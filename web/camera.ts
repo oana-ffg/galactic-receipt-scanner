@@ -432,6 +432,11 @@ export class PhoneCamera {
             // A media-clock fallback keeps older browsers usable, but cannot
             // justify the fast removal path without presented-frame evidence.
             if (!frames.confirmed) analysis.quality.emptyStrong = false;
+            if (analysis.quality.removalDiagnostics)
+              Object.assign(analysis.quality.removalDiagnostics, {
+                confirmedFrames: frames.confirmed,
+                visionMs: lastAnalyzed - started,
+              });
             const id = this.machine.observe(analysis.quality, started);
             this.emitState();
             if (id) await this.capture(id);

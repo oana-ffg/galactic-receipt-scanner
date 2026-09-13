@@ -64,6 +64,7 @@ export class CaptureState {
     }
   }
   control(action: string) {
+    this.value.removalDiagnostics = undefined;
     this.feedback = null;
     if (this.value.activeId) return;
     const afterManual = this.value.manualReview === true;
@@ -146,6 +147,7 @@ export class CaptureState {
   }
   observe(q: Quality, now: number): string | null {
     this.value.quality = q;
+    this.value.removalDiagnostics = undefined;
     if (this.value.activeId) return null;
     // Removal also clears retake intent while paused or waiting after a failed check.
     // A later receipt must never inherit the previous receipt's identity.
@@ -153,7 +155,9 @@ export class CaptureState {
       !this.value.manualReview &&
       (this.value.lastCapture || !this.value.armed)
     ) {
-      if (this.removal.observe(q, now)) {
+      const removed = this.removal.observe(q, now);
+      this.value.removalDiagnostics = this.removal.diagnostics;
+      if (removed) {
         this.value.lastCapture = null;
         if (!this.value.paused) this.value.manualReview = false;
         this.value.retakeOf = null;
@@ -205,6 +209,7 @@ export class CaptureState {
     return null;
   }
   saved(id: string, count?: number, manual = false) {
+    this.value.removalDiagnostics = undefined;
     this.feedback = null;
     if (count !== undefined) this.value.count = count;
     else if (this.value.lastSaved !== id) this.value.count++;
@@ -229,6 +234,7 @@ export class CaptureState {
     this.reset();
   }
   failed(message: string, recovery?: "retake" | "upload", retainedId?: string) {
+    this.value.removalDiagnostics = undefined;
     if (retainedId) {
       this.value.lastCapture = retainedId;
       this.value.retakeOf = null;
@@ -249,6 +255,7 @@ export class CaptureState {
   }
 
   interrupt() {
+    this.value.removalDiagnostics = undefined;
     // Re-establish stability and continuous paper removal after a connection gap.
     // Keep saved/failed captures and the removal latch intact.
     this.removal.reset();

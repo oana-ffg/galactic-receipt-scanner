@@ -247,6 +247,21 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       const diagnostic = reports.issues[0].context.diagnostics;
       expect(diagnostic.device).toBe("phone");
       expect(diagnostic.build).toMatch(/\/assets\/.*\.js$/);
+      expect(diagnostic.removalHistory).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "scan.removal",
+            data: expect.objectContaining({
+              gate: "removed",
+              armed: true,
+              empty: true,
+              handsChecked: true,
+              calibration: expect.any(String),
+              visionMs: expect.any(Number),
+            }),
+          }),
+        ]),
+      );
       expect(diagnostic.history).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ event: "camera.frames" }),

@@ -1,10 +1,55 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { DiagnosticHistory, requestCategory, diagnostics } from "./diagnostics";
+import {
+  DiagnosticHistory,
+  requestCategory,
+  diagnostics,
+  recordScanState,
+  diagnosticSnapshot,
+} from "./diagnostics";
+import { CaptureState } from "./state";
 import { api } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("private diagnostic history", () => {
+  it("retains removal measurements separately from network traffic within the issue budget", () => {
+    vi.stubGlobal("location", { pathname: "/" });
+    vi.stubGlobal("navigator", { userAgent: "synthetic", onLine: true });
+    vi.stubGlobal("document", { visibilityState: "visible" });
+    const state = new CaptureState();
+    state.control("start");
+    state.saved("synthetic");
+    state.observe(
+      {
+        ok: false,
+        quad: null,
+        hands: [],
+        handsChecked: false,
+        empty: false,
+        reason: "Unclear",
+        removalDiagnostics: {
+          geometry: "incomplete",
+          naturalEmpty: false,
+          coverage: 0.65,
+          cutHigh: 143,
+          calibration: "disabled",
+        },
+      },
+      100,
+    );
+    recordScanState(state.value);
+    for (let i = 0; i < 1000; i++)
+      diagnostics.record("request", { route: "station", ms: i });
+    const snapshot = diagnosticSnapshot();
+    expect(snapshot.removalHistory.at(-1)?.data).toMatchObject({
+      gate: "not-empty",
+      coverage: 0.65,
+      cutHigh: 143,
+      calibration: "disabled",
+    });
+    expect(JSON.stringify(snapshot).length).toBeLessThan(42000);
+    expect(JSON.stringify(snapshot.removalHistory)).not.toContain("synthetic");
+  });
   it("samples repeated request failures without hiding different routes or outcomes", () => {
     const history = new DiagnosticHistory(() => 0);
     for (let i = 0; i < 1000; i++)

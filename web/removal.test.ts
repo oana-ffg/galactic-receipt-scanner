@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { CaptureState } from "./state";
 import type { Quality } from "./types";
+import { RemovalEvidence } from "./removal";
 
 const empty: Quality = {
   ok: false,
@@ -97,4 +98,33 @@ it("does not count unobserved time or repeated timestamps as continuous removal"
   expect(state.value.armed).toBe(false);
   state.observe(empty, 2300);
   expect(state.value.armed).toBe(true);
+});
+
+it("explains a stalled removal, interrupted confirmation and eventual success", () => {
+  const evidence = new RemovalEvidence();
+  expect(evidence.observe(paper, 100)).toBe(false);
+  expect(evidence.observe(paper, 2100)).toBe(false);
+  expect(evidence.diagnostics).toMatchObject({
+    gate: "not-empty",
+    elapsedMs: 2000,
+    gapMs: 2000,
+    samples: 2,
+  });
+  evidence.observe(empty, 2250);
+  evidence.observe({ ...empty, handsChecked: false }, 2400);
+  expect(evidence.diagnostics).toMatchObject({
+    gate: "hands-unchecked",
+    clearMs: 0,
+    resets: 1,
+  });
+  evidence.observe(empty, 2550);
+  expect(evidence.observe(empty, 2700)).toBe(true);
+  expect(evidence.diagnostics).toMatchObject({
+    gate: "removed",
+    strongMs: 150,
+    elapsedMs: 2600,
+    samples: 6,
+  });
+  evidence.reset();
+  expect(evidence.diagnostics).toBeUndefined();
 });

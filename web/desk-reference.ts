@@ -2,6 +2,7 @@
 // the background from a rejected paper frame or update it while scanning.
 export class DeskReference {
   private pixels?: Uint8ClampedArray;
+  lastCheck?: { difference?: number; tileDifference?: number };
   clear() {
     this.pixels = undefined;
   }
@@ -9,6 +10,7 @@ export class DeskReference {
     this.pixels = pixels.slice();
   }
   matches(pixels: Uint8ClampedArray, width: number): boolean | undefined {
+    this.lastCheck = undefined;
     const reference = this.pixels;
     if (!reference) return undefined;
     if (reference.length !== pixels.length) return false;
@@ -29,9 +31,14 @@ export class DeskReference {
               count++;
             }
           }
-        if (tile / count > 12) return false;
+        if (tile / count > 12) {
+          this.lastCheck = { tileDifference: tile / count };
+          return false;
+        }
         total += tile;
       }
-    return total / (width * height * 3) <= 4;
+    const difference = total / (width * height * 3);
+    this.lastCheck = { difference };
+    return difference <= 4;
   }
 }

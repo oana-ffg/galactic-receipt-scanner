@@ -8,6 +8,7 @@ type Event =
   | "request"
   | "scan.state"
   | "scan.transition"
+  | "scan.removal"
   | "camera.start"
   | "camera.stop"
   | "camera.frames"
@@ -34,7 +35,10 @@ export class DiagnosticHistory {
   private entries: Entry[] = [];
   private size = 0;
   private last = new Map<string, number>();
-  constructor(private now = () => Date.now()) {}
+  constructor(
+    private now = () => Date.now(),
+    private maxSize = 24000,
+  ) {}
 
   record(
     event: Event,
@@ -50,7 +54,7 @@ export class DiagnosticHistory {
     this.last.set(key, at);
     if (this.last.size > 64) this.last.delete(this.last.keys().next().value!);
     const data: Fields = {};
-    for (const [key, value] of Object.entries(fields).slice(0, 32)) {
+    for (const [key, value] of Object.entries(fields).slice(0, 48)) {
       if (typeof value === "string") data[key] = value.slice(0, 180);
       else if (typeof value === "number" && Number.isFinite(value))
         data[key] = Math.round(value * 100) / 100;
@@ -66,7 +70,7 @@ export class DiagnosticHistory {
       this.entries.length &&
       (this.entries[0].at < at - 120000 ||
         this.entries.length > 180 ||
-        this.size > 24000)
+        this.size > this.maxSize)
     ) {
       this.size -= JSON.stringify(this.entries.shift()!).length + 1;
     }
@@ -78,6 +82,11 @@ export class DiagnosticHistory {
 }
 
 export const diagnostics = new DiagnosticHistory();
+// A separate budget prevents network chatter from evicting removal evidence.
+export const removalDiagnostics = new DiagnosticHistory(
+  () => Date.now(),
+  16000,
+);
 
 // Only a route category is retained: no capture IDs, query strings or file names.
 export function requestCategory(path: string): string {
@@ -106,6 +115,21 @@ export function requestCategory(path: string): string {
 let transition = "";
 export function recordScanState(state: ScanState) {
   const q = state.quality;
+  if (state.removalDiagnostics && !state.activeId) {
+    removalDiagnostics.record(
+      "scan.removal",
+      {
+        ...q.removalDiagnostics,
+        ...state.removalDiagnostics,
+        armed: state.armed,
+        empty: q.empty,
+        strong: q.emptyStrong,
+        handsChecked: q.handsChecked,
+        hands: q.hands.length,
+      },
+      state.removalDiagnostics.gate === "removed" ? 0 : 1000,
+    );
+  }
   const data = {
     phase: state.phase,
     stage: state.stage ?? null,
@@ -186,5 +210,6 @@ export function diagnosticSnapshot() {
     visibility: document.visibilityState,
     online: navigator.onLine,
     history: diagnostics.snapshot(),
+    removalHistory: removalDiagnostics.snapshot(),
   };
 }

@@ -134,6 +134,13 @@ function analyze(
     empty: false,
     motion: 0,
   };
+  const removal = removalOnly
+    ? (q.removalDiagnostics = {
+        geometry: "no-candidates",
+        bounds: paperBounds?.map((v) => Number(v.toFixed(4))).join(","),
+        previousBrightness: paperBrightness,
+      } satisfies import("./types").RemovalDiagnostics)
+    : undefined;
   try {
     const source = use(
       cv.matFromImageData(ctx.getImageData(0, 0, canvas.width, canvas.height)),
@@ -176,6 +183,13 @@ function analyze(
         ].map(Math.round),
       ),
     ].sort((a, b) => a - b);
+    if (removal)
+      Object.assign(removal, {
+        dark,
+        bright,
+        cutLow: cuts[0],
+        cutHigh: cuts.at(-1),
+      });
     const kernel = use(cv.Mat.ones(7, 7, cv.CV_8U));
     const contours = use(new cv.MatVector()),
       hierarchy = use(new cv.Mat());
@@ -210,6 +224,11 @@ function analyze(
           samples++;
         }
       areaBrightness = samples ? brightness / samples : 255;
+      if (removal)
+        Object.assign(removal, {
+          areaBrightness,
+          coverage: samples ? occupied / samples : 1,
+        });
       return samples ? occupied / samples : 1;
     };
     let inclusiveOccupancy = 1;
@@ -267,6 +286,12 @@ function analyze(
         }
       }
     }
+    if (removal)
+      Object.assign(removal, {
+        regions: regions.length,
+        candidates: candidates.length,
+        inclusiveCoverage: inclusiveOccupancy,
+      });
     const clearOfPaper = () => {
       if (
         regions.every(
@@ -311,6 +336,8 @@ function analyze(
         ),
     );
     if (!complete.length) {
+      if (removal)
+        Object.assign(removal, { geometry: "incomplete", complete: 0 });
       // Peripheral glare must not prevent rearming after the last paper's area
       // is clear. An edge region overlapping that area still blocks removal.
       q.empty = clearOfPaper();
@@ -320,6 +347,11 @@ function analyze(
       return q;
     }
     complete.sort((a, b) => b.area - a.area);
+    if (removal)
+      Object.assign(removal, {
+        geometry: "outline",
+        complete: complete.length,
+      });
     const papers = complete.filter(
       (candidate, i) =>
         !complete.slice(0, i).some((other) => {
@@ -512,8 +544,20 @@ async function process(
   );
   deskContext.drawImage(bitmap, 0, 0, 128, 128);
   const deskPixels = deskContext.getImageData(0, 0, 128, 128).data;
+  if (quality.removalDiagnostics)
+    Object.assign(quality.removalDiagnostics, {
+      naturalEmpty: quality.empty,
+      naturalStrong: quality.emptyStrong,
+    });
   if (!full && !outputs && !calibrate) {
     const matches = deskReference.matches(deskPixels, 128);
+    if (quality.removalDiagnostics)
+      Object.assign(quality.removalDiagnostics, {
+        calibration:
+          matches === undefined ? "disabled" : matches ? "match" : "mismatch",
+        referenceDifference: deskReference.lastCheck?.difference,
+        referenceTileDifference: deskReference.lastCheck?.tileDifference,
+      });
     if (matches !== undefined) {
       quality.empty = matches;
       quality.emptyStrong = matches;
