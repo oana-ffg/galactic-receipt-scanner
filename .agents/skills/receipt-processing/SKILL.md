@@ -31,6 +31,16 @@ conversation history or images. Each worker handles one document. Default batch:
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
 
+**Stop the entire batch when a worker fails or reports a blocking error**, including
+approval rejection, inaccessible originals, failed submission or failed PDF attestation.
+Do not spawn a replacement/next worker or reclaim the released document. Preserve private
+artifacts and report the failed stage, non-sensitive reason and known claim/save state
+to the owner. Release a known active, unsubmitted claim when safely possible; retain
+uncertain submission state for reconciliation instead of assuming it was not saved.
+Wait for explicit owner direction before resuming the batch. A successfully saved
+model-review/awaiting-page/broken disposition is a document outcome, not by itself a
+worker execution failure.
+
 Check `/api/processing/access`: version 2 must advertise queueClaims. Use the shared
 20-minute renewable lease, one document per fresh worker. An hourly run handles at most
 10 Luna documents; a daily run handles at most 10 Astra exceptions. Stop a run when the

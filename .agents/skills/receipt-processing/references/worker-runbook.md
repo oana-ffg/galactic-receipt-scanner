@@ -206,6 +206,11 @@ phase finishes: PDF attestation rejects an active model claim, even for a differ
 
 ## Lease and recovery
 
+A worker failure stops the coordinator's entire batch as specified in the processing
+skill. Return the failed operation and safe metadata; do not ask a new worker to retry.
+An automatic approval rejection is a blocking error: preserve the request privately,
+report the reviewer's non-sensitive stated reason, and stop for owner direction.
+
 Before 20-minute expiry, save a new renewal request with the token loaded from
 `claim-response.json`, POST `/api/processing/renew`, and retain the returned `expires`
 (epoch milliseconds). Renew only while the claim is still active. If abandoning unused
