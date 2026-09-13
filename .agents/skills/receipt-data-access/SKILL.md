@@ -90,3 +90,29 @@ inspect it, then post document_id, current revision, sha256 and inspection evide
 Version 2 exposes shared claims, private categories, model confidences and human review.
 The encrypted browser handoff provides API credentials independently of browser password
 storage. No remote MCP server installation is needed for this WebMCP workflow.
+
+## Exact command forms
+
+Use the coordinator-provided Python executable with `-X utf8` on Windows. All forms
+below follow `scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG`; uppercase names
+denote actual supplied paths/IDs, never values to invent. The global --config option
+goes **before** the subcommand.
+
+| Subcommand | Result / constraint |
+| --- | --- |
+| `status` | Connection capabilities; coordinator verifies once per run. |
+| `get API_PATH` | Parsed JSON; construct token-bearing paths inside Python instead of shell arguments. |
+| `post PROCESSING_API_PATH PRIVATE_JSON_FILE` | POSTs the saved JSON bytes; use /api/processing/ routes. |
+| `original CAPTURE_ID --directory PRIVATE_DIRECTORY` | Verified original path/hash; --directory is optional here. |
+| `prepare CAPTURE_ID` | Verified original and stored OCR paths/hashes. **No --directory CLI option.** |
+| `pdf DOCUMENT_ID` | Generated, uploaded, pinned verified PDF. **No --directory CLI option.** |
+| `file API_PATH SHA256 PRIVATE_DESTINATION` | Hash-verified bytes for a pinned artifact. |
+| `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` | Advanced manual upload; prepare already does this. |
+| `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` | Advanced manual upload; pdf already does this. |
+
+There are no claim/context/categories CLI subcommands; use get/post or the existing
+Python client. For per-worker cache directories, Python `client.prepare(id,directory)`
+and `client.pdf(id,directory)` accept that argument. Follow the
+[worker runbook](../receipt-processing/references/worker-runbook.md) for copying IDs,
+tokens, revisions and hashes programmatically, local extraction validation, PDF
+inspection/attestation and bounded error recovery.

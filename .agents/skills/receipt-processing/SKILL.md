@@ -25,7 +25,8 @@ falling back to a personal secret store.
 
 Spawn managed workers **one at a time**, each with `fork_turns: none`: use
 `gpt-5.6-luna` for the hourly small stage and `gpt-6-astra` for the daily large stage.
-Pass the repository location, worker instructions and a bounded source assignment, not
+Follow the [worker runbook](references/worker-runbook.md) for the coordinator handoff: provide
+verified runtime/config/work paths and the exact call recipes. Pass a bounded source assignment, not
 conversation history or images. Each worker handles one document. Default batch: 10 documents.
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
