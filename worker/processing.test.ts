@@ -5,6 +5,7 @@ import { processingRoute } from "./processing";
 import {
   arithmetic,
   extractionErrors,
+  extractionProblems,
   type Extraction,
 } from "../web/extraction";
 import { newDocument } from "../web/documents";
@@ -381,6 +382,46 @@ it("uses integer amounts, keeps included VAT separate and reconciles payment fee
   expect(arithmetic(e).paymentDifference).toBe(0);
   e.line_items[0].amount_minor = 12.34;
   expect(extractionErrors(e).length).toBeGreaterThan(0);
+});
+
+it("adds signed VAT once to net invoice lines and requires the printed tax amount", () => {
+  const e = extraction();
+  e.type = "invoice";
+  e.tax_basis = "net-plus-tax";
+  e.line_items[0].amount_minor = 10000;
+  e.adjustments = [{ description: "Net discount", amount_minor: -1000 }];
+  e.vat_minor = 2250;
+  e.total_minor = e.charged_total_minor = 11250;
+  expect(arithmetic(e)).toMatchObject({
+    status: "matched",
+    difference: 0,
+    paymentDifference: 0,
+  });
+  e.vat_minor = null;
+  expect(arithmetic(e)).toMatchObject({
+    status: "incomplete",
+    difference: null,
+  });
+  expect(extractionProblems(e)).toContain(
+    "Printed line amounts cannot yet be fully reconciled.",
+  );
+  e.confirmed_arithmetic_mismatch = true;
+  expect(extractionErrors(e)).toContain(
+    "A confirmed mismatch requires a complete financial source with a real arithmetic discrepancy.",
+  );
+  e.confirmed_arithmetic_mismatch = false;
+  e.vat_minor = 0;
+  e.total_minor = e.charged_total_minor = 9000;
+  expect(arithmetic(e).status).toBe("matched");
+  e.vat_minor = 2250;
+  e.total_minor = e.charged_total_minor = 11251;
+  expect(arithmetic(e).difference).toBe(-1);
+  e.type = "credit-note";
+  e.line_items[0].amount_minor = -10000;
+  e.adjustments = [{ description: "Reversed discount", amount_minor: 1000 }];
+  e.vat_minor = -2250;
+  e.total_minor = e.charged_total_minor = -11250;
+  expect(arithmetic(e).status).toBe("matched");
 });
 
 it("downgrades OCR disagreement without correcting the model and lets Astra resolve it from pixels", async () => {

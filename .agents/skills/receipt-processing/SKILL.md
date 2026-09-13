@@ -14,7 +14,8 @@ scan timestamp, source hash, retake and derivative revision.
 ## Coordinator
 
 Prefer Luna for routine coordination when selectable; a skill cannot switch its caller's
-model. Spawn managed `gpt-5.6-luna` workers **one at a time**, each with `fork_turns: none`.
+model. Spawn managed workers **one at a time**, each with `fork_turns: none`: use
+`gpt-5.6-luna` for the hourly small stage and `gpt-6-astra` for the daily large stage.
 Pass the repository location, worker instructions and a bounded source assignment, not
 conversation history or images. Each worker handles one document. Default batch: 10 documents.
 Return only source/document IDs, saved artifact references, status and concrete failures.

@@ -202,12 +202,14 @@ export function arithmetic(e: Extraction) {
     complete &&
     e.currency !== null &&
     e.tax_basis !== "unknown" &&
+    (e.tax_basis !== "net-plus-tax" || e.vat_minor !== null) &&
     e.total_minor !== null &&
     e.line_items.length > 0 &&
     e.line_items.every((l) => l.amount_minor !== null);
   const difference = computable
     ? e.line_items.reduce((sum, l) => sum + l.amount_minor!, 0) +
-      e.adjustments.reduce((sum, a) => sum + a.amount_minor, 0) -
+      e.adjustments.reduce((sum, a) => sum + a.amount_minor, 0) +
+      (e.tax_basis === "net-plus-tax" ? e.vat_minor! : 0) -
       e.total_minor!
     : null;
   const paymentDifference =

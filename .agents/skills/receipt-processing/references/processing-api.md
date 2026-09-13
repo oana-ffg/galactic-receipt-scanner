@@ -36,7 +36,11 @@ The server derives flags and certainty summaries, not the worker.
 - `adjustments`, `payment_adjustments`: `{description,amount_minor}` arrays. Adjustments
   are signed arithmetic components, not informational included VAT or savings.
 - `total_minor`, `charged_total_minor`, `vat_minor`: printed values or null.
-- `tax_basis`: gross, net-plus-tax, unknown. `completeness`: complete, fragment, uncertain.
+- `tax_basis`: gross, net-plus-tax, unknown. Gross line amounts already include VAT. For
+  net-plus-tax, line amounts and adjustments are pre-tax; the server adds signed vat_minor
+  exactly once. Do not also put VAT in adjustments. Missing VAT makes a net parse incomplete;
+  printed zero VAT is valid. Preserve signed amounts on credit notes.
+  `completeness`: complete, fragment, uncertain.
 - `category_id`: existing category UUID or null. `certainty`: low, medium, high.
 - `uncertainties`, `broken_reasons`: string arrays. `evidence`: explicit source findings.
 - `confirmed_arithmetic_mismatch`: true only after rereading a complete financial document
