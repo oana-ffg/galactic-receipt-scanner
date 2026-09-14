@@ -125,6 +125,10 @@ Spawn managed workers **one at a time**, each with `fork_turns: none`: use
 Follow the [worker runbook](references/worker-runbook.md) for the coordinator handoff: provide
 verified runtime/config/work paths and the exact call recipes. Pass a bounded source assignment, not
 conversation history or images. Each worker handles one document. Default batch: 10 documents.
+Retain coordination until the requested count is verified complete, the queue is
+empty/busy, or an actual blocking failure occurs. Progress updates are not a final
+handoff: do not end the task while a worker is active or further assigned documents
+remain. A long-running batch alone is not a stop condition.
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
 
