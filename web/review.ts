@@ -496,7 +496,7 @@ export async function mountReview(app: HTMLElement) {
         async () => {
           await refresh();
           setMessage(
-            "Human review saved. Agent readings and originals are preserved.",
+            "Receipt changes saved. Agent readings and originals are preserved.",
           );
         },
         ocrSource,

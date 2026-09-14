@@ -562,7 +562,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await form.getByLabel("Line amount", { exact: true }).fill("12.34");
   await form.getByRole("button", { name: "Accept human review" }).click();
   await expect(page.locator("#review-message")).toContainText(
-    "Human review saved",
+    "Receipt changes saved",
   );
   expect(writes).toBe(1);
   expect(docs[0].processing!.extraction.category_id).toBe(categoryB);
