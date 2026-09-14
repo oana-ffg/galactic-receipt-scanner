@@ -62,7 +62,8 @@ def validate_request(message):
         "document": {"document_id": str},
         "validate": {"extraction": dict},
         "draft": {"extraction": dict},
-        "assess": {"extraction": dict, "rationale": str},
+        "assess": {"extraction": dict, "rationale": str, "confirmation_sha256": str},
+        "attest": {"pdf_sha256": str},
     }.get(message["op"], {})
     for field, kind in required.items():
         if not isinstance(message.get(field), kind) or (kind is str and not message[field].strip()):
@@ -775,7 +776,9 @@ class Worker:
             self.state["qwen_file"]=self.record("qwen-reading",qwen)
             return self.database_checkpoint("confirmation", {"token":self.active()["token"],**qwen})
         if op == "assess":
-            require(set(message)=={"op","extraction","rationale"} and self.state.get("confirmation") and not self.state.get("assessment"),"Assess the saved findings once, preserving both earlier readings.")
+            require(set(message)=={"op","extraction","rationale","confirmation_sha256"} and self.state.get("confirmation") and not self.state.get("assessment"),"Assess the saved findings once, preserving both earlier readings.")
+            if message["confirmation_sha256"] != self.state["confirmation"]["sha256"]:
+                raise ProtocolInputError("Read the actual confirm result and assess its exact confirmation_sha256.")
             validation=self.check("validate",extraction=message["extraction"])
             if validation["errors"]: return {"assessed":False,"validation":validation}
             rationale=message["rationale"]
@@ -809,6 +812,8 @@ class Worker:
             return self.render(message.get("dpi", 300))
         if op == "attest":
             require(self.state["phase"] == "pdf" and self.state.get("rendered"), "Render and inspect the PDF before attestation.")
+            if message["pdf_sha256"] != self.state["pdf"]["sha256"]:
+                raise ProtocolInputError("Inspect the actual final PDF renders and supply their pdf_sha256.")
             evidence = message.get("evidence")
             require(message.get("all_pages_inspected") is True and isinstance(evidence, str)
                     and 0 < len(evidence.strip()) <= 2000, "Record the actual inspection of every PDF page.")

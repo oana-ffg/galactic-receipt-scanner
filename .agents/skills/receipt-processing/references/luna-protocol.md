@@ -29,7 +29,9 @@ or connection setup. Include that evidence and authorization for original-image 
 financial extraction, OCR, PDF uploads and inspection in the worker handoff. The profile
 binds the helper to that exact origin; stdin cannot change destinations, runtimes or paths.
 
-Each fresh Luna handles one document. Launch from the shell tool using the provided
+Each fresh Luna handles one document and owns its helper session. The coordinator sends
+the assignment and awaits a compact outcome; it never forwards individual requests.
+Launch from Luna's own shell tool using the provided
 absolute paths and exact argument order, `tty: true` and `login: false`:
 
 ```text
@@ -65,8 +67,11 @@ legacy runbook; do not copy them into this helper's stdin.
 - A document read needs both `op: "document"` and `document_id`, copied from the
   claim or context. A bare `{"op":"document"}` is incomplete.
 - `confirm`, `submit` and `pdf` each need only their `op`.
-- An assessment has exactly `op: "assess"`, `extraction`, and `rationale`.
-  Do not send `changed_fields` or a confirmation hash; the helper derives and pins them.
+- An assessment has exactly `op: "assess"`, `extraction`, `rationale`, and
+  `confirmation_sha256`, copied from the actual `confirm` result's `sha256` after
+  reading that evidence. Do not send `changed_fields`; the helper derives them.
+- An attestation includes `pdf_sha256`, copied from the actual final `pdf`/`render`
+  result's `sha256` after inspecting every returned page. Never use the draft PDF hash.
 - An `input_error` is a correctable request mistake: use its explanation to fix the
   same operation. Do not switch to an unrelated operation or abandon the claim.
 - Crop changes belong in `previews.layouts` before the draft. Do not put an images
@@ -85,17 +90,14 @@ PDF render. Never prewrite the remaining workflow, fabricate future inspection e
 or treat a request file as proof that the operation succeeded. The helper checks stage
 order and hashes, but cannot establish that a model actually looked at an image.
 
-If the coordinator explicitly owns the process and supplies a file-only handoff, follow
-that handoff instead of launching another helper. Use only its designated request paths;
-helper journal names such as `NNNN-input.json` and state files are reserved. Publish a
-request once, report it finalized, and never edit it after publication. Wait for the
-coordinator's real response before the next checkpoint. A host-provided SHA-256 readiness
-seal protects the finalized bytes, not the truth of the visual judgment. This seal is
-optional host transport machinery, not an HTTP endpoint or a built-in helper feature.
-An unexecuted correction uses a new request sequence; a correction to the frozen layout
-or immutable initial-draft checkpoint requires coordinator recovery. Ordinary extraction
-corrections after confirmation belong in `assess`. Never edit the old request or submit
-another initial draft.
+Creating JSON files is not the assigned outcome. Send each request directly to the
+helper and use its actual response to decide the next action. Do not write a batch of
+future commands or use a file-only relay. The helper owns its request journals and state
+files; never edit them. Exact evidence hashes reject missing/stale references, but do
+not prove inspection: still open the images and explain the actual findings. Ordinary
+extraction corrections after confirmation belong in `assess`; never replace the frozen
+layout or immutable initial draft. Report a conflicting file-only handoff or blocked
+direct launch as a configuration failure rather than starting a second process.
 
 | Operation | Additional fields | Result / next step |
 | --- | --- | --- |
@@ -110,11 +112,11 @@ another initial draft.
 | `prepare` | `capture_ids` for all and only the draft's retained pages | Only after `draft`: source-hash/crop/rotation-matched PP artifacts plus text/polygons/confidence for comparison and invisible PDF search text. No model download or installation. |
 | `validate` | `extraction` using the complete [API contract](processing-api.md#parse) | Actual shared schema/arithmetic checks. Correct validation errors locally; never change printed digits to force balance. |
 | `confirm` | None | Pin the exact saved PP artifacts for all frozen pages and return server OCR/math comparisons. This performs no Qwen inference. |
-| `assess` | `extraction` (complete reassessed object), `rationale` (1–20,000 characters) | In this same Luna context, check PP text against vendor, date, category and matched-page pixels. Explain corrections and uncertainty. Saves a separate final reading; never overwrites the initial draft or PP. Returns changed fields and arithmetic. |
+| `assess` | `extraction` (complete reassessed object), `rationale` (1–20,000 characters), `confirmation_sha256` from `confirm` | In this same Luna context, read the actual PP evidence and check it against vendor, date, category and matched-page pixels. Explain corrections and uncertainty. Saves a separate final reading; never overwrites the initial draft or PP. Returns changed fields and arithmetic. |
 | `submit` | None | Submit the saved reassessment after `confirm` and `assess`. Do not resend extraction/grouping. The server records numeric disagreements and caps certainty when needed. Saved page order, crop and rotation are verified. |
 | `pdf` | None | Generates/uploads once, checks server hash/revision, then renders the local PDF at 150 dpi. Returns local PDF/render paths. No repeated PDF download. If filename/relationships make PDF inapplicable, returns a completed saved disposition. |
 | `render` | Optional `dpi: 300` | Higher-resolution render of the same verified local PDF when small print requires it. |
-| `attest` | `all_pages_inspected: true`, `evidence` string of 1â€“2000 characters | After your own inspection of EVERY rendered page against originals, saves exact-hash PDF review and verifies readback. This is not human review. |
+| `attest` | `pdf_sha256` from the final `pdf`/`render` response, `all_pages_inspected: true`, `evidence` string of 1–2000 characters | After your own inspection of EVERY rendered page against originals, saves exact-hash PDF review and verifies readback. This is not human review. |
 | `status` | None | Safe stage/claim/document metadata and any recorded failure. |
 | `renew` | None | Renew the active lease explicitly if needed. Automatic keepalive also runs while waiting for model input. |
 | `release` | None | Release only a known active unsubmitted claim. Never releases a potentially submitted claim. |

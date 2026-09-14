@@ -230,8 +230,8 @@ class WorkerTests(unittest.TestCase):
         self.send("previews", capture_ids=list(ids), **({"layouts": layouts} if layouts else {}))
         self.send("draft", extraction=value or extraction(), **({"grouping": grouping} if grouping else {}))
         self.send("prepare", capture_ids=list(ids))
-        self.send("confirm")
-        self.send("assess", extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
+        confirmation = self.send("confirm")
+        self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
 
     def test_checkpoint_lost_acknowledgements_replay_exactly_without_new_qwen(self):
         self.claimed()
@@ -266,10 +266,10 @@ class WorkerTests(unittest.TestCase):
         self.send("draft",extraction=extraction())
         self.assertIn("input_error",self.worker.handle({"op":"submit"}))
         self.send("prepare",capture_ids=[DID])
-        self.send("confirm")
+        confirmation = self.send("confirm")
         final=extraction()
         final["vendor"]="Synthetic corrected shop"
-        self.send("assess",extraction=final,rationale="Synthetic correction grounded in pixels.")
+        self.send("assess",confirmation_sha256=confirmation["sha256"],extraction=final,rationale="Synthetic correction grounded in pixels.")
         self.assertEqual(self.worker.state["draft"]["extraction"]["vendor"],"Synthetic Shop")
         self.assertEqual(self.fake.initial_draft["extraction"]["vendor"],"Synthetic Shop")
         self.send("submit")
@@ -286,8 +286,8 @@ class WorkerTests(unittest.TestCase):
         self.send("validate", extraction=extraction())
         self.send("submit")
         self.send("document", document_id=DID)
-        self.send("pdf")
-        result = self.send("attest", all_pages_inspected=True, evidence="Synthetic page inspected.")
+        pdf = self.send("pdf")
+        result = self.send("attest", pdf_sha256=pdf["pdf"]["sha256"], all_pages_inspected=True, evidence="Synthetic page inspected.")
         self.assertTrue(result["pdf_review_attested"])
         self.assertEqual(result["revision"], 4)
         self.send("quit")
@@ -296,6 +296,42 @@ class WorkerTests(unittest.TestCase):
         self.worker.lock.close()
         self.worker = self.make_worker()
         self.assertEqual(self.worker.state["phase"], "ready")
+
+    def test_speculative_or_stale_assessment_cannot_save_a_reading(self):
+        # Even after prerequisites finish, a prewritten request without the actual
+        # evidence reference must not acquire a valid confirmation automatically.
+        request = {"op": "assess", "extraction": extraction(), "rationale": "Synthetic assessment."}
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        self.send("draft", extraction=extraction())
+        self.send("prepare", capture_ids=[DID])
+        confirmation = self.send("confirm")
+        for fields in ({}, {"confirmation_sha256": "a" * 64}):
+            with self.subTest(fields=fields):
+                calls = list(self.fake.calls)
+                result = self.worker.handle({**request, **fields})
+                self.assertIn("input_error", result)
+                self.assertNotIn("assessment", self.worker.state)
+                self.assertEqual(self.fake.calls, calls)
+        self.send("assess", confirmation_sha256=confirmation["sha256"],
+                  extraction=extraction(), rationale="Synthetic assessment after reading confirmation.")
+
+    def test_speculative_or_stale_attestation_cannot_approve_pdf(self):
+        request = {"op": "attest", "all_pages_inspected": True, "evidence": "Synthetic inspection."}
+        self.prepared()
+        self.send("submit")
+        pdf = self.send("pdf")
+        for fields in ({}, {"pdf_sha256": "a" * 64},
+                       {"pdf_sha256": self.worker.state["draft"]["pixel_pdf"]["sha256"]}):
+            with self.subTest(fields=fields):
+                calls = list(self.fake.calls)
+                result = self.worker.handle({**request, **fields})
+                self.assertIn("input_error", result)
+                self.assertEqual(self.worker.state["phase"], "pdf")
+                self.assertFalse(self.fake.documents[DID]["checks"]["pdf"])
+                self.assertEqual(self.fake.calls, calls)
+        self.send("attest", pdf_sha256=pdf["pdf"]["sha256"], all_pages_inspected=True,
+                  evidence="Synthetic inspection after opening final renders.")
 
     def test_pp_confirmation_never_calls_qwen_and_preserves_reassessment(self):
         self.worker.confirmation_provider = "ppocr"
@@ -317,8 +353,8 @@ class WorkerTests(unittest.TestCase):
         self.send("draft", extraction=extraction())
         self.send("prepare", capture_ids=[DID])
         self.assertEqual(self.worker.state["prepared"][DID]["crop"], [0, 0, 10, 20])
-        self.send("confirm")
-        self.send("assess", extraction=extraction(), rationale="Synthetic reviewed crop.")
+        confirmation = self.send("confirm")
+        self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=extraction(), rationale="Synthetic reviewed crop.")
         self.send("submit")
         self.assertEqual(self.fake.documents[DID]["pages"][0]["crop"], [0, 0, 10, 20])
         self.assertEqual(self.fake.documents[DID]["pages"][0]["rotation"], 90)
@@ -431,7 +467,7 @@ class WorkerTests(unittest.TestCase):
         self.send("submit")
         self.send("pdf")
         Path(self.worker.state["pdf"]["path"]).write_bytes(b"corrupted")
-        result = self.worker.handle({"op": "attest", "all_pages_inspected": True, "evidence": "Synthetic inspection."})
+        result = self.worker.handle({"op": "attest", "pdf_sha256": self.worker.state["pdf"]["sha256"], "all_pages_inspected": True, "evidence": "Synthetic inspection."})
         self.assertTrue(result["blocking"])
         self.assertNotIn(("POST", "/api/processing/pdf-review"), self.fake.calls)
 
@@ -514,7 +550,7 @@ class WorkerTests(unittest.TestCase):
         self.send("submit")
         self.send("pdf")
         with windows_replace_failure(fail_at=3):
-            attest = self.worker.handle({"op": "attest", "all_pages_inspected": True,
+            attest = self.worker.handle({"op": "attest", "pdf_sha256": self.worker.state["pdf"]["sha256"], "all_pages_inspected": True,
                                          "evidence": "Synthetic inspection."})
         self.assertEqual(attest["phase"], "pdf")
         self.assertNotIn(("POST", "/api/processing/pdf-review"), self.fake.calls)

@@ -124,6 +124,14 @@ conversation history or images. Each worker handles one document. Default batch:
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
 
+Each Luna worker launches and owns its bounded Python helper, sends requests directly
+through its own `write_stdin` session, reads actual responses and opens the returned
+images. The coordinator dispatches documents and receives outcomes; it does not relay
+individual commands, write readiness markers or own the worker's process. Assign the
+outcome "process one document through verified completion", never "produce the request
+JSON files". A process session cannot be handed between tasks. An approval failure is
+a blocker to resolve in that execution context, not permission to introduce forwarding.
+
 **Stop the entire batch when a worker fails or reports a blocking error**, including
 approval rejection, inaccessible originals, failed submission or failed PDF attestation.
 Do not spawn a replacement/next worker or reclaim the released document. Preserve private
@@ -137,6 +145,13 @@ a saved outcome**, including low/medium certainty, OCR disagreement and arithmet
 questions routed to Astra. Do not ask the owner to approve individual review flags.
 Later explicitly selected Astra audits handle financial review separately. In reports, distinguish
 "saved; queued for Astra" from a failed or uncertain network/journal operation.
+
+A saved small-stage result is not a fresh pending receipt for the next Luna. It becomes
+eligible again only when marked for reparse or when an awaiting-pages record sees new
+captures. An explicitly requested Astra review starts with an independent pixel reading
+before comparing prior readings, preserving their history. Normal large-stage claims
+select model-review/broken outcomes; `review_all:true` also includes extracted outcomes.
+Do not assume an unflagged incorrect completion will automatically be checked again.
 
 Check `/api/processing/access`: version 2 must advertise queueClaims and lunaReassessment. Use the shared
 20-minute renewable lease, one document per fresh worker. Use 10-document batches as checkpoints. An explicitly requested continuous/day/overnight
