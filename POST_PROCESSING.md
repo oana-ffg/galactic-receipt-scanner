@@ -23,15 +23,14 @@ does not need to sort receipts, transcribe text or create PDFs while feeding the
    and cropping; use source-backed visual transcription and the versioned artifact API
    for any manually prepared outputs. Do not discard a forced take because an earlier
    accepted take is still current.
-3. Call `transcribe_saved_receipts` with up to 20 accepted IDs at a time. This runs
-   Danish/English OCR locally in the desktop browser, independently of camera capture.
-   One worker is reused within each batch. Inspect every returned result: a failed item
-   remains unfinished even if the rest succeeded. Previously saved extraction remains
-   available if a later attempt fails.
+3. Run the Luna workflow through the receipt-processing skill. Luna first reads the
+   document pixels and freezes the page layout. The processing worker then runs PP-OCR
+   on those crops and rotations outside the browser, saves immutable OCR artifacts,
+   and returns the text to the same Luna worker for reassessment.
 4. Retrieve and visually inspect each original. Compare its text, amounts and merchant
-   heading with both saved OCR passes. The automatic layout pass can miss amount columns;
-   the block pass can miss a large logo. Both observations are retained, with word boxes
-   in original-image pixels. Confidence scores do not prove correctness.
+   heading with the saved Luna and PP readings. PP text polygons, confidence and source
+   provenance remain available in the review comparison and optional OCR overlay.
+   Confidence scores do not prove correctness.
 5. Review Danish characters, decimal commas, minus signs, discounts, dates, VAT and totals
    against the pixels. Do not infer a missing digit from arithmetic. For pictorial logos,
    describe what is visible; do not invent a merchant identity. A leaf or other graphic
@@ -45,9 +44,10 @@ does not need to sort receipts, transcribe text or create PDFs while feeding the
    leave the original intact. Reconcile the final manifest against all captured IDs:
    completed, rejected or explicitly unresolved. Report every unresolved source.
 
-The open dashboard must remain available during browser processing. If interrupted,
-resume from saved output status and the manifest. No external OCR account or API key is
-required. The engine and pinned language models are served by the private Site.
+The browser only displays saved OCR; it does not run transcription. The Luna processing
+worker produces the searchable PDF using PP's saved search layer. Browser PDF generation
+can reuse matching saved OCR but never starts recognition when it is missing. Resume
+interrupted processing from saved output status and the manifest.
 
 Recent captures shows the original with its saved outline beside an unsaved PDF draft.
 Visible rows are processed one at a time on the desktop, after checking the original's
@@ -57,8 +57,3 @@ The preview shows a thumbnail of the exact image embedded in its downloadable PD
 Drafts do not change saved artifacts, capture status or which retake is current. A failed
 check leaves the original available with an explanation. Review the output before using
 `prepare_receipt_outputs` to persist a derivative; old saved PDFs remain separate.
-
-The bundled engine is Tesseract.js 7 with the maintainer's best-integer Danish/English
-models. Model hashes are recorded in each extraction. See the upstream
-[language-model documentation](https://github.com/naptha/tessdata) and
-[Tesseract.js API](https://github.com/naptha/tesseract.js/blob/master/docs/api.md).

@@ -8,7 +8,6 @@ import {
   readDocuments,
   saveDocuments,
   generateDocumentPdf,
-  processOcr,
 } from "./document-processing";
 import { registerSiteTools } from "./site-tools";
 import {
@@ -50,7 +49,7 @@ function amount(value: string): number {
 
 export async function mountReview(app: HTMLElement) {
   app.innerHTML =
-    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
+    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
   let selected: string | null = null;
   let categories: PurchaseCategory[] = [];
@@ -757,32 +756,6 @@ export async function mountReview(app: HTMLElement) {
   search.oninput = renderList;
   app.querySelector<HTMLButtonElement>("#review-refresh")!.onclick = () =>
     void action(refresh);
-  app.querySelector<HTMLButtonElement>("#review-ocr")!.onclick = () =>
-    void action(async () => {
-      const ids = catalog.captures
-        .filter(
-          (c) =>
-            c.is_current &&
-            c.status === "accepted" &&
-            c.ocr_status !== "unverified",
-        )
-        .slice(0, 20)
-        .map((c) => c.id);
-      if (!ids.length) {
-        setMessage(
-          "No accepted originals awaiting OCR. Review the saved transcriptions and forced captures.",
-        );
-        return;
-      }
-      setMessage(
-        "Transcribing up to 20 originals. Keep this tab open; scanning remains independent.",
-      );
-      const result = await processOcr(ids);
-      await refresh();
-      setMessage(
-        `${result.results.filter((r) => r.ok).length} transcribed; ${result.results.filter((r) => !r.ok).length} failed. OCR still needs verification against the originals.`,
-      );
-    });
   registerSiteTools(refresh);
   await action(refresh);
 }

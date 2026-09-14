@@ -8,7 +8,17 @@ import {
   clip,
   endPath,
 } from "pdf-lib";
-import type { OcrArtifact } from "./ocr-data";
+/** Saved search-layer contract shared by PP-OCR and historical OCR artifacts. */
+export interface PdfOcr {
+  source: {
+    captureId: string;
+    sha256: string;
+    pixels: number[];
+    rotation?: 0 | 90 | 180 | 270;
+    region?: { left: number; top: number; width: number; height: number };
+  };
+  text_only_pdf_layers: { base64: string; sha256: string }[];
+}
 /** Preserve uploaded image pixels. Search text comes only from the independent OCR artifact. */
 export async function addReceiptPage(
   pdf: PDFDocument,
@@ -16,7 +26,7 @@ export async function addReceiptPage(
   type: string,
   rotation: 0 | 90 | 180 | 270,
   crop: [number, number, number, number] | null | undefined,
-  ocr?: OcrArtifact,
+  ocr?: PdfOcr,
   quad?: number[][] | null,
   imageOnly = false,
 ) {
@@ -75,8 +85,7 @@ export async function addReceiptPage(
     if (source.getPageCount() !== 1)
       throw Error("Expected one OCR text layer page.");
     const media = source.getPage(0).getSize();
-    // Tesseract's rectangle restricts recognition, while its PDF canvas remains
-    // the complete original image at the engine's DPI. Reject other canvases.
+    // Saved text layers use the full original canvas, even for cropped OCR.
     if (
       ocr?.source.pixels[0] !== image.width ||
       ocr.source.pixels[1] !== image.height ||

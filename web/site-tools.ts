@@ -216,54 +216,6 @@ export function registerSiteTools(refresh: () => Promise<void>) {
     },
   });
   context.registerTool({
-    name: "transcribe_saved_receipts",
-    description:
-      "After scanning, run private Danish/English OCR on up to 20 accepted saved originals. Stores versioned unverified text, word coordinates, confidence and source hashes. Review uncertain words, numbers and logos against the source images before accounting. Never called by the capture loop.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ids: {
-          type: "array",
-          items: { type: "string" },
-          minItems: 1,
-          maxItems: 20,
-        },
-      },
-      required: ["ids"],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, untrustedContentHint: true },
-    async execute(input) {
-      if (
-        !Array.isArray(input.ids) ||
-        input.ids.length < 1 ||
-        input.ids.length > 20
-      )
-        throw new Error("Provide 1 to 20 capture IDs.");
-      const ids = [...new Set(input.ids.map(id))];
-      const { ReceiptOcr } = await import("./ocr");
-      const ocr = new ReceiptOcr();
-      const results = [];
-      try {
-        for (const captureId of ids) {
-          try {
-            results.push({ ok: true, ...(await ocr.transcribe(captureId)) });
-          } catch (error) {
-            results.push({
-              ok: false,
-              id: captureId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-        await refresh();
-        return { results };
-      } finally {
-        await ocr.close();
-      }
-    },
-  });
-  context.registerTool({
     name: "save_receipt_transcription",
     description:
       "Store a new unverified OCR/extraction JSON artifact for one receipt. Preserve exact text, uncertain fields, provenance, and source coordinates. Does not overwrite the original or certify accounting values.",

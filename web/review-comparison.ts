@@ -1,3 +1,4 @@
+import type { PurchaseCategory } from "./extraction";
 import type { DocumentView } from "./documents";
 import { displayMoney } from "./review-money";
 import { messageOf } from "./errors";
@@ -34,6 +35,7 @@ const modelName = (model: string) =>
         : model;
 const fields = [
   ["vendor", "Vendor"],
+  ["category_id", "Purchase category"],
   ["receipt_date", "Purchase date"],
   ["reference", "Reference"],
   ["currency", "Currency"],
@@ -47,6 +49,7 @@ type Column = { name: string; reading?: SavedReading; ocr?: ReviewOcr };
 /** Saved values remain independent of the editable human draft. */
 export function reviewComparison(
   doc: DocumentView,
+  categories: PurchaseCategory[],
   values: ReturnType<typeof reviewValues>,
   signal: AbortSignal,
   ocrSource: ReviewOcrSource,
@@ -160,13 +163,20 @@ export function reviewComparison(
           const e = column.reading.extraction,
             value = e[key];
           cell.textContent =
-            value === null
-              ? "Unknown"
-              : key.endsWith("_minor")
-                ? money(value as number, e.currency)
-                : key === "receipt_date"
-                  ? date(value as string)
-                  : String(value);
+            key === "category_id"
+              ? value === null
+                ? "Unclassified"
+                : (categories.find((c) => c.id === value)?.name ??
+                  "Unknown category")
+              : value === null
+                ? "Unknown"
+                : key.endsWith("_minor")
+                  ? money(value as number, e.currency)
+                  : key === "receipt_date"
+                    ? date(value as string)
+                    : String(value);
+        } else if (key === "category_id") {
+          cell.textContent = "Not assigned by OCR";
         } else {
           const excerpts = ocrExcerpts(column.ocr!, key);
           cell.className = "ocr-excerpts";

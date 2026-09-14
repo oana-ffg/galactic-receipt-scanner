@@ -861,7 +861,8 @@ header {
 .review-field p:empty {
   display: none;
 }
-.review-summary-fields .review-field:first-child {
+.review-summary-fields .review-field:first-child,
+.review-summary-fields .review-category {
   grid-column: 1 / -1;
 }
 .processing-review h3 {

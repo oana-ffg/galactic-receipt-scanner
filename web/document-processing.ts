@@ -1,26 +1,21 @@
 import { addReceiptPage } from "./receipt-pdf";
-import type { OcrArtifact } from "./ocr-data";
+import type { PdfOcr } from "./receipt-pdf";
 import { PDFDocument } from "pdf-lib";
 import { api } from "./api";
 import { readOriginal } from "./original";
 import { sha256 } from "./checksum";
+import { messageOf } from "./errors";
 import type {
   DocumentCatalog,
   DocumentView,
   ReceiptDocument,
 } from "./documents";
 import type { Capture } from "./types";
-import { RequestError } from "./errors";
-import { appendProcessingEvidence } from "./documents";
 
 export const readDocuments = () => api<DocumentCatalog>("/api/documents");
 export const readDocument = (id: string) =>
   api<{ document: DocumentView; captures: Capture[] }>(
     `/api/documents/${encodeURIComponent(id)}`,
-  );
-const documentForCapture = (id: string) =>
-  api<{ document: DocumentView; captures: Capture[] }>(
-    `/api/documents?captureId=${encodeURIComponent(id)}`,
   );
 export async function saveDocuments(documents: ReceiptDocument[]) {
   return api<{ saved: { id: string; revision: number }[] }>("/api/documents", {
@@ -32,67 +27,73 @@ export async function saveDocuments(documents: ReceiptDocument[]) {
 
 export async function generateDocumentPdf(doc: ReceiptDocument) {
   const pdf = await PDFDocument.create();
-  const { ReceiptOcr } = await import("./ocr");
-  const engine = new ReceiptOcr();
-  try {
-    for (const page of doc.pages) {
-      const { capture, blob } = await readOriginal(page.captureId);
-      if (capture.sha256 !== page.sha256)
-        throw Error("Source hash changed; inspect the original.");
-      const bitmap = await createImageBitmap(blob);
-      const pixels = [bitmap.width, bitmap.height];
-      bitmap.close();
-      const crop = page.crop ?? [0, 0, ...pixels];
-      const matchesRegion = (value: OcrArtifact) => {
-        const region = value.source?.region;
-        return (
-          value.source?.pixels?.[0] === pixels[0] &&
-          value.source.pixels[1] === pixels[1] &&
-          region?.left === crop[0] &&
-          region.top === crop[1] &&
-          region.width === crop[2] - crop[0] &&
-          region.height === crop[3] - crop[1]
-        );
-      };
-      let ocr: OcrArtifact | null = null;
-      const detail = await api<{
-        artifacts: { kind: string; sha256: string }[];
-      }>(`/api/captures/${page.captureId}`);
-      for (const artifact of detail.artifacts.filter((a) => a.kind === "ocr")) {
-        const value = await api<OcrArtifact>(
+  for (const page of doc.pages) {
+    const { capture, blob } = await readOriginal(page.captureId);
+    if (capture.sha256 !== page.sha256)
+      throw Error("Source hash changed; inspect the original.");
+    const bitmap = await createImageBitmap(blob);
+    const pixels = [bitmap.width, bitmap.height];
+    bitmap.close();
+    const crop = page.crop ?? [0, 0, ...pixels];
+    const matchesRegion = (value: PdfOcr) => {
+      const region = value.source?.region;
+      return (
+        value.source?.pixels?.[0] === pixels[0] &&
+        value.source.pixels[1] === pixels[1] &&
+        region?.left === crop[0] &&
+        region.top === crop[1] &&
+        region.width === crop[2] - crop[0] &&
+        region.height === crop[3] - crop[1]
+      );
+    };
+    let ocr: PdfOcr | null = null;
+    const detail = await api<{
+      artifacts: { kind: string; sha256: string }[];
+    }>(`/api/captures/${page.captureId}`);
+    let artifactFailure = "";
+    for (const artifact of detail.artifacts.filter((a) => a.kind === "ocr")) {
+      try {
+        const response = await fetch(
           `/api/files/${page.captureId}/ocr?version=${artifact.sha256}`,
+          {
+            credentials: "same-origin",
+            cache: "no-store",
+            redirect: "error",
+            signal: AbortSignal.timeout(45000),
+          },
         );
+        if (!response.ok)
+          throw Error("Could not load saved OCR. Refresh and retry.");
+        const bytes = await response.arrayBuffer();
+        if ((await sha256(bytes)) !== artifact.sha256)
+          throw Error("Saved OCR checksum mismatch.");
+        const value = JSON.parse(new TextDecoder().decode(bytes)) as PdfOcr;
         if (
           value.source?.sha256 === page.sha256 &&
           value.source.captureId === page.captureId &&
-          typeof value.provenance?.engine === "string" &&
-          value.provenance.engine.startsWith("tesseract.js") &&
+          (value.source.rotation ?? 0) === page.rotation &&
           value.text_only_pdf_layers?.length &&
           matchesRegion(value)
         ) {
           ocr = value;
           break;
         }
+      } catch (error) {
+        artifactFailure ||= messageOf(error);
       }
-      if (!ocr) {
-        const result = await engine.transcribe(page.captureId, page.crop);
-        ocr = await api<OcrArtifact>(
-          `/api/files/${page.captureId}/ocr?version=${result.sha256}`,
-        );
-      }
-      if (!matchesRegion(ocr))
-        throw Error("OCR does not match the final PDF page region.");
-      await addReceiptPage(
-        pdf,
-        new Uint8Array(await blob.arrayBuffer()),
-        blob.type,
-        page.rotation,
-        page.crop,
-        ocr,
-      );
     }
-  } finally {
-    await engine.close();
+    if (!ocr)
+      throw Error(
+        `No usable saved OCR matches this page layout. Run the Luna processing flow with PP-OCR before generating the searchable PDF.${artifactFailure ? ` Saved OCR could not be read: ${artifactFailure}` : ""}`,
+      );
+    await addReceiptPage(
+      pdf,
+      new Uint8Array(await blob.arrayBuffer()),
+      blob.type,
+      page.rotation,
+      page.crop,
+      ocr,
+    );
   }
   const data = await pdf.save();
   if (data.length > 32 * 1024 * 1024)
@@ -116,91 +117,4 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
   if (result.revision !== doc.revision)
     throw Error("PDF save revision mismatch.");
   return result;
-}
-
-async function saveOcrObservations(
-  id: string,
-  result: { text: string; uncertainWords: readonly unknown[] },
-) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const { document: fresh } = await documentForCapture(id);
-      if (!fresh || fresh.checks.transcription) return;
-      if (fresh.pages.length === 1 && !fresh.text) fresh.text = result.text;
-      const observations: string[] = [];
-      if (result.uncertainWords.length)
-        observations.push(
-          `OCR processing: ${result.uncertainWords.length} low-confidence words on source ${id}; retry extraction and verify against the original.`,
-        );
-      if (!result.text.trim())
-        observations.push(
-          `OCR processing: no readable text on source ${id}; try another reading for faint print, rotation or handwriting.`,
-        );
-      fresh.evidence = appendProcessingEvidence(fresh.evidence, observations);
-      await saveDocuments([fresh]);
-      return;
-    } catch (error) {
-      if (!(
-        error instanceof RequestError &&
-        error.status === 409 &&
-        attempt === 0
-      ))
-        throw error;
-    }
-  }
-}
-
-export async function processOcr(ids: string[]) {
-  const { ReceiptOcr } = await import("./ocr");
-  const engine = new ReceiptOcr();
-  const results = [];
-  try {
-    for (const id of ids) {
-      try {
-        const result = await engine.transcribe(id);
-        try {
-          await saveOcrObservations(id, result);
-          results.push({ ok: true, ...result });
-        } catch (error) {
-          // The immutable OCR artifact was saved. A document update conflict or
-          // network failure does not mean transcription failed.
-          results.push({
-            ...result,
-            ok: false,
-            failureRecorded: false,
-            error: `OCR was saved, but document processing notes could not be updated. Refresh and retry. ${error instanceof Error ? error.message : String(error)}`,
-          });
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        let recorded = false;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const { document } = await documentForCapture(id);
-            document.broken = [
-              ...new Set([...document.broken, `OCR failed: ${message}`]),
-            ];
-            await saveDocuments([document]);
-            recorded = true;
-            break;
-          } catch (recordingError) {
-            if (!(
-              recordingError instanceof RequestError &&
-              recordingError.status === 409
-            ))
-              break;
-          }
-        }
-        results.push({
-          id,
-          ok: false,
-          error: message,
-          failureRecorded: recorded,
-        });
-      }
-    }
-  } finally {
-    await engine.close();
-  }
-  return { results };
 }

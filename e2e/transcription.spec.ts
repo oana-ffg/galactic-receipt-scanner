@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-// Test downstream transcription independently of camera quality calibration.
-test("Danish transcription preserves amounts, coordinates and the immutable source", async ({
+// Saved processing output remains reviewable without browser OCR execution.
+test("saved transcription preserves versions and originals without browser OCR", async ({
   page,
   request,
 }) => {
@@ -52,11 +52,11 @@ test("Danish transcription preserves amounts, coordinates and the immutable sour
       },
     });
   });
-  await page.goto("/");
+  await page.goto("/review");
   await page.waitForFunction(() =>
     Boolean(
       (window as unknown as { scannerTools: Record<string, unknown> })
-        .scannerTools.transcribe_saved_receipts,
+        .scannerTools.save_receipt_transcription,
     ),
   );
   const external: string[] = [];
@@ -67,43 +67,35 @@ test("Danish transcription preserves amounts, coordinates and the immutable sour
     )
       external.push(r.url());
   });
-  const output = (await page.evaluate(
-    async (id) =>
-      (
-        window as unknown as {
-          scannerTools: Record<
-            string,
-            { execute: (input: object) => Promise<unknown> }
-          >;
-        }
-      ).scannerTools.transcribe_saved_receipts.execute({ ids: [id] }),
-    id,
-  )) as { results: { ok: boolean; error?: string; text: string }[] };
-  console.log("Danish OCR result", JSON.stringify(output));
-  expect(output.results[0].ok, output.results[0].error).toBe(true);
-  const text = output.results[0].text;
-  for (const value of [
-    "ØKOHJØRNET",
-    "Æbler",
-    "Økologisk mælk",
-    "Havregryn",
-    "Rugbrød",
-    "Rabat",
-    "24,95",
-    "16,50",
-    "18,75",
-    "22,00",
-    "-5,00",
-    "77,20",
-    "15,44",
-    "besøget",
-  ])
-    expect(text).toContain(value);
+  const toolNames = await page.evaluate(() =>
+    Object.keys(
+      (window as unknown as { scannerTools: Record<string, unknown> })
+        .scannerTools,
+    ),
+  );
+  expect(toolNames).not.toContain("transcribe_saved_receipts");
+  expect(toolNames).not.toContain("process_document_ocr");
+  await expect(
+    page.getByRole("button", { name: "Transcribe next 20" }),
+  ).toHaveCount(0);
+  const text = "ØKOHJØRNET\nÆbler 24,95\nTotal 77,20";
+  const saved = await request.post(`/api/captures/${id}/artifacts/ocr`, {
+    data: {
+      verified: false,
+      text,
+      source: { captureId: id, sha256: sourceHash, pixels: [941, 1672] },
+      provenance: { engine: "PP-OCRv6" },
+      lines: [{ text, box: { x0: 190, y0: 250, x1: 780, y1: 490 } }],
+      review: { required: true },
+    },
+    headers: { Origin: "http://127.0.0.1:8766", "X-Scanner-Request": "1" },
+  });
+  expect(saved.ok(), await saved.text()).toBe(true);
   const stored = await (await request.get(`/api/files/${id}/ocr`)).json();
   expect(stored.verified).toBe(false);
   expect(stored.source.sha256).toBe(sourceHash);
   expect(stored.source.pixels).toEqual([941, 1672]);
-  expect(stored.lines.length).toBeGreaterThan(10);
+  expect(stored.lines).toHaveLength(1);
   for (const line of stored.lines) {
     expect(line.box.x0).toBeGreaterThanOrEqual(0);
     expect(line.box.x1).toBeLessThanOrEqual(941);
@@ -177,5 +169,4 @@ test("Danish transcription preserves amounts, coordinates and the immutable sour
       .digest("hex"),
   ).toBe(sourceHash);
   expect(external).toEqual([]);
-  await expect(page.locator("#captures")).toContainText("OCR unverified");
 });

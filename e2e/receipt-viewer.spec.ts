@@ -42,6 +42,20 @@ const extraction: Extraction = {
 test("filters model confidence, compares readings, cancels edits and accepts a separate human reading", async ({
   page,
 }) => {
+  const categoryA = "bbbbbbbb-bbbb-4bbb-8bbb-000000000001";
+  const categoryB = "bbbbbbbb-bbbb-4bbb-8bbb-000000000002";
+  const categories = [
+    {
+      id: categoryA,
+      name: "Synthetic groceries",
+      description: "Synthetic food purchases",
+    },
+    {
+      id: categoryB,
+      name: "Synthetic supplies",
+      description: "Synthetic household supplies",
+    },
+  ];
   await page.setViewportSize({ width: 1000, height: 800 });
   const pdf = await PDFDocument.create();
   for (let i = 0; i < 2; i++) {
@@ -112,6 +126,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
                 extraction: {
                   ...extraction,
                   vendor: "Synthetic Astra shop",
+                  category_id: categoryA,
                   receipt_date: "2026-01-08",
                 },
                 sources: d.pages.map((p) => ({
@@ -208,7 +223,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     route.fulfill({ json: { documents: docs, captures } }),
   );
   await page.route("**/api/processing/categories", (route) =>
-    route.fulfill({ json: [] }),
+    route.fulfill({ json: categories }),
   );
   await page.route("**/api/processing/readings?*", (route) =>
     failReadings
@@ -258,6 +273,13 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await expect(page.locator("#review-list button")).toHaveCount(2);
   await page.locator("#review-list button").first().click();
   const form = page.getByRole("form", { name: "Human review fields" });
+  await expect(
+    form.getByRole("combobox", { name: "Purchase category", exact: true }),
+  ).toBeVisible();
+  await expect(
+    form.getByRole("combobox", { name: "Purchase category", exact: true }),
+  ).toHaveValue(categoryA);
+
   await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
     "Synthetic Astra shop",
   );
@@ -324,6 +346,15 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       exact: true,
     }),
   });
+  const categoryRow = comparison.getByRole("row").filter({
+    has: page.getByRole("rowheader", {
+      name: "Purchase category Different",
+      exact: true,
+    }),
+  });
+  await expect(categoryRow).toContainText("Synthetic groceries");
+  await expect(categoryRow).toContainText("Unclassified");
+  await expect(categoryRow).toContainText("Not assigned by OCR");
   await expect(dateRow).toContainText("2 January 2026");
   await expect(dateRow).toContainText("8 January 2026");
   await expect(dateRow).toContainText("9 January 2026");
@@ -455,11 +486,20 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   );
   expect(writes).toBe(0);
   await form.getByLabel("Vendor", { exact: true }).fill("Cancelled edit");
+  await form
+    .getByRole("combobox", { name: "Purchase category", exact: true })
+    .selectOption(categoryB);
   await form.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
     "Synthetic Astra shop",
   );
   expect(writes).toBe(0);
+  await expect(
+    form.getByRole("combobox", { name: "Purchase category", exact: true }),
+  ).toHaveValue(categoryA);
+  await form
+    .getByRole("combobox", { name: "Purchase category", exact: true })
+    .selectOption(categoryB);
   await form.getByLabel("Vendor", { exact: true }).fill("Human corrected shop");
   await form.getByLabel("Total", { exact: true }).fill("12,34");
   await form.getByLabel("Line amount", { exact: true }).fill("12.34");
@@ -468,6 +508,11 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     "Human review saved",
   );
   expect(writes).toBe(1);
+  expect(docs[0].processing!.extraction.category_id).toBe(categoryB);
+  expect(
+    attempts.get(docs[0].id)!.find((a) => a.model === "gpt-6-astra")!.extraction
+      .category_id,
+  ).toBe(categoryA);
   expect(docs[0].processing!.extraction.total_minor).toBe(1234);
   expect(docs[0].processing!.extraction.line_items[0].amount_minor).toBe(1234);
   await expect(page.locator("#review-list button")).toHaveCount(1);

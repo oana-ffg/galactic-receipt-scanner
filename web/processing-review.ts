@@ -151,9 +151,9 @@ function reviewForm(
   }
   category.value = e.category_id ?? "";
   const categoryLabel = el("label", "Purchase category");
-  categoryLabel.className = "review-field";
+  categoryLabel.className = "review-field review-category";
   categoryLabel.append(category);
-  notes.append(categoryLabel);
+  scalar.get("vendor")!.wrap.after(categoryLabel);
   const bools = new Map<keyof Extraction, HTMLInputElement>();
   for (const [key, label] of [
     ["has_handwriting", "Handwriting is present"],
@@ -454,6 +454,7 @@ export function processingReview(
       const values = reviewValues(doc, data.attempts);
       const comparisonView = reviewComparison(
         doc,
+        categories,
         values,
         controller.signal,
         ocrSource,

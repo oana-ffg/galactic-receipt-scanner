@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { test, expect } from "@playwright/test";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
@@ -76,6 +76,42 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     });
     expect(r.ok()).toBe(true);
   }
+  // Processing has already saved PP's full-original-canvas search layer.
+  const layer = await PDFDocument.create();
+  const font = await layer.embedFont(StandardFonts.Helvetica);
+  layer
+    .addPage([941, 1672])
+    .drawText("Synthetic receipt 24.95", { x: 100, y: 100, font });
+  const layerBytes = Buffer.from(await layer.save());
+  for (const id of ids) {
+    const artifact = {
+      verified: false,
+      text: "Synthetic receipt 24.95",
+      provenance: { engine: "PP-OCRv6" },
+      source: {
+        captureId: id,
+        sha256: createHash("sha256").update(image).digest("hex"),
+        pixels: [941, 1672],
+        region: { left: 0, top: 0, width: 941, height: 1672 },
+        rotation: 0,
+      },
+      text_only_pdf_layers: [
+        {
+          base64: layerBytes.toString("base64"),
+          sha256: createHash("sha256").update(layerBytes).digest("hex"),
+        },
+      ],
+    };
+    const saved = await request.post(`/api/captures/${id}/artifacts/ocr`, {
+      data: Buffer.from(JSON.stringify(artifact)),
+      headers: {
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+      },
+    });
+    expect(saved.ok()).toBe(true);
+  }
   await page.addInitScript(() => {
     const tools: Record<string, { execute: (input: object) => Promise<any> }> =
       {};
@@ -149,8 +185,7 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     const text = pageText.items
       .map((item) => ("str" in item ? item.str : ""))
       .join(" ");
-    expect(text.length).toBeGreaterThan(100);
-    expect(text).toMatch(/\d+[,.]\d{2}/);
+    expect(text).toContain("Synthetic receipt 24.95");
   }
   await loading.destroy();
   await mkdir("test-results/documents", { recursive: true });

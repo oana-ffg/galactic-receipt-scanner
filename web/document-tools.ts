@@ -90,35 +90,4 @@ export function registerDocumentTools() {
       }
     },
   });
-  context.registerTool({
-    name: "process_document_ocr",
-    description:
-      "Run private printed-text OCR on 1-20 current captures, preserving source hashes, word confidence and alternate passes. All outputs require visual comparison for errors, omissions and handwriting. Failed items are persisted as broken in Review. Never called during camera capture.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ids: {
-          type: "array",
-          items: { type: "string" },
-          minItems: 1,
-          maxItems: 20,
-        },
-      },
-      required: ["ids"],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, untrustedContentHint: true },
-    async execute(input: { ids: string[] }) {
-      if (
-        !Array.isArray(input.ids) ||
-        !input.ids.length ||
-        input.ids.length > 20 ||
-        input.ids.some((id) => !/^[-0-9a-f]{36}$/.test(id))
-      )
-        throw Error("Supply 1-20 capture IDs.");
-      return (await import("./document-processing")).processOcr([
-        ...new Set(input.ids),
-      ]);
-    },
-  });
 }

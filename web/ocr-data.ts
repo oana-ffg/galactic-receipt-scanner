@@ -16,7 +16,7 @@ function linesOf(data: Page) {
     ),
   );
 }
-/** Shared by the browser and the local CLI; ordinary OCR, with no language-model calls. */
+/** Used by the legacy local CLI; ordinary OCR, with no language-model calls. */
 export async function recognizeReceipt(
   worker: Worker,
   image: ImageLike,
