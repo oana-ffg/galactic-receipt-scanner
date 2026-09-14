@@ -57,9 +57,13 @@ clearly read amounts, but use empty arrays/null for deferred financial fields an
 "Detailed financial verification deferred" in uncertainties. Never fabricate missing
 fields just to satisfy arithmetic. Such a saved review flag does not stop the batch.
 
-Do not classify ownership, rescue versus personal use, or bank/account allocation.
-Mixed purchases remain a descriptive mixed category when appropriate. The owner handles
-allocation and bank reconciliation in another project. Heavier financial/model checks
+For supermarket receipts, use [the four supermarket categories](references/supermarket-classification.md).
+Other merchant categories retain their definitions. These labels describe plausible use;
+the owner handles actual ownership, allocation and bank reconciliation in another project.
+In existing extraction `evidence` notes, explain **Category:** with the specific supporting
+items. Below high certainty, add **Confidence:** naming affected fields and concrete reasons;
+do not merely repeat "medium", "OCR errors" or "needs review". Refresh these notes after
+reassessment while preserving the initial reading. Heavier financial/model checks
 run only on the owner's later selected documents; do not automatically drain every
 deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
 

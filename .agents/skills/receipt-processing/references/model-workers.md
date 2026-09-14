@@ -16,8 +16,11 @@ transcription and reconciliation are deferred; keep schema keys with null/empty 
 values and an explicit "Detailed financial verification deferred" uncertainty. Save
 readable totals when useful for finding payment-slip matches. The comprehensive financial
 rules below govern any amounts you do retain, not a requirement to audit every row now.
-Do not assign ownership, rescue/personal use or bank allocation; those belong to another
-project. Clearly describe mixed purchases without deciding their allocation.
+Use [the supermarket rules](supermarket-classification.md) for supermarket receipts;
+other categories keep their definitions. Sorting by plausible use does not assign actual
+ownership, reimbursement or bank allocation. In existing extraction `evidence` notes,
+write Category with supporting items and, below high certainty, Confidence with specific
+uncertain fields and reasons. Refresh reassessed notes without rewriting the initial reading.
 
 1. Claim the small stage. Fetch and hash-check the claimed originals and next available
    image. Inspect detected crop pixels by default, with raw originals available when

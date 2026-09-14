@@ -114,6 +114,95 @@ async function category() {
 async function claim(stage = "small") {
   return (await ok("/api/processing/claim", { stage }, true)).claim;
 }
+it("preserves category definition history and rejects machine edits and stale revisions", async () => {
+  const id = await category();
+  const previous = (await ok("/api/processing/categories")).find(
+    (c: any) => c.id === id,
+  );
+  const update = {
+    id,
+    revision: previous.revision,
+    name: "Updated supermarket category",
+    description: "Explicit cat food plus personal groceries.",
+    reason: "Owner split the mixed category.",
+  };
+  expect((await req("/api/processing/categories", update, true)).status).toBe(
+    403,
+  );
+  const updated = await ok("/api/processing/categories", update);
+  expect(updated.revision).toBe(1);
+  expect((await req("/api/processing/categories", update)).status).toBe(409);
+  const db = await mf.getD1Database("DB");
+  const history = await db
+    .prepare(
+      "SELECT previous,updated,reason FROM purchase_category_revisions WHERE category_id=?",
+    )
+    .bind(id)
+    .first<any>();
+  expect(JSON.parse(history.previous)).toEqual(previous);
+  expect(JSON.parse(history.updated)).toEqual(updated);
+  expect(history.reason).toBe(update.reason);
+});
+it("corrects only the category, preserving financial values, model readings and review status", async () => {
+  const c = await capture(),
+    cat = await category(),
+    lease = await claim();
+  const initial = extraction(cat);
+  await ok(
+    "/api/processing/submit",
+    { token: lease.token, model: "gpt-5.6-luna", extraction: initial },
+    true,
+  );
+  let doc = (await ok(`/api/documents/${c.id}`)).document;
+  await ok("/api/processing/human-review", {
+    document_id: doc.id,
+    revision: doc.revision,
+    extraction: initial,
+  });
+  doc = (await ok(`/api/documents/${c.id}`)).document;
+  const target = await ok("/api/processing/categories", {
+    name: "Explicit cat mix",
+    description: "Cat treats and personal groceries.",
+  });
+  const correction = {
+    document_id: doc.id,
+    revision: doc.revision,
+    category_id: target.id,
+    evidence: "Cat treats plus tomatoes.",
+  };
+  expect(
+    (await req("/api/processing/category-assignment", correction, true)).status,
+  ).toBe(403);
+  expect(
+    (
+      await req("/api/processing/category-assignment", {
+        ...correction,
+        category_id: "missing",
+      })
+    ).status,
+  ).toBe(400);
+  await ok("/api/processing/category-assignment", correction);
+  const after = (await ok(`/api/documents/${c.id}`)).document;
+  expect(after.processing.extraction).toEqual({
+    ...doc.processing.extraction,
+    category_id: target.id,
+  });
+  expect(after.processing).toEqual({
+    ...doc.processing,
+    extraction: after.processing.extraction,
+    human_review_revision: after.revision,
+  });
+  expect(after.pages).toEqual(doc.pages);
+  expect(after.checks).toEqual(doc.checks);
+  expect(after.evidence).toContain(correction.evidence);
+  expect(
+    (await req("/api/processing/category-assignment", correction)).status,
+  ).toBe(409);
+  const readings = await ok(`/api/processing/readings?document_id=${doc.id}`);
+  expect(
+    readings.attempts.every((r: any) => r.extraction.category_id === cat),
+  ).toBe(true);
+});
 it("allows one claim, saves structured amounts atomically, and makes retries idempotent", async () => {
   const c = await capture(),
     cat = await category();

@@ -154,6 +154,20 @@ function reviewForm(
   categoryLabel.className = "review-field review-category";
   categoryLabel.append(category);
   scalar.get("vendor")!.wrap.after(categoryLabel);
+  const categoryCorrection = el("details");
+  categoryCorrection.append(el("summary", "Correct category only"));
+  const categoryReason = input("Category explanation", "", true);
+  const saveCategory = el("button", "Save category only");
+  saveCategory.type = "button";
+  categoryCorrection.append(
+    el(
+      "p",
+      "Saves the selected purchase category and explanation. Financial values, confidence and existing review status stay intact.",
+    ),
+    categoryReason.wrap,
+    saveCategory,
+  );
+  categoryLabel.after(categoryCorrection);
   const bools = new Map<keyof Extraction, HTMLInputElement>();
   for (const [key, label] of [
     ["has_handwriting", "Handwriting is present"],
@@ -331,6 +345,8 @@ function reviewForm(
     broken = input("Broken reasons", e.broken_reasons.join("\n"), true),
     evidence = input("Review findings", e.evidence, true);
   notes.append(uncertainty.wrap, broken.wrap, evidence.wrap);
+  if (doc.evidence)
+    notes.append(el("h4", "Saved document notes"), el("p", doc.evidence));
   form.append(notes);
   const save = el("button", "Accept human review");
   save.type = "submit";
@@ -344,6 +360,48 @@ function reviewForm(
   saveMessage.setAttribute("role", "status");
   actions.append(save, cancelButton, saveMessage);
   form.append(actions);
+  const otherEdits = () =>
+    JSON.stringify(
+      Array.from(
+        form.querySelectorAll<
+          HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+        >("input,textarea,select"),
+      )
+        .filter((c) => c !== category && c !== categoryReason.control)
+        .map((c) => [
+          c.tagName,
+          c.value,
+          c instanceof HTMLInputElement ? c.checked : null,
+        ]),
+    );
+  const initialOtherEdits = otherEdits();
+  saveCategory.onclick = () =>
+    void act(async () => {
+      if (otherEdits() !== initialOtherEdits)
+        throw Error(
+          "Save or cancel your other receipt edits before correcting only its category.",
+        );
+      if (!category.value || !categoryReason.control.value.trim())
+        throw Error(
+          "Choose a category and explain the supporting receipt items.",
+        );
+      saveCategory.disabled = true;
+      try {
+        await api("/api/processing/category-assignment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            document_id: doc.id,
+            revision: doc.revision,
+            category_id: category.value,
+            evidence: categoryReason.control.value.trim(),
+          }),
+        });
+        await refresh();
+      } finally {
+        saveCategory.disabled = false;
+      }
+    });
   form.onsubmit = (event) => {
     event.preventDefault();
     void act(async () => {
@@ -556,8 +614,47 @@ export function categorySetup(
       "Add any specific categories and describe what belongs in each. Processing workers can also add categories for new kinds of purchases.",
     ),
   );
-  for (const c of categories)
-    panel.append(el("p", `${c.name}: ${c.description}`));
+  for (const c of categories) {
+    const edit = el("details");
+    edit.append(el("summary", c.name), el("p", c.description));
+    const form = el("form");
+    form.className = "review-form";
+    form.setAttribute("aria-label", `Edit category ${c.name}`);
+    const name = input("Category name", c.name),
+      description = input(
+        "What belongs in this category?",
+        c.description,
+        true,
+      ),
+      reason = input("Reason for category change", "", true),
+      button = el("button", "Save category definition");
+    button.type = "submit";
+    form.append(name.wrap, description.wrap, reason.wrap, button);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      void act(async () => {
+        button.disabled = true;
+        try {
+          await api("/api/processing/categories", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id: c.id,
+              revision: c.revision ?? 0,
+              name: name.control.value,
+              description: description.control.value,
+              reason: reason.control.value,
+            }),
+          });
+          await refresh();
+        } finally {
+          button.disabled = false;
+        }
+      });
+    };
+    edit.append(form);
+    panel.append(edit);
+  }
   const form = el("form");
   form.className = "review-form";
   const name = input("Category name", ""),

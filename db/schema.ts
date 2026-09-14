@@ -155,6 +155,23 @@ export const purchaseCategories = sqliteTable("purchase_categories", {
   description: text("description").notNull(),
   created_at: text("created_at").notNull(),
 });
+export const purchaseCategoryRevisions = sqliteTable(
+  "purchase_category_revisions",
+  {
+    category_id: text("category_id").notNull(),
+    revision: integer("revision").notNull(),
+    previous: text("previous").notNull(),
+    updated: text("updated").notNull(),
+    reason: text("reason").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("purchase_category_revision").on(
+      table.category_id,
+      table.revision,
+    ),
+  ],
+);
 export const processingLock = sqliteTable("processing_lock", {
   id: integer("id").primaryKey(),
   token: text("token").notNull(),

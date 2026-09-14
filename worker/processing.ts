@@ -11,6 +11,7 @@ import type { Env } from "./index";
 import type { Capture } from "../web/types";
 import {
   newDocument,
+  DOCUMENT_EVIDENCE_LIMIT,
   requiredMergeReviewReasons,
   type ReceiptDocument,
 } from "../web/documents";
@@ -227,7 +228,7 @@ export async function processingRoute(
       return json(
         (
           await env.DB.prepare(
-            "SELECT id,name,description FROM purchase_categories ORDER BY name",
+            "SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision FROM purchase_categories ORDER BY name",
           ).all()
         ).results,
       );
@@ -245,6 +246,86 @@ export async function processingRoute(
     );
     const name = input.name.trim().normalize("NFKC"),
       normalized = name.toLocaleLowerCase("en").replace(/\s+/g, " ");
+    if (input.id !== undefined) {
+      requireThat(
+        !request.headers.has("authorization"),
+        403,
+        "Category definition edits require the owner's interactive session.",
+      );
+      requireThat(
+        !(await activeLock(env)),
+        409,
+        "Finish the active model claim before changing category definitions.",
+      );
+      requireThat(
+        typeof input.id === "string" &&
+          UUID.test(input.id) &&
+          typeof input.revision === "number" &&
+          Number.isSafeInteger(input.revision) &&
+          input.revision >= 0,
+        400,
+        "Read the category and its revision before editing.",
+      );
+      requireThat(
+        typeof input.reason === "string" &&
+          input.reason.trim().length > 0 &&
+          input.reason.length <= 2000,
+        400,
+        "Explain the category definition change.",
+      );
+      const previous = await env.DB.prepare(
+        "SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision FROM purchase_categories WHERE id=?",
+      )
+        .bind(input.id)
+        .first<{
+          id: string;
+          name: string;
+          description: string;
+          revision: number;
+        }>();
+      requireThat(
+        previous && previous.revision === input.revision,
+        409,
+        "Category changed. Reload before editing.",
+      );
+      const collision = await env.DB.prepare(
+        "SELECT id FROM purchase_categories WHERE normalized_name=? AND id<>?",
+      )
+        .bind(normalized, input.id)
+        .first();
+      requireThat(!collision, 409, "Another category already has this name.");
+      const updated = {
+        id: input.id,
+        name,
+        description: input.description.trim(),
+        revision: previous.revision + 1,
+      };
+      try {
+        await env.DB.batch([
+          env.DB.prepare(
+            "INSERT INTO purchase_category_revisions(category_id,revision,previous,updated,reason,created_at) VALUES(?,?,?,?,?,?)",
+          ).bind(
+            input.id,
+            updated.revision,
+            JSON.stringify(previous),
+            JSON.stringify(updated),
+            input.reason.trim(),
+            new Date().toISOString(),
+          ),
+          env.DB.prepare(
+            "UPDATE purchase_categories SET normalized_name=?,name=?,description=? WHERE id=?",
+          ).bind(normalized, name, updated.description, input.id),
+        ]);
+      } catch (error) {
+        if (/UNIQUE constraint/.test(String(error)))
+          throw new HttpError(
+            409,
+            "Concurrent category change. Reload before editing.",
+          );
+        throw error;
+      }
+      return json(updated);
+    }
     await env.DB.prepare(
       "INSERT INTO purchase_categories(id,normalized_name,name,description,created_at) VALUES(?,?,?,?,?) ON CONFLICT(normalized_name) DO NOTHING",
     )
@@ -267,6 +348,62 @@ export async function processingRoute(
       "This category name already has a different description. Read and reuse the existing category or choose a distinct name.",
     );
     return json(result);
+  }
+  if (path === "/api/processing/category-assignment" && method === "POST") {
+    requireThat(
+      !request.headers.has("authorization"),
+      403,
+      "Category corrections require the owner's interactive session.",
+    );
+    requireThat(
+      !(await activeLock(env)),
+      409,
+      "Finish the active model claim before correcting a category.",
+    );
+    const input = await bodyJson(request);
+    requireThat(
+      typeof input.category_id === "string" && UUID.test(input.category_id),
+      400,
+      "Choose an existing category.",
+    );
+    requireThat(
+      typeof input.evidence === "string" &&
+        input.evidence.trim().length > 0 &&
+        input.evidence.length <= 2000,
+      400,
+      "Explain the category choice using the receipt items.",
+    );
+    const captures = await load(),
+      docs = await records(env, captures);
+    const doc = docs.find((d) => d.id === input.document_id);
+    requireThat(
+      doc &&
+        doc.processing &&
+        doc.revision === input.revision &&
+        !doc.mergedInto &&
+        !doc.duplicateOf,
+      409,
+      "Reload a retained processed document before correcting its category.",
+    );
+    const category = await env.DB.prepare(
+      "SELECT id,name,description FROM purchase_categories WHERE id=?",
+    )
+      .bind(input.category_id)
+      .first<{ id: string; name: string; description: string }>();
+    requireThat(category, 400, "Choose an existing category.");
+    const note = `Category (owner correction): ${category.name}. ${input.evidence.trim()}`;
+    requireThat(
+      doc.evidence.length + note.length + 1 <= DOCUMENT_EVIDENCE_LIMIT,
+      400,
+      "Document notes are full; preserve them before adding another correction.",
+    );
+    doc.processing.extraction.category_id = category.id;
+    doc.evidence = [doc.evidence, note].filter(Boolean).join("\n");
+    // Preserve every original model reading and confidence; this is category-only.
+    // Existing human approval covers unchanged financial fields, with this explicit owner correction.
+    if (doc.processing.has_human_review)
+      doc.processing.human_review_revision = doc.revision + 1;
+    return save(request, env, async () => captures, [doc], []);
   }
   if (path === "/api/processing/claim" && method === "POST") {
     requireThat(

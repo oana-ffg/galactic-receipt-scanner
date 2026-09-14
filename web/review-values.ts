@@ -53,7 +53,11 @@ export function reviewValues(doc: DocumentView, attempts: SavedReading[]) {
     luna,
     astra,
     human,
-    extraction: selected?.extraction ?? p.extraction,
+    extraction: {
+      ...(selected?.extraction ?? p.extraction),
+      category_id:
+        p.extraction.category_id ?? selected?.extraction.category_id ?? null,
+    },
     source: selected
       ? selected.stage === "large"
         ? "Astra"

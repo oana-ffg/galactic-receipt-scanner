@@ -92,6 +92,13 @@
       "when": 1789343245257,
       "tag": "0012_processing_confirmation",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1789391685783,
+      "tag": "0013_category_history",
+      "breakpoints": true
     }
   ]
 }

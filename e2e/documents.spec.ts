@@ -344,7 +344,28 @@ test("human review edits structured values and detaches a wrong page into the po
     .fill("Synthetic test purchases only.");
   await page.getByRole("button", { name: "Add category", exact: true }).click();
   await expect(page.locator("#review-categories")).toContainText(
-    "Synthetic supplies: Synthetic test purchases only.",
+    "Synthetic test purchases only.",
+  );
+  await page.getByText("Purchase categories", { exact: true }).click();
+  await page
+    .locator("#review-categories")
+    .getByText("Synthetic supplies", { exact: true })
+    .click();
+  const categoryEditor = page.getByRole("form", {
+    name: "Edit category Synthetic supplies",
+    exact: true,
+  });
+  await categoryEditor
+    .getByLabel("Category name", { exact: true })
+    .fill("Synthetic reviewed supplies");
+  await categoryEditor
+    .getByLabel("Reason for category change")
+    .fill("Clarify the synthetic category name.");
+  await categoryEditor
+    .getByRole("button", { name: "Save category definition" })
+    .click();
+  await expect(page.locator("#review-categories")).toContainText(
+    "Synthetic reviewed supplies",
   );
   async function model(path: string, body: object): Promise<any> {
     const response = await isolated.dispatchFetch(origin + path, {
@@ -359,6 +380,10 @@ test("human review edits structured values and detaches a wrong page into the po
   const categories = await (
     await isolatedRequest.get("/api/processing/categories")
   ).json();
+  const secondCategory = await model("/api/processing/categories", {
+    name: "Synthetic personal",
+    description: "Synthetic personal groceries only.",
+  });
   const lease = (await model("/api/processing/claim", { stage: "small" }))
     .claim;
   const captures = await Promise.all(
@@ -448,6 +473,31 @@ test("human review edits structured values and detaches a wrong page into the po
   expect(saved.document.vendor).toBe("Corrected synthetic vendor");
   expect(saved.document.processing.human_review_revision).toBe(
     saved.document.revision,
+  );
+  await page
+    .getByRole("combobox", { name: "Purchase category", exact: true })
+    .selectOption(secondCategory.id);
+  await page.getByText("Correct category only", { exact: true }).click();
+  await page
+    .getByLabel("Category explanation", { exact: true })
+    .fill("Only synthetic personal groceries are present.");
+  await page
+    .getByRole("button", { name: "Save category only", exact: true })
+    .click();
+  await expect(
+    page.getByRole("combobox", { name: "Purchase category", exact: true }),
+  ).toHaveValue(secondCategory.id);
+  const recategorized = (
+    await (await isolatedRequest.get(`/api/documents/${target.id}`)).json()
+  ).document;
+  expect(recategorized.processing.has_human_review).toBe(true);
+  expect(recategorized.vendor).toBe(saved.document.vendor);
+  expect(recategorized.processing.extraction).toEqual({
+    ...saved.document.processing.extraction,
+    category_id: secondCategory.id,
+  });
+  expect(recategorized.evidence).toContain(
+    "Only synthetic personal groceries are present.",
   );
   await page
     .getByText("Originals and page organisation", { exact: true })
