@@ -8,7 +8,7 @@ import type { Capture } from "../web/types";
 import {
   DOCUMENT_EVIDENCE_LIMIT,
   documentReasons,
-  mergeReviewReasons,
+  requiredMergeReviewReasons,
   filenameBase,
   newDocument,
   validDate,
@@ -555,20 +555,12 @@ export async function documentRoute(
         );
         if (d.mergedInto) {
           const previous = stored.find((s) => s.id === d.id);
+          const required = requiredMergeReviewReasons(d, previous);
           for (const severity of ["broken", "uncertainties"] as const) {
-            const currentReasons = mergeReviewReasons(d)[severity];
-            const previousReasons = previous
-              ? mergeReviewReasons(previous)[severity]
-              : [];
-            // Previously transferred reasons are resolved on the retained document.
-            const required =
-              previous?.mergedInto === d.mergedInto
-                ? currentReasons.filter(
-                    (reason) => !previousReasons.includes(reason),
-                  )
-                : [...currentReasons, ...previousReasons];
             requireThat(
-              required.every((reason) => target[severity].includes(reason)),
+              required[severity].every((reason) =>
+                target[severity].includes(reason),
+              ),
               400,
               "Carry every unresolved source reason into the same review category on the merge destination, then reconcile it there.",
             );

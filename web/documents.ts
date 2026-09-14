@@ -274,6 +274,30 @@ export function mergeReviewReasons(doc: ReceiptDocument): {
   };
 }
 
+/** Notes a merge must carry; previously transferred notes may be resolved on its target. */
+export function requiredMergeReviewReasons(
+  doc: ReceiptDocument,
+  previous?: ReceiptDocument,
+) {
+  const current = mergeReviewReasons(doc);
+  const prior = previous
+    ? mergeReviewReasons(previous)
+    : { broken: [], uncertainties: [] };
+  const required = (severity: "broken" | "uncertainties") => [
+    ...new Set(
+      previous?.mergedInto === doc.mergedInto
+        ? current[severity].filter(
+            (reason) => !prior[severity].includes(reason),
+          )
+        : [...current[severity], ...prior[severity]],
+    ),
+  ];
+  return {
+    broken: required("broken"),
+    uncertainties: required("uncertainties"),
+  };
+}
+
 export function filenameBase(doc: ReceiptDocument): string | null {
   if (!doc.receiptDate || !doc.vendor) return null;
   const vendor = doc.vendor

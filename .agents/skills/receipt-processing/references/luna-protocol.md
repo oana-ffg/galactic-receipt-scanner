@@ -52,6 +52,24 @@ is claimed during preflight. All artifacts live under the repository's ignored
 
 ## One-document sequence
 
+### Use the bounded helper request format
+
+The JSON objects sent to this process are **not HTTP API request bodies**. Read only
+the **Parse** section of `processing-api.md` for the extraction fields. Its routes,
+tokens and raw checkpoint bodies are for the client's implementation and Astra's
+legacy runbook; do not copy them into this helper's stdin.
+
+- A draft has only `op: "draft"`, `extraction`, and optionally `grouping`.
+  Never add `model`, `images`, `pixel_pdf_sha256`, `token` or `documents` to it. The
+  helper creates and pins those values from the already inspected previews.
+- A document read needs both `op: "document"` and `document_id`, copied from the
+  claim or context. A bare `{"op":"document"}` is incomplete.
+- `confirm`, `submit` and `pdf` each need only their `op`.
+- An `input_error` is a correctable request mistake: use its explanation to fix the
+  same operation. Do not switch to an unrelated operation or abandon the claim.
+- Crop changes belong in `previews.layouts` before the draft. Do not put an images
+  array in the draft or invent/copy a pixel PDF hash; the helper freezes it itself.
+
 Every request is a JSON object with `op`. Each response has `ok`, `op`, `result` and a UTC
 timestamp. A long operation can outlast a tool call: poll the SAME session with empty
 `write_stdin` until its response arrives. Do not resend a request merely because the
@@ -103,6 +121,10 @@ merely to balance arithmetic. Report honest confidence and unresolved questions.
 your rationale linked to the immutable confirmation hash. A successful no-change
 assessment is still saved separately. The server may cap final confidence for unresolved
 OCR disagreement. That is a saved review outcome, not a reason to stop the next worker.
+When merging, the server also retains inherited source review/broken notes on the
+combined document, even if the reassessment omits or rephrases them. The exact Luna
+reading remains separate in history. Resolve those inherited notes in a later review
+of the retained document; their presence does not stop this batch.
 
 Layout bounds are original-pixel `[left,top,right,bottom]`; rotation is 0/90/180/270.
 Use `previews.layouts` to correct a crop after inspecting raw pixels when needed. An

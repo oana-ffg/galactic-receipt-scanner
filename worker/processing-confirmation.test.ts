@@ -350,6 +350,140 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
   ).toBe(1299);
 });
 
+it("preserves inherited merge notes when reassessment drops them without rewriting the model history", async () => {
+  const source = await capture();
+  const sourceLease = await claim("small");
+  const sourceReading = reading();
+  sourceReading.uncertainties = ["Synthetic source header needs review."];
+  sourceReading.broken_reasons = [
+    "Synthetic source requires further inspection.",
+  ];
+  await ok("/api/processing/submit", {
+    token: sourceLease.token,
+    model: "gpt-5.6-luna",
+    extraction: sourceReading,
+  });
+  const target = await capture();
+  const lease = await claim("small");
+  expect(lease.document.id).toBe(target.id);
+  const retained = (await ok(`/api/documents/${target.id}`, undefined, false))
+    .document;
+  const donor = (await ok(`/api/documents/${source.id}`, undefined, false))
+    .document;
+  const priorSourceRevision = donor.revision;
+  retained.pages.push(...donor.pages);
+  retained.pages.forEach((page: any) => {
+    page.crop = [0, 0, 1400, 2200];
+  });
+  donor.pages = [];
+  donor.mergedInto = retained.id;
+  donor.uncertainties = [];
+  donor.broken = [];
+  for (const document of [retained, donor]) {
+    document.checks = {
+      visual: false,
+      transcription: false,
+      grouping: false,
+      pdf: false,
+    };
+    document.reviewedPdfSha256 = null;
+    document.invoice = null;
+    document.evidence = "Synthetic visual merge evidence.";
+  }
+  const initial = reading();
+  initial.uncertainties = [...sourceReading.uncertainties];
+  initial.broken_reasons = [...sourceReading.broken_reasons];
+  const documents = [retained, donor];
+  await ok("/api/processing/draft", {
+    token: lease.token,
+    model: "gpt-5.6-luna",
+    extraction: initial,
+    documents,
+    pixel_pdf_sha256: hash("a"),
+    images: retained.pages.map(() => ({
+      sha256: hash("b"),
+      pixels: [1400, 2200],
+    })),
+  });
+  const pins = [];
+  for (const page of retained.pages) {
+    const artifact = await ok(
+      `/api/captures/${page.captureId}/artifacts/ocr`,
+      {
+        source: {
+          captureId: page.captureId,
+          sha256: page.sha256,
+          pixels: [1400, 2200],
+          region: { left: 0, top: 0, width: 1400, height: 2200 },
+          rotation: 0,
+        },
+        provenance: { engine: "PP-OCRv6" },
+        text: "Checkpoint Shop\n2026-09-14\nTOTAL 12,34\nVAT 2,47",
+      },
+      false,
+    );
+    pins.push({ capture_id: page.captureId, sha256: artifact.sha256 });
+  }
+  const confirmed = await ok("/api/processing/confirmation", {
+    token: lease.token,
+    provider: "ppocr",
+    pixel_pdf_sha256: hash("a"),
+    artifacts: pins,
+  });
+  const final = reading();
+  const submit = {
+    token: lease.token,
+    model: "gpt-5.6-luna",
+    extraction: final,
+    documents,
+    assessment: {
+      confirmation_sha256: confirmed.sha256,
+      rationale: "Synthetic reassessment omitted inherited notes.",
+      changed_fields: ["uncertainties", "broken_reasons"],
+    },
+  };
+  await ok("/api/processing/submit", submit);
+  expect((await ok("/api/processing/submit", submit)).replayed).toBe(true);
+  const saved = (await ok(`/api/documents/${target.id}`, undefined, false))
+    .document;
+  expect(saved.pages.map((page: any) => page.captureId)).toEqual([
+    target.id,
+    source.id,
+  ]);
+  expect(saved.uncertainties).toEqual(sourceReading.uncertainties);
+  expect(saved.broken).toEqual(sourceReading.broken_reasons);
+  expect(saved.processing.extraction.certainty).toBe("medium");
+  const moved = (await ok(`/api/documents/${source.id}`, undefined, false))
+    .document;
+  expect(moved.mergedInto).toBe(target.id);
+  expect(moved.pages).toEqual([]);
+  const history = (
+    await ok(
+      `/api/processing/readings?document_id=${target.id}`,
+      undefined,
+      false,
+    )
+  ).readings;
+  expect(history[0].initial.extraction.uncertainties).toEqual(
+    initial.uncertainties,
+  );
+  expect(history[0].updated.extraction).toEqual(final);
+  expect(history[0].confirmation.ppocr.artifacts).toEqual(pins);
+  const db = await mf.getD1Database("DB");
+  const prior = await db
+    .prepare(
+      "SELECT payload FROM document_versions WHERE document_id=? AND revision=?",
+    )
+    .bind(source.id, priorSourceRevision)
+    .first<{ payload: string }>();
+  expect(JSON.parse(prior!.payload).uncertainties).toEqual(
+    sourceReading.uncertainties,
+  );
+  expect(
+    (await request(`/api/files/${source.id}/raw`, undefined, false)).status,
+  ).toBe(200);
+});
+
 it("keeps legacy Luna submission and Astra draft flow compatible", async () => {
   const source = await capture();
   const category = (

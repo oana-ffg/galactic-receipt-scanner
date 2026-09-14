@@ -9,7 +9,11 @@ import {
 import { compareStoredOcr } from "./ocr-comparison";
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
-import { newDocument, type ReceiptDocument } from "../web/documents";
+import {
+  newDocument,
+  requiredMergeReviewReasons,
+  type ReceiptDocument,
+} from "../web/documents";
 import {
   arithmetic,
   extractionErrors,
@@ -924,6 +928,28 @@ export async function processingRoute(
         : undefined,
     );
     const extracted = structuredClone(input.extraction);
+    // Retain inherited review notes even when reassessment omits or paraphrases them.
+    // The immutable attempt still stores the model's exact submitted reading below.
+    for (const donor of changed.filter((item) => item.mergedInto === d.id)) {
+      const required = requiredMergeReviewReasons(
+        donor,
+        docs.find((old) => old.id === donor.id),
+      );
+      extracted.uncertainties = [
+        ...new Set([...extracted.uncertainties, ...required.uncertainties]),
+      ];
+      extracted.broken_reasons = [
+        ...new Set([...extracted.broken_reasons, ...required.broken]),
+      ];
+    }
+    if (
+      (extracted.uncertainties.length > input.extraction.uncertainties.length ||
+        extracted.broken_reasons.length >
+          input.extraction.broken_reasons.length) &&
+      extracted.certainty === "high"
+    )
+      extracted.certainty = "medium";
+    validateExtraction(extracted);
     const conflict =
       comparison.status === "missing" || comparison.status === "disagreement";
     if (

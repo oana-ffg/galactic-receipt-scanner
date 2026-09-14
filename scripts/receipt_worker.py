@@ -51,6 +51,25 @@ class InputError(Exception):
     """A rejected protocol input; no remote mutation has started."""
 
 
+class ProtocolInputError(InputError):
+    """Malformed request envelope rejected before dispatch or remote operations."""
+
+
+def validate_request(message):
+    if not isinstance(message, dict) or not isinstance(message.get("op"), str) or message["op"] not in OPERATIONS:
+        raise ProtocolInputError("Expected a request object with a supported op.")
+    required = {
+        "document": {"document_id": str},
+        "validate": {"extraction": dict},
+        "draft": {"extraction": dict},
+        "assess": {"extraction": dict, "rationale": str},
+    }.get(message["op"], {})
+    for field, kind in required.items():
+        if not isinstance(message.get(field), kind) or (kind is str and not message[field].strip()):
+            raise ProtocolInputError(f"{message['op']} requires {field} as a nonempty string." if kind is str
+                                     else f"{message['op']} requires {field} as an object.")
+
+
 class JournalCheckpointError(OSError):
     """A local journal replacement failed before the associated request began."""
 
@@ -857,6 +876,7 @@ class Worker:
         op = message.get("op") if isinstance(message, dict) else None
         try:
             self.record("input", message)
+            validate_request(message)
             result = self.dispatch(message)
             self.record("result", result)
             return {"ok": True, "op": op, "result": clean(result), "at": datetime.now(timezone.utc).isoformat()}
@@ -865,6 +885,8 @@ class Worker:
             # The journal could not record the failure, but this process must still stop.
             self.state["failed"] = {"operation": op, "error": diagnostic}
             return {"ok": False, "blocking": True, "op": op, "error": diagnostic, **self.summary()}
+        except ProtocolInputError as error:
+            return {"ok": False, "input_error": str(error), "op": op}
         except InputError as error:
             # If a write was already attempted, this is a workflow failure, not an editable input.
             if self.state["phase"] not in {"draft-uncertain", "confirmation-uncertain", "submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:

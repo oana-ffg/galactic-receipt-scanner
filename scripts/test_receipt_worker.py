@@ -542,6 +542,26 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.state["document"]["pages"][0]["type"], "receipt")
         self.assertEqual(self.worker.state["draft"], frozen)
 
+    def test_malformed_requests_are_correctable_without_remote_calls_or_failed_state(self):
+        self.prepared()
+        for submitted in (False, True):
+            if submitted:
+                self.send("submit")
+            for message in ({"op": "document"}, {"op": "document", "document_id": []},
+                            {"op": "document", "document_id": ""}, {"op": "draft"},
+                            {"op": "validate", "extraction": None}, {"op": "assess", "extraction": {}},
+                            {"op": []}, None):
+                with self.subTest(submitted=submitted, message=message):
+                    previous = deepcopy(self.worker.state)
+                    calls = len(self.fake.calls)
+                    result = self.worker.handle(message)
+                    self.assertIn("input_error", result)
+                    self.assertNotIn("blocking", result)
+                    self.assertEqual(self.fake.calls[calls:], [])
+                    previous["sequence"] += 1  # The rejected request is still journaled.
+                    self.assertEqual(self.worker.state, previous)
+            self.assertEqual(self.send("document", document_id=DID)["id"], DID)
+
     def test_submit_readback_rejects_changed_source_layout_or_wrong_classification(self):
         self.prepared()
         self.send("submit")
