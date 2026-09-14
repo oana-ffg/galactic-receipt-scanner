@@ -440,6 +440,40 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(module.InputError, "unfinished"):
             self.make_worker()
 
+    def test_unchecked_capture_defaults_do_not_override_luna_handwriting_or_confidence(self):
+        for doc in self.fake.documents.values():
+            doc["handwriting"] = "unchecked"
+        self.prepared(ids=(DID, OTHER), grouping={"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
+                      "evidence": "Synthetic consecutive sections of one receipt."})
+        initial = self.fake.initial_draft["extraction"]
+        self.assertEqual(initial["certainty"], "high")
+        self.assertFalse(initial["has_handwriting"])
+        self.assertEqual(initial["uncertainties"], [])
+        self.assertEqual(self.worker.state["assessment"]["extraction"]["certainty"], "high")
+        self.assertEqual(len(self.worker.state["draft"]["target"]["pages"]), 2)
+        self.assertTrue(all(d["handwriting"] == "unchecked" for d in self.fake.documents.values()))
+
+    def test_actual_handwriting_uncertainty_retains_review_note_and_luna_confidence(self):
+        self.fake.documents[OTHER]["handwriting"] = "uncertain"
+        self.prepared(ids=(DID, OTHER), grouping={"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
+                      "evidence": "Synthetic consecutive sections with a prior uncertain observation."})
+        initial = self.fake.initial_draft["extraction"]
+        self.assertEqual(initial["certainty"], "high")
+        self.assertFalse(initial["has_handwriting"])
+        self.assertIn("Retained source grouping includes an unresolved handwriting-presence observation.",
+                      initial["uncertainties"])
+
+    def test_known_handwriting_cannot_be_silently_discarded_by_grouping(self):
+        self.fake.documents[OTHER]["handwriting"] = "present"
+        self.claimed()
+        self.send("previews", capture_ids=[DID, OTHER])
+        result = self.worker.handle({"op": "draft", "extraction": extraction(),
+            "grouping": {"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
+                         "evidence": "Synthetic grouping contradicts recorded handwriting."}})
+        self.assertIn("input_error", result)
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.assertNotIn("draft", self.worker.state)
+
     def test_grouping_preserves_sources_and_annotations(self):
         self.fake.documents[OTHER]["annotations"] = [{"captureId": OTHER, "text": "synthetic prior annotation"}]
         self.fake.documents[OTHER]["handwriting"] = "present"

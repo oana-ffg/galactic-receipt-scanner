@@ -376,10 +376,10 @@ class Worker:
             extraction[field] = list(dict.fromkeys(extraction[field] + [r for item in reasons for r in item[reason]]))
         extraction["evidence"] = "\n".join(dict.fromkeys([extraction["evidence"], evidence]))
         require(not any(d["handwriting"] == "present" or d["annotations"] for d in before) or extraction["has_handwriting"], "Reconcile preserved handwriting against originals.")
-        if any(d["handwriting"] in ("uncertain", "unchecked") for d in before):
+        # Unchecked is the capture default, not contrary visual evidence. Preserve
+        # actual uncertainty for review without rewriting Luna's own confidence.
+        if any(d["handwriting"] == "uncertain" for d in before):
             extraction["uncertainties"] = list(dict.fromkeys(extraction["uncertainties"] + ["Retained source grouping includes an unresolved handwriting-presence observation."]))
-            if extraction["certainty"] == "high":
-                extraction["certainty"] = "medium"
         target["evidence"] = extraction["evidence"]
         require(len({p["captureId"] for d in [target] + donors for p in d["pages"]}) == len(pages)
                 and sum(len(d["pages"]) for d in [target] + donors) == len(pages), "Grouping did not preserve every source page exactly once.")
