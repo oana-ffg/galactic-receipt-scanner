@@ -281,6 +281,37 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(saved["extraction"]["vendor"],"Synthetic corrected shop")
         self.assertEqual(saved["assessment"]["changed_fields"],["vendor"])
 
+    def test_exact_category_names_resolve_for_draft_and_assessment_without_mutating_input(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        self.fake.categories = [{"id": OTHER, "name": "Synthetic supplies"}, {"id": FOREIGN, "name": "Synthetic personal"}]
+        value = extraction()
+        self.send("draft", extraction=value, category_name="Synthetic supplies")
+        self.assertIsNone(value["category_id"])
+        self.assertEqual(self.fake.initial_draft["extraction"]["category_id"], OTHER)
+        self.send("prepare", capture_ids=[DID])
+        confirmation = self.send("confirm")
+        self.send("assess", extraction=value, category_name="Synthetic personal", confirmation_sha256=confirmation["sha256"], rationale="Synthetic category correction.")
+        self.assertIsNone(value["category_id"])
+        self.assertEqual(self.worker.state["draft"]["extraction"]["category_id"], OTHER)
+        self.assertEqual(self.worker.state["assessment"]["extraction"]["category_id"], FOREIGN)
+        self.assertIn("category_id", self.worker.state["assessment"]["assessment"]["changed_fields"])
+
+    def test_category_name_errors_are_correctable_and_never_guessed(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        self.fake.categories = [{"id": OTHER, "name": "Synthetic supplies"}]
+        for name in ("synthetic supplies", "Synthetic", "", 3):
+            result = self.worker.handle({"op": "draft", "extraction": extraction(), "category_name": name})
+            self.assertIn("input_error", result)
+            self.assertNotIn("draft", self.worker.state)
+        value = extraction()
+        value["category_id"] = OTHER
+        self.assertIn("input_error", self.worker.handle({"op": "draft", "extraction": value, "category_name": "Synthetic supplies"}))
+        self.fake.categories.append({"id": FOREIGN, "name": "Synthetic supplies"})
+        self.assertIn("input_error", self.worker.handle({"op": "draft", "extraction": extraction(), "category_name": "Synthetic supplies"}))
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+
     def test_unknown_category_is_correctable_before_draft_is_frozen(self):
         self.claimed()
         self.send("previews", capture_ids=[DID])

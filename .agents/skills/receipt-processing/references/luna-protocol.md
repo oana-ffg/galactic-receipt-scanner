@@ -77,19 +77,26 @@ the **Parse** section of `processing-api.md` for the extraction fields. Its rout
 tokens and raw checkpoint bodies are for the client's implementation and Astra's
 legacy runbook; do not copy them into this helper's stdin.
 
-- A draft has only `op: "draft"`, `extraction`, and optionally `grouping`.
+- A draft has only `op: "draft"`, `extraction`, and optionally `grouping` and `category_name`.
   Never add `model`, `images`, `pixel_pdf_sha256`, `token` or `documents` to it. The
   helper creates and pins those values from the already inspected previews.
 - A document read needs both `op: "document"` and `document_id`, copied from the
   claim or context. A bare `{"op":"document"}` is incomplete.
 - `confirm`, `submit` and `pdf` each need only their `op`.
-- An assessment has exactly `op: "assess"`, `extraction`, `rationale`, and
+- An assessment requires `op: "assess"`, `extraction`, `rationale`, and
   `confirmation_sha256`, copied from the actual `confirm` result's `sha256` after
-  reading that evidence. Do not send `changed_fields`; the helper derives them.
+  reading that evidence. It also accepts optional `category_name`. Do not send
+  `changed_fields`; the Python script derives them.
+- For both `draft` and `assess`, prefer an exact `category_name` copied from `categories`,
+  with `extraction.category_id: null`. The Python script resolves the registry ID before
+  saving. Do not transcribe UUIDs when selecting by name. It rejects unknown/ambiguous
+  names and conflicting non-null IDs without guessing or creating categories.
 - An attestation includes `pdf_sha256`, copied from the actual final `pdf`/`render`
   result's `sha256` after inspecting every returned page. Never use the draft PDF hash.
 - An `input_error` is a correctable request mistake: use its explanation to fix the
   same operation. Do not switch to an unrelated operation or abandon the claim.
+- A response with `drafted: false` or `assessed: false` has not saved that step.
+  Correct every `validation.errors` entry and retry before issuing a dependent operation.
 - Crop changes belong in `previews.layouts` before the draft. Do not put an images
   array in the draft or invent/copy a pixel PDF hash; the helper freezes it itself.
 

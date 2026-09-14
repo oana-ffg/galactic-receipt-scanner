@@ -387,12 +387,12 @@ class Worker:
 
     def draft(self, message):
         require(self.state["phase"] == "claimed", "Freeze one Luna draft before OCR preparation.")
-        require(set(message) <= {"op", "extraction", "grouping"}, "Unknown draft option.")
+        require(set(message) <= {"op", "extraction", "grouping", "category_name"}, "Unknown draft option.")
         extraction = deepcopy(message["extraction"])
         validation = self.check("validate", extraction=extraction)
         if validation["errors"]:
             return {"validation": validation, "drafted": False}
-        self.check_category(extraction)
+        self.check_category(extraction, message.get("category_name"))
         claim = self.active()
         documents = self.grouping(message["grouping"], extraction) if message.get("grouping") else [deepcopy(self.get_document(claim["document"]["id"]))]
         target = next(d for d in documents if d["id"] == claim["document"]["id"])
@@ -422,9 +422,16 @@ class Worker:
         return self.database_checkpoint("draft", {"token":claim["token"], "model":"gpt-5.6-luna", "extraction":extraction,
              "documents":deepcopy(documents), "pixel_pdf_sha256":pixel_pdf["sha256"], "images":frozen["images"]})
 
-    def check_category(self, extraction):
+    def check_category(self, extraction, category_name=None):
         category_id = extraction.get("category_id")
-        if category_id is not None:
+        if category_name is not None:
+            require(isinstance(category_name, str) and category_name.strip(), "Use an exact category name from categories.")
+            require(category_id is None, "With category_name, set extraction.category_id to null; do not supply conflicting selections.")
+            categories = self.client.get("/api/processing/categories")
+            matches = [category for category in categories if category.get("name") == category_name]
+            require(len(matches) == 1, "Unknown or ambiguous purchase category name. Copy its exact name from categories and retry.")
+            extraction["category_id"] = matches[0]["id"]
+        elif category_id is not None:
             categories = self.client.get("/api/processing/categories")
             require(any(category.get("id") == category_id for category in categories),
                     "Unknown purchase category. Use categories and copy its exact id; then retry the same operation.")
@@ -800,17 +807,18 @@ class Worker:
             self.state["qwen_file"]=self.record("qwen-reading",qwen)
             return self.database_checkpoint("confirmation", {"token":self.active()["token"],**qwen})
         if op == "assess":
-            require(set(message)=={"op","extraction","rationale","confirmation_sha256"} and self.state.get("confirmation") and not self.state.get("assessment"),"Assess the saved findings once, preserving both earlier readings.")
+            require(set(message)-{"category_name"}=={"op","extraction","rationale","confirmation_sha256"} and self.state.get("confirmation") and not self.state.get("assessment"),"Assess the saved findings once, preserving both earlier readings.")
             if message["confirmation_sha256"] != self.state["confirmation"]["sha256"]:
                 raise ProtocolInputError("Read the actual confirm result and assess its exact confirmation_sha256.")
-            validation=self.check("validate",extraction=message["extraction"])
+            extraction=deepcopy(message["extraction"])
+            validation=self.check("validate",extraction=extraction)
             if validation["errors"]: return {"assessed":False,"validation":validation}
-            self.check_category(message["extraction"])
+            self.check_category(extraction, message.get("category_name"))
             rationale=message["rationale"]
             require(isinstance(rationale,str) and 0<len(rationale.strip())<=20000,"Explain corrections, retained values and unresolved disagreements.")
             initial=self.state["draft"]["extraction"]
-            changed=[key for key in initial if initial[key]!=message["extraction"][key]]
-            result={"extraction":deepcopy(message["extraction"]),"assessment":{"confirmation_sha256":self.state["confirmation"]["sha256"],"rationale":rationale,"changed_fields":changed}}
+            changed=[key for key in initial if initial[key]!=extraction[key]]
+            result={"extraction":extraction,"assessment":{"confirmation_sha256":self.state["confirmation"]["sha256"],"rationale":rationale,"changed_fields":changed}}
             self.state["assessment_file"]=self.record("luna-reassessment",result)
             self.state["assessment"]=result
             self.checkpoint()
