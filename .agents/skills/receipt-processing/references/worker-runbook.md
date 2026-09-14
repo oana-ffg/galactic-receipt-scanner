@@ -1,7 +1,7 @@
 > **New Luna runs use [the bounded Luna protocol](luna-protocol.md).** The legacy Luna
-> recipes below are compatibility documentation and do not implement the required Qwen
+> recipes below are compatibility documentation and do not implement the required PP
 > confirmation/reassessment. Use this runbook for Astra; never silently fall back to an
-> old Luna submit when local Qwen is unavailable.
+> old Luna submit when prepared PP is unavailable.
 
 # Worker runbook
 
@@ -73,6 +73,21 @@ retain the normal approval flow. Standing approvals are host configuration, not 
 or a cloud capability to assume. Never put an owner's paths or connection in tracked rules.
 
 ## Reuse the existing client
+
+For a later Astra audit on the current PP host, the coordinator also supplies
+`RECEIPT_WORKER_PROFILE`. After constructing `client` in the common prelude, configure
+the already prepared backend before any OCR or PDF call:
+
+```python
+from receipt_ppocr import PPBackend
+profile_path = os.environ["RECEIPT_WORKER_PROFILE"]
+profile = json.loads(Path(profile_path).read_text(encoding="utf-8"))
+assert profile["origin"] == client.origin
+client.ocr_backend = PPBackend(profile_path, profile["ppocr"])
+```
+
+This reuses PP artifacts and the prepared runtime. An unconfigured standalone client
+retains legacy Tesseract behavior; do not use it accidentally for the PP workflow.
 
 The Python API exposes the same implementation as the CLI, with less shell quoting and
 no model copying of tokens/hashes. Keep this prelude in a private worker script/session.

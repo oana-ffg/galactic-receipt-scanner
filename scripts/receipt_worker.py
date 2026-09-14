@@ -19,6 +19,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
+from receipt_ppocr import PPBackend
 from receipt_api import ScannerClient, ClientError, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
@@ -127,16 +128,16 @@ def disable_console_echo():
 
 
 class Worker:
-    def __init__(self, profile, resume=None):
+    def __init__(self, profile, resume=None, profile_path=None):
         self.lock = None
         try:
-            self.initialize(profile, resume)
+            self.initialize(profile, resume, profile_path)
         except Exception:
             if self.lock is not None:
                 self.lock.close()
             raise
 
-    def initialize(self, profile, resume):
+    def initialize(self, profile, resume, profile_path=None):
         self.repo = Path(__file__).resolve().parent.parent
         require(Path(profile["repository"]).resolve() == self.repo, "Profile repository does not match this helper.")
         for key, names in (("node", {"node", "node.exe"}), ("renderer", {"pdftoppm", "pdftoppm.exe"})):
@@ -146,6 +147,10 @@ class Worker:
         self.node = str(Path(profile["node"]).resolve(strict=True))
         self.renderer = str(Path(profile["renderer"]).resolve(strict=True))
         self.client = ScannerClient(credentials(profile["client_config"]))
+        self.confirmation_provider = "ppocr" if "ppocr" in profile else "qwen"
+        if self.confirmation_provider == "ppocr":
+            require(profile_path is not None, "PP OCR requires the prepared profile file.")
+            self.client.ocr_backend = PPBackend(profile_path, profile["ppocr"])
         require(self.client.origin == profile["origin"], "Configured scanner differs from the approved origin.")
         self.env = {k: v for k, v in os.environ.items() if k not in {"NODE_OPTIONS", "NODE_PATH", "PYTHONPATH"}}
         self.env["PATH"] = str(Path(self.node).parent) + os.pathsep + self.env.get("PATH", "")
@@ -185,10 +190,13 @@ class Worker:
         if self.resumed:
             self.state = self.load("state.json")
             require(self.state["origin"] == self.client.origin, "Run belongs to a different scanner.")
+            require(self.state.get("confirmation_provider", "qwen") == self.confirmation_provider,
+                    "Resume with the original confirmation provider; do not mix workflow evidence.")
         else:
             require(not self.work.exists(), "Worker run already exists.")
             artifact_directory(self.work)
             self.state = {"run_id": run_id, "origin": self.client.origin, "phase": "ready", "claim": None,
+                          "confirmation_provider": self.confirmation_provider,
                           "capture_ids": [], "capture_hashes": {}, "document_ids": [], "sources": {}, "prepared": {}, "sequence": 0}
             self.save("viewer-preflight.png", synthetic_png(), binary=True)
             self.checkpoint()
@@ -430,7 +438,7 @@ class Worker:
         require(self.state["phase"] == "drafted" and self.state.get("draft"), "Freeze and inspect the Luna draft before submission.")
         require(set(message) == {"op"}, "Submit reuses the frozen Luna draft without changing its reading or grouping.")
         frozen = self.state["draft"]
-        require(self.state.get("confirmation") and self.state.get("assessment"), "Complete Qwen confirmation and Luna reassessment before submission.")
+        require(self.state.get("confirmation") and self.state.get("assessment"), "Complete independent confirmation and Luna reassessment before submission.")
         extraction = deepcopy(self.state["assessment"]["extraction"])
         body = {"token": claim["token"], "model": "gpt-5.6-luna", "extraction": extraction}
         body["assessment"] = deepcopy(self.state["assessment"]["assessment"])
@@ -653,7 +661,7 @@ class Worker:
                     require(cid in self.state["sources"], "Fetch and view original pixels before OCR preparation.")
                     retained = {layout["captureId"]: layout for layout in self.state["draft"]["layouts"]}
                     require(cid in retained, "Prepare only pages retained in the frozen Luna draft.")
-                    source = self.client.prepare(cid, self.work / "ocr", crop=retained[cid]["crop"])
+                    source = self.client.prepare(cid, self.work / "ocr", crop=retained[cid]["crop"], rotation=retained[cid]["rotation"])
                     verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR original differs from the claimed source hash.")
                     source["crop"] = retained[cid]["crop"]
                     self.state["prepared"][cid] = source
@@ -730,7 +738,12 @@ class Worker:
             require(set(message)=={"op"} and self.state.get("draft_saved") and not self.state.get("confirmation"), "Confirm one saved initial reading.")
             frozen=self.state["draft"]
             retained={p["captureId"] for p in frozen["target"]["pages"]}
-            require(retained <= self.state["prepared"].keys(), "Prepare Tesseract for every retained page first.")
+            require(retained <= self.state["prepared"].keys(), "Prepare OCR for every retained page first.")
+            if self.confirmation_provider == "ppocr":
+                pins = [{"capture_id":p["captureId"], "sha256":self.state["prepared"][p["captureId"]]["ocr_sha256"]}
+                        for p in frozen["target"]["pages"]]
+                return self.database_checkpoint("confirmation", {"token":self.active()["token"],
+                    "provider":"ppocr", "pixel_pdf_sha256":frozen["pixel_pdf"]["sha256"], "artifacts":pins})
             output=self.work/("qwen-raw-"+uuid.uuid4().hex+".json")
             qwen=receipt_qwen.extract(frozen["rendered"], frozen["images"], frozen["pixel_pdf"]["sha256"], output)
             validation=self.check("validate",extraction=qwen["extraction"])
@@ -811,12 +824,19 @@ class Worker:
         access = self.client.get("/api/processing/access")
         require(access.get("version") == 2 and access.get("queueClaims") is True, "Scanner processing API v2 is required.")
         require(access.get("lunaReassessment") is True, "Deploy the Luna reassessment API before running this workflow.")
+        if self.confirmation_provider == "ppocr":
+            require(access.get("ppocrConfirmation") is True, "Deploy PP OCR confirmation support before processing.")
         if not (self.resumed and self.state["phase"] in {"draft-uncertain", "confirmation-uncertain"}):
-            receipt_qwen.preflight()
+            if self.confirmation_provider == "ppocr":
+                self.client.ocr_backend.preflight()
+            else:
+                receipt_qwen.preflight()
         self.check("validate", extraction={})
         # Verify prepared packages and model assets without fetching/installing anything.
-        program = '''import {readFileSync} from "node:fs"; import {createHash} from "node:crypto";
-        await import("pdf-lib"); await import("tesseract.js"); await import("esbuild");
+        program = '''await import("pdf-lib"); await import("esbuild");'''
+        if self.confirmation_provider == "qwen":
+            program += '''import {readFileSync} from "node:fs"; import {createHash} from "node:crypto";
+        await import("tesseract.js");
         const assets=JSON.parse(readFileSync("model-assets.json","utf8"));
         for (const lang of ["dan","eng"]) { const name=`ocr/${lang}.traineddata.gz`;
           if(createHash("sha256").update(readFileSync(`public/vendor/${name}`)).digest("hex")!==assets[name].sha256) throw Error("Model checksum mismatch"); }
@@ -826,7 +846,7 @@ class Worker:
             raise ClientError("Prepared OCR/PDF dependencies are unavailable; no download attempted.")
         result = subprocess.run([self.renderer, "-v"], capture_output=True, timeout=15, env=self.env)
         require(result.returncode == 0, "Prepared PDF renderer is unavailable.")
-        return {"ready": True, "origin": self.client.origin, **self.summary()}
+        return {"ready": True, "origin": self.client.origin, "confirmation_provider": self.confirmation_provider, **self.summary()}
 
     def handle(self, message):
         op = message.get("op") if isinstance(message, dict) else None
@@ -870,7 +890,7 @@ def main():
     parser.add_argument("--profile", required=True, action=Once)
     parser.add_argument("--resume", action=Once)
     args = parser.parse_args()
-    worker = Worker(json.loads(Path(args.profile).read_text(encoding="utf-8")), args.resume)
+    worker = Worker(json.loads(Path(args.profile).read_text(encoding="utf-8")), args.resume, args.profile)
     disable_console_echo()
     print(json.dumps(worker.preflight()), flush=True)
     heartbeat = threading.Thread(target=worker.heartbeat, daemon=True)

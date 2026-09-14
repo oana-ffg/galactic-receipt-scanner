@@ -1,6 +1,6 @@
 ---
 name: receipt-processing
-description: Process saved receipts using fresh Luna workers, group related pages, extract financial data and create named PDFs; independently reparse exceptions with Astra. Use for saved batches and receipt review, not the capture loop.
+description: "Sort saved receipts with fresh Luna and PP-OCR: match pages, identify vendor/date/purchase category, and create searchable PDFs. Use for saved batches, not capture or bank reconciliation."
 ---
 
 # Receipt processing
@@ -49,6 +49,20 @@ for Astra. Its legacy Luna examples do not implement reassessment; do not use th
 
 ## Document flow
 
+The default is a **first pass for organization**, not a complete financial audit.
+Prioritize correct page/PDF association, vendor, transaction date and one descriptive
+purchase category. Inspect enough item text to choose the category reliably; do not
+spend the batch exhaustively transcribing or reconciling every financial row. Preserve
+clearly read amounts, but use empty arrays/null for deferred financial fields and record
+"Detailed financial verification deferred" in uncertainties. Never fabricate missing
+fields just to satisfy arithmetic. Such a saved review flag does not stop the batch.
+
+Do not classify ownership, rescue versus personal use, or bank/account allocation.
+Mixed purchases remain a descriptive mixed category when appropriate. The owner handles
+allocation and bank reconciliation in another project. Heavier financial/model checks
+run only on the owner's later selected documents; do not automatically drain every
+deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
+
 1. Luna inspects **detected document crops by default**, using the saved outline with a
    paper margin. It groups related pages/slips and extracts their printed fields with its
    own vision. Raw originals are available on request when the crop, completeness or
@@ -58,33 +72,37 @@ for Astra. Its legacy Luna examples do not implement reassessment; do not use th
    **image-only PDF before ordinary OCR**. Inspect all retained pages. This fixes which
    pixels belong to the document before later comparison; a single first-page preview
    is insufficient for a multipage document.
-3. Persist the initial Luna reading and frozen layout in the database. Then prepare
-   Tesseract on every finalized region and run the already installed local
-   `qwen3-vl:8b-instruct` on **all pixel-only PDF page images**, with no Luna values,
-   Tesseract text, categories or arithmetic findings in Qwen's prompt.
-4. Save Qwen's independent extraction and provenance separately. The server pins the
-   matching OCR artifacts and computes arithmetic for both readings and their field
-   disagreements. Return this evidence to the **same Luna worker**.
+3. Persist the initial Luna reading and frozen layout in the database. Prepare the
+   already configured local **PP-OCRv6** on every retained source crop with its saved
+   rotation. These are the same source pixels as the finalized image-only PDF; no raw
+   camera background or earlier model values are supplied to PP.
+4. Save PP text, text polygons, confidence and model/source provenance as immutable OCR
+   artifacts. `confirm` pins those exact artifacts in the database and returns ordinary
+   OCR/math evidence to the **same Luna worker**, with no Qwen call. PP is text recognition,
+   not an independent vendor/category reasoning model. Its confidence is not a calibrated
+   probability. Luna checks the PP text against the visible header, date and grouping.
 5. Luna reopens the relevant pixels and assesses the findings. It may correct its
    extraction, retain its original answer, or leave uncertainty. It must explain why;
    model agreement or balanced arithmetic alone is not proof. Save the updated full
-   extraction and rationale separately, preserving the original Luna and Qwen records.
+   extraction and rationale separately, preserving the original Luna and PP records.
 6. Submit the reassessed reading, then generate/upload/inspect the searchable PDF with
-   Tesseract's invisible text in the same frozen layout. Saved review flags still let
+   PP's invisible search text in the same frozen layout. Saved review flags still let
    the coordinator continue the next document; actual execution failures stop the batch.
 
 Use the bounded [Luna protocol](references/luna-protocol.md) for this flow. The host
-must already have the local Qwen vision model and prepared Tesseract/PDF runtimes;
-preflight checks them before claiming. Missing local inference is a setup blocker,
-not permission to install a model, use a paid/cloud API or silently skip confirmation.
+must already have a PP-OCRv6 profile and prepared PP/PDF runtimes;
+preflight must advertise `confirmation_provider: ppocr` before claiming. Missing PP
+is a setup blocker, not permission to install a model, run Qwen, use a paid/cloud API
+or silently skip confirmation. CPU/GPU device is chosen in the prepared host profile.
 This local-host flow is not yet verified in cloud Work.
 
 For a full-flow test, use the next unprocessed small-stage documents so saved values
 cannot influence the first reading. After the requested pilot, an independent Astra
 worker reviews the same finalized pixels and saves confidence separately. Keep Astra's
 answers out of Luna's initial/reassessment context. When the owner requests reviews of
-all inspected documents, use `review_all:true` for the large-stage claim; normal daily
-Astra processing still prioritizes the exception queue. Preserve all original attempts.
+all inspected documents, use `review_all:true` for the large-stage claim. Keep that audit
+separate from ordinary first-pass organization; no automatic full financial audit is
+part of the current default. Preserve all original attempts.
 
 ## Coordinator
 
@@ -117,13 +135,13 @@ model-review/awaiting-page/broken disposition is a document outcome, not by itse
 worker execution failure. **Continue with the next pending Luna document after such
 a saved outcome**, including low/medium certainty, OCR disagreement and arithmetic
 questions routed to Astra. Do not ask the owner to approve individual review flags.
-The daily Astra stage handles its review queue separately. In reports, distinguish
+Later explicitly selected Astra audits handle financial review separately. In reports, distinguish
 "saved; queued for Astra" from a failed or uncertain network/journal operation.
 
 Check `/api/processing/access`: version 2 must advertise queueClaims and lunaReassessment. Use the shared
 20-minute renewable lease, one document per fresh worker. Use 10-document batches as checkpoints. An explicitly requested continuous/day/overnight
 run continues with further batches within its execution budget; 10 is not a daily quota.
-The daily Astra run likewise drains eligible exceptions within its budget. Stop a run when the
+An explicitly requested Astra audit drains its selected scope within its budget. Stop a run when the
 queue is empty/busy. Do not spin or launch a second coordinator. Schedule only after the
 host's credential access and managed model spawning have been verified.
 
@@ -133,8 +151,8 @@ Astra-review, human-review and broken states distinct. **Each Luna/Astra worker 
 its own built-in vision to inspect the verified originals and extract their contents.**
 Do not substitute OCR output or another model for that visual reading.
 
-Reuse the already prepared local CPU Tesseract runtime through the existing client for
-the required numeric comparison and searchable PDF text. Processing workers must not
+Reuse the already prepared local PP-OCRv6 runtime through the existing client for
+independent text evidence and searchable PDF text. Processing workers must not
 install or download OCR packages, engines or models, or add another OCR pipeline. If the
 prepared runtime is missing or broken, report the setup failure to the coordinator.
 The ordinary OCR pass still runs before model submission; its output is unverified
@@ -163,7 +181,7 @@ a confirmed irrecoverable source problem is broken.
 
 ## Printed amounts and handwriting
 
-Extract vendor, dates, references, currency, all line items, purchase total, charged total,
+In a later full financial audit, extract vendor, dates, references, currency, all line items, purchase total, charged total,
 fees, discounts and tax basis from pixels. Use signed integer minor units. Arithmetic runs
 for all receipts/invoices regardless of model confidence. Do not count included VAT,
 informational discounts, subtotals or payment fees twice. Never change a digit to force balance.

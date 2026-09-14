@@ -208,6 +208,7 @@ export async function confirmationEvidence(
   const doc = draft.documents.find((d) => d.id === id)!;
   const initialOcr = await compareStoredOcr(env, doc, draft.extraction, {
     strictRegion: true,
+    engine: "tesseract",
   });
   requireThat(
     initialOcr.artifacts.length === doc.pages.length,
@@ -216,6 +217,7 @@ export async function confirmationEvidence(
   );
   const qwenOcr = await compareStoredOcr(env, doc, qwen, {
     strictRegion: true,
+    engine: "tesseract",
     pins: initialOcr.artifacts,
   });
   const ignored = new Set([
@@ -238,6 +240,60 @@ export async function confirmationEvidence(
     initial_ocr: initialOcr,
     qwen_ocr: qwenOcr,
     differing_fields: differences,
+  };
+}
+
+/** First-pass confirmation pins ordinary PP OCR; no second language model is run. */
+export async function ppConfirmation(
+  env: Env,
+  input: any,
+  draft: LunaDraft,
+  id: string,
+) {
+  const doc = draft.documents.find((d) => d.id === id)!;
+  const pins = input.artifacts;
+  requireThat(
+    input.provider === "ppocr" &&
+      input.pixel_pdf_sha256 === draft.pixel_pdf_sha256 &&
+      Object.keys(input).every((k) =>
+        ["token", "provider", "pixel_pdf_sha256", "artifacts"].includes(k),
+      ) &&
+      Array.isArray(pins) &&
+      pins.length === doc.pages.length &&
+      new Set(pins.map((p: any) => p?.capture_id)).size === pins.length &&
+      pins.every(
+        (p: any, i: number) =>
+          p?.capture_id === doc.pages[i].captureId &&
+          HASH.test(p?.sha256) &&
+          Object.keys(p).every((k) => ["capture_id", "sha256"].includes(k)),
+      ),
+    400,
+    "Pin PP OCR for every frozen page in order.",
+  );
+  const initialOcr = await compareStoredOcr(env, doc, draft.extraction, {
+    strictRegion: true,
+    pins,
+    engine: "ppocr",
+  });
+  requireThat(
+    initialOcr.artifacts.length === doc.pages.length,
+    409,
+    "Prepare source-matched PP OCR for every frozen page first.",
+  );
+  const checked = {
+    provider: "ppocr",
+    pixel_pdf_sha256: draft.pixel_pdf_sha256,
+    artifacts: pins,
+  };
+  return {
+    checked,
+    payload: {
+      ppocr: checked,
+      evidence: {
+        initial_arithmetic: arithmetic(draft.extraction),
+        initial_ocr: initialOcr,
+      },
+    },
   };
 }
 

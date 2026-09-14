@@ -147,6 +147,7 @@ export async function compareStoredOcr(
   options?: {
     strictRegion?: boolean;
     pins?: { capture_id: string; sha256: string }[];
+    engine?: "ppocr" | "tesseract";
   },
 ): Promise<OcrComparison> {
   if (!financialTypes.includes(e.type) && !options?.strictRegion)
@@ -181,8 +182,19 @@ export async function compareStoredOcr(
         value.source?.captureId !== page.captureId ||
         value.source?.sha256 !== page.sha256 ||
         typeof value.provenance?.engine !== "string" ||
-        !value.provenance.engine.startsWith("tesseract.js") ||
+        !(options?.engine === "ppocr"
+          ? value.provenance.engine === "PP-OCRv6"
+          : options?.engine === "tesseract"
+            ? value.provenance.engine.startsWith("tesseract.js")
+            : value.provenance.engine.startsWith("tesseract.js") ||
+              value.provenance.engine === "PP-OCRv6") ||
         typeof value.text !== "string"
+      )
+        continue;
+      if (
+        value.provenance.engine === "PP-OCRv6" &&
+        (!("rotation" in value.source) ||
+          value.source.rotation !== page.rotation)
       )
         continue;
       if (options?.strictRegion) {

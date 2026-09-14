@@ -14,6 +14,10 @@ Missing configuration is a setup task; an omitted batch range uses the skill def
 
 Provide the verified absolute Python/helper/profile paths. The private profile contains
 `repository`, `client_config`, the owner-verified `origin`, `node`, and `renderer`.
+The current first-pass profile also contains `ppocr` with prepared absolute `python`
+and `models` paths plus `device` (`cpu` or `gpu:0`). Setup installs and verifies these
+dependencies once; a processing worker never installs packages or model files. The
+model directory holds PP-OCRv6 medium detection and recognition inference directories.
 Use prepared runtimes; credentials stay in the existing protected connection. Keep the
 profile and its machine-specific approval rule outside tracked source. The rule allows
 only the exact Python executable, `-X utf8 -B -I`, absolute `scripts/receipt_worker.py`,
@@ -39,7 +43,9 @@ of ONE request object followed by a newline. Do not wrap the launch in a changin
 pipe a script to Python, start another helper per operation, or put tokens in arguments.
 
 The helper prints one ready response after checking access, prepared dependencies and
-the renderer, reassessment API and installed local Qwen model. Open its `viewer_preflight` image with native `view_image` before claiming.
+the renderer, reassessment API and prepared PP runtime/models. Require the ready response
+to advertise `confirmation_provider: ppocr`; a legacy Qwen profile needs setup before
+this first-pass workflow. Open its `viewer_preflight` image with native `view_image` before claiming.
 The expected image is a small green square. This verifies local viewer access; no receipt
 is claimed during preflight. All artifacts live under the repository's ignored
 `.local/receipt-worker/RUN_ID`, using inherited Windows workspace permissions.
@@ -62,10 +68,10 @@ context; return compact operational metadata to the coordinator.
 | `categories` | None | Existing category registry. |
 | `category` | `name`, `description` | Create/reuse a needed private category. Do not invent registry IDs. |
 | `draft` | `extraction`; optional `grouping` below | After crop review, freeze Luna's independent reading, grouping and layout. Returns ordered pixel-only PDF page renders; inspect EVERY page before OCR. The initial extraction/layout/image hashes are saved immutably in the database; no OCR or Qwen runs here. |
-| `prepare` | `capture_ids` for all and only the draft's retained pages | Only after `draft`: source-hash/region-matched Tesseract artifacts plus text/lines for comparison. No model download or installation. |
+| `prepare` | `capture_ids` for all and only the draft's retained pages | Only after `draft`: source-hash/crop/rotation-matched PP artifacts plus text/polygons/confidence for comparison and invisible PDF search text. No model download or installation. |
 | `validate` | `extraction` using the complete [API contract](processing-api.md#parse) | Actual shared schema/arithmetic checks. Correct validation errors locally; never change printed digits to force balance. |
-| `confirm` | None | Run independent local Qwen on every frozen page image, save its extraction/provenance, and return server-computed math, pinned OCR comparisons and differing fields. Wait for the same operation to finish; do not resend or start another inference. |
-| `assess` | `extraction` (complete reassessed object), `rationale` (1–20,000 characters) | In this same Luna context, reopen disputed pixels and explain every correction, rejected suggestion and remaining uncertainty. Saves a separate final reading; never overwrites the initial draft or Qwen. Returns changed fields and arithmetic. |
+| `confirm` | None | Pin the exact saved PP artifacts for all frozen pages and return server OCR/math comparisons. This performs no Qwen inference. |
+| `assess` | `extraction` (complete reassessed object), `rationale` (1–20,000 characters) | In this same Luna context, check PP text against vendor, date, category and matched-page pixels. Explain corrections and uncertainty. Saves a separate final reading; never overwrites the initial draft or PP. Returns changed fields and arithmetic. |
 | `submit` | None | Submit the saved reassessment after `confirm` and `assess`. Do not resend extraction/grouping. The server records numeric disagreements and caps certainty when needed. Saved page order, crop and rotation are verified. |
 | `pdf` | None | Generates/uploads once, checks server hash/revision, then renders the local PDF at 150 dpi. Returns local PDF/render paths. No repeated PDF download. If filename/relationships make PDF inapplicable, returns a completed saved disposition. |
 | `render` | Optional `dpi: 300` | Higher-resolution render of the same verified local PDF when small print requires it. |
@@ -88,8 +94,8 @@ Use categories/context as needed before freezing. Do not request an external mat
 check before saving the initial draft; `draft` already validates its schema internally.
 
 The initial draft and layout are immutable. Corrections belong in `assess.extraction`,
-not in a second draft. Qwen receives no initial Luna extraction or OCR. Its results and
-confidence are evidence, not authority. Verify money units, tax basis, included VAT,
+not in a second draft. PP receives source crop pixels with no initial Luna extraction.
+Its text and confidence are evidence, not authority. For retained amounts, verify money units, tax basis, included VAT,
 discount summaries, signs, missing values, dates, and row associations on the pixels.
 Explain why you retain a value when another reader disagrees. Never change a number
 merely to balance arithmetic. Report honest confidence and unresolved questions.
@@ -160,5 +166,5 @@ until a fresh managed Luna completes this entire path under the loaded approval 
 Checkpoint recovery: a lost initial-draft or confirmation acknowledgement leaves
 `draft-uncertain` or `confirmation-uncertain`. Stop the batch and retain the journal.
 On explicitly authorized `--resume RUN_ID`, `{"op":"retry-checkpoint"}` replays the
-exact persisted request. It never regenerates the initial answer or reruns Qwen.
+exact persisted request. It never regenerates the initial answer or reruns OCR/inference.
 Do not release uncertain checkpoints or start a replacement worker.

@@ -150,11 +150,12 @@ class FakeScanner:
         return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     pages=len(pages), layouts=layouts, searchable=False)
 
-    def prepare(self, cid, directory, *, crop=None):
+    def prepare(self, cid, directory, *, crop=None, rotation=0):
         result = self.original(cid, directory)
         ocr = Path(directory) / (cid + ".json")
         ocr.write_text(json.dumps({"text": "Synthetic text", "lines": [], "text_only_pdf_layers": [{"base64": "must-not-escape"}]}))
-        return {**result, "ocr_path": str(ocr), "crop": crop}
+        return {**result, "ocr_path": str(ocr), "crop": crop, "rotation": rotation,
+                "ocr_sha256": hashlib.sha256(ocr.read_bytes()).hexdigest()}
 
     def pdf(self, did, directory, before_upload=None):
         self.pdf_calls += 1
@@ -293,6 +294,18 @@ class WorkerTests(unittest.TestCase):
         self.worker.lock.close()
         self.worker = self.make_worker()
         self.assertEqual(self.worker.state["phase"], "ready")
+
+    def test_pp_confirmation_never_calls_qwen_and_preserves_reassessment(self):
+        self.worker.confirmation_provider = "ppocr"
+        with patch.object(module.receipt_qwen, "extract", side_effect=AssertionError("Qwen must not run")):
+            self.prepared()
+        request = self.worker.load(self.worker.state["checkpoint_request"])
+        self.assertEqual(request["provider"], "ppocr")
+        self.assertEqual(request["artifacts"][0]["capture_id"], DID)
+        self.assertIn("confirmation", self.worker.state)
+        self.assertEqual(self.worker.state["draft"]["extraction"], self.worker.state["assessment"]["extraction"])
+        self.send("submit")
+        self.assertEqual(len(self.fake.submit_bytes), 1)
 
     def test_explicit_raw_preview_freezes_full_original_pixel_bounds(self):
         self.claimed()

@@ -2,6 +2,7 @@ import {
   lunaDraft,
   checkQwen,
   confirmationEvidence,
+  ppConfirmation,
   checkAssessment,
   type LunaDraft,
 } from "./processing-confirmation";
@@ -500,21 +501,53 @@ export async function processingRoute(
     }
   }
   if (path === "/api/processing/draft" && method === "POST") {
-    const previous = await env.DB.prepare("SELECT model,payload FROM processing_drafts WHERE token=?").bind(input.token).first<{model:string;payload:string}>();
+    const previous = await env.DB.prepare(
+      "SELECT model,payload FROM processing_drafts WHERE token=?",
+    )
+      .bind(input.token)
+      .first<{ model: string; payload: string }>();
     if (previous) {
-      const proposed = input.model === STAGE_MODEL.small
-        ? {version:1,extraction:input.extraction,documents:input.documents,pixel_pdf_sha256:input.pixel_pdf_sha256,images:input.images}
-        : input.extraction;
-      requireThat(previous.model===input.model && previous.payload===JSON.stringify(proposed),409,"Initial reading is immutable.");
-      return json({saved:true,replayed:true});
+      const proposed =
+        input.model === STAGE_MODEL.small
+          ? {
+              version: 1,
+              extraction: input.extraction,
+              documents: input.documents,
+              pixel_pdf_sha256: input.pixel_pdf_sha256,
+              images: input.images,
+            }
+          : input.extraction;
+      requireThat(
+        previous.model === input.model &&
+          previous.payload === JSON.stringify(proposed),
+        409,
+        "Initial reading is immutable.",
+      );
+      return json({ saved: true, replayed: true });
     }
   }
   if (path === "/api/processing/confirmation" && method === "POST") {
-    const previous = await env.DB.prepare("SELECT request,payload,sha256 FROM processing_confirmations WHERE token=?").bind(input.token).first<any>();
+    const previous = await env.DB.prepare(
+      "SELECT request,payload,sha256 FROM processing_confirmations WHERE token=?",
+    )
+      .bind(input.token)
+      .first<any>();
     if (previous) {
-      const saved=JSON.parse(previous.request);
-      requireThat(Object.keys(input).length===Object.keys(saved).length+1 && Object.keys(saved).every(k=>JSON.stringify(input[k])===JSON.stringify(saved[k])),409,"Confirmation is immutable.");
-      return json({saved:true,sha256:previous.sha256,...JSON.parse(previous.payload),replayed:true});
+      const saved = JSON.parse(previous.request);
+      requireThat(
+        Object.keys(input).length === Object.keys(saved).length + 1 &&
+          Object.keys(saved).every(
+            (k) => JSON.stringify(input[k]) === JSON.stringify(saved[k]),
+          ),
+        409,
+        "Confirmation is immutable.",
+      );
+      return json({
+        saved: true,
+        sha256: previous.sha256,
+        ...JSON.parse(previous.payload),
+        replayed: true,
+      });
     }
   }
   const lock = await activeLock(env);
@@ -604,7 +637,11 @@ export async function processingRoute(
     );
     const frozen = JSON.parse(lock.draft!) as LunaDraft;
     requireThat(frozen.version === 1, 409, "Unsupported Luna draft.");
-    const checked = checkQwen(input, frozen, lock.document_id);
+    const pp =
+      input.provider === "ppocr"
+        ? await ppConfirmation(env, input, frozen, lock.document_id)
+        : null;
+    const checked = pp?.checked ?? checkQwen(input, frozen, lock.document_id);
     const encoded = JSON.stringify(checked);
     const prior = await env.DB.prepare(
       "SELECT request,payload,sha256 FROM processing_confirmations WHERE token=?",
@@ -619,13 +656,15 @@ export async function processingRoute(
         ...JSON.parse(prior.payload),
       });
     }
-    const evidence = await confirmationEvidence(
-      env,
-      frozen,
-      lock.document_id,
-      input.extraction as Extraction,
-    );
-    const payload = JSON.stringify({ qwen: checked, evidence });
+    const evidence =
+      pp?.payload.evidence ??
+      (await confirmationEvidence(
+        env,
+        frozen,
+        lock.document_id,
+        input.extraction as Extraction,
+      ));
+    const payload = JSON.stringify(pp?.payload ?? { qwen: checked, evidence });
     requireThat(
       new TextEncoder().encode(payload).length <= 512 * 1024,
       400,
@@ -803,7 +842,7 @@ export async function processingRoute(
       requireThat(
         confirmation,
         409,
-        "Save independent Qwen confirmation before reassessment.",
+        "Save independent OCR/model confirmation before reassessment.",
       );
       checkAssessment(input.assessment, confirmation.sha256);
       const finalExtraction = input.extraction;

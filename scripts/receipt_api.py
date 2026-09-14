@@ -83,12 +83,21 @@ def matches_ocr(value, capture_id, source_sha):
     source, provenance = value.get("source"), value.get("provenance")
     return (isinstance(source, dict) and isinstance(provenance, dict)
             and source.get("captureId") == capture_id and source.get("sha256") == source_sha
-            and isinstance(provenance.get("engine"), str) and provenance["engine"].startswith("tesseract.js")
+            and isinstance(provenance.get("engine"), str) and
+                (provenance["engine"].startswith("tesseract.js") or provenance["engine"] == "PP-OCRv6")
             and isinstance(value.get("text"), str)
             and isinstance(value.get("text_only_pdf_layers"), list) and bool(value["text_only_pdf_layers"])
             and all(isinstance(layer, dict) and isinstance(layer.get("base64"), str) and bool(layer["base64"])
                     and isinstance(layer.get("sha256"), str) and SHA.fullmatch(layer["sha256"])
                     for layer in value["text_only_pdf_layers"]))
+
+
+def matches_prepared_ocr(value, capture_id, source_sha, crop, backend, rotation):
+    if not matches_ocr(value, capture_id, source_sha) or not matches_ocr_region(value, crop):
+        return False
+    engine = value["provenance"]["engine"]
+    return (engine.startswith("tesseract.js") if backend is None else
+            engine == backend.engine and value["source"].get("rotation") == rotation)
 
 
 class ScannerClient:
@@ -105,6 +114,7 @@ class ScannerClient:
                 or not re.fullmatch(r"rsc_[A-Za-z0-9_-]{43}", self.processing_token)):
             raise ClientError("Invalid scanner credential format.")
         self.opener = build_opener(NoRedirect())
+        self.ocr_backend = None
 
     def request(self, path, data=None, content_type="application/json"):
         if (not path.startswith("/api/") or urlsplit(path).netloc or "#" in path
@@ -207,7 +217,7 @@ class ScannerClient:
             raise ClientError("Could not resolve source dimensions and detected OCR region.")
         return json.loads(output.read_text(encoding="utf-8"))["crop"]
 
-    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP):
+    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0):
         """Verify an original and reuse or run CPU OCR, returning bounded references."""
         root = Path(directory)
         original = self.original(capture_id, root / "originals")
@@ -220,6 +230,9 @@ class ScannerClient:
                     any(type(v) is not int for v in crop) or not (0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3])):
                 raise ClientError("Invalid OCR crop bounds.")
             original["crop"] = crop
+        if rotation not in (0, 90, 180, 270):
+            raise ClientError("Invalid OCR rotation.")
+        original["rotation"] = rotation
         for artifact in meta.get("artifacts", []):
             if artifact.get("kind") != "ocr":
                 continue
@@ -232,17 +245,20 @@ class ScannerClient:
                 value = json.loads(destination.read_text())
             except (ValueError, UnicodeError):
                 continue
-            if matches_ocr(value, capture_id, original["sha256"]) and matches_ocr_region(value, crop):
+            if matches_prepared_ocr(value, capture_id, original["sha256"], crop, self.ocr_backend, rotation):
                 return {**original, "ocr_path": str(destination.absolute()), "ocr_sha256": sha}
         run = root / (capture_id + "-" + os.urandom(8).hex())
         manifest = run.with_suffix(".source.json")
         output = run.with_suffix(".ocr.json")
         write_new_file(manifest, json.dumps(original).encode())
-        process = subprocess.run(["node", "scripts/receipt_ocr.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
-        if process.returncode:
-            raise ClientError("Local OCR failed; preserve the source and inspect the local runtime before retrying.")
+        if self.ocr_backend is not None:
+            self.ocr_backend.run(manifest, output)
+        else:
+            process = subprocess.run(["node", "scripts/receipt_ocr.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
+            if process.returncode:
+                raise ClientError("Local OCR failed; preserve the source and inspect the local runtime before retrying.")
         data = output.read_bytes()
-        if not matches_ocr(json.loads(data), capture_id, original["sha256"]) or not matches_ocr_region(json.loads(data), crop):
+        if not matches_prepared_ocr(json.loads(data), capture_id, original["sha256"], crop, self.ocr_backend, rotation):
             raise ClientError("Generated OCR does not match the verified source.")
         if len(data) > 1024 * 1024:
             raise ClientError("OCR artifact exceeds 1 MB; preserve the local result for review.")
@@ -262,7 +278,7 @@ class ScannerClient:
         root = Path(directory)
         pages = []
         for page in document["pages"]:
-            source = self.prepare(page["captureId"], directory, crop=page["crop"])
+            source = self.prepare(page["captureId"], directory, crop=page["crop"], rotation=page["rotation"])
             if source["sha256"] != page["sha256"]:
                 raise ClientError("Document source hash mismatch.")
             pages.append({**page, "path": source["path"], "ocr_path": source["ocr_path"]})

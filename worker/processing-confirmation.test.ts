@@ -117,6 +117,97 @@ async function claim(stage: "small" | "large", reviewAll = false) {
   ).claim;
 }
 
+it("pins PP evidence without Qwen and preserves first-pass readings through submission", async () => {
+  const source = await capture();
+  const lease = await claim("small");
+  const document = (await ok(`/api/documents/${source.id}`, undefined, false))
+    .document;
+  document.pages[0].crop = [0, 0, 1400, 2200];
+  const initial = reading();
+  initial.line_items = [];
+  initial.uncertainties = ["Detailed financial verification deferred"];
+  await ok("/api/processing/draft", {
+    token: lease.token,
+    model: "gpt-5.6-luna",
+    extraction: initial,
+    documents: [document],
+    pixel_pdf_sha256: hash("a"),
+    images: [{ sha256: hash("b"), pixels: [1400, 2200] }],
+  });
+  const artifact = {
+    source: {
+      captureId: source.id,
+      sha256: source.sha256,
+      pixels: [1400, 2200],
+      region: { left: 0, top: 0, width: 1400, height: 2200 },
+      rotation: 0,
+    },
+    provenance: { engine: "PP-OCRv6" },
+    text: "Checkpoint Shop\n2026-09-14\nTOTAL 12,34\nVAT 2,47",
+  };
+  const wrong = await ok(
+    `/api/captures/${source.id}/artifacts/ocr`,
+    { ...artifact, source: { ...artifact.source, rotation: 90 } },
+    false,
+  );
+  const confirmation = {
+    token: lease.token,
+    provider: "ppocr",
+    pixel_pdf_sha256: hash("a"),
+    artifacts: [{ capture_id: source.id, sha256: wrong.sha256 }],
+  };
+  const rejected = await request("/api/processing/confirmation", confirmation);
+  expect(rejected.status, await rejected.text()).toBe(409);
+  const saved = await ok(
+    `/api/captures/${source.id}/artifacts/ocr`,
+    artifact,
+    false,
+  );
+  confirmation.artifacts[0].sha256 = saved.sha256;
+  const confirmed = await ok("/api/processing/confirmation", confirmation);
+  expect(confirmed.qwen).toBeUndefined();
+  expect(confirmed.ppocr.artifacts).toEqual(confirmation.artifacts);
+  expect(confirmed.evidence.initial_ocr.artifacts).toEqual(
+    confirmation.artifacts,
+  );
+  const revised = { ...initial, vendor: "Checkpoint Shop corrected" };
+  await ok("/api/processing/submit", {
+    token: lease.token,
+    model: "gpt-5.6-luna",
+    extraction: revised,
+    documents: [document],
+    assessment: {
+      confirmation_sha256: confirmed.sha256,
+      rationale:
+        "Corrected vendor spelling from pixels after PP evidence; finance remains deferred.",
+      changed_fields: ["vendor"],
+    },
+  });
+  expect(
+    (await ok("/api/processing/confirmation", confirmation)).replayed,
+  ).toBe(true);
+  expect(
+    (
+      await request("/api/processing/confirmation", {
+        ...confirmation,
+        pixel_pdf_sha256: hash("c"),
+      })
+    ).status,
+  ).toBe(409);
+  const db = await mf.getD1Database("DB");
+  const draft = await db
+    .prepare("SELECT payload FROM processing_drafts WHERE token=?")
+    .bind(lease.token)
+    .first<any>();
+  const final = (await ok(`/api/documents/${source.id}`, undefined, false))
+    .document;
+  expect(JSON.parse(draft.payload).extraction.vendor).toBe(initial.vendor);
+  expect(final.processing.extraction.vendor).toBe(revised.vendor);
+  expect(final.processing.extraction.uncertainties).toContain(
+    "Detailed financial verification deferred",
+  );
+});
+
 it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
   const source = await capture();
   const lease = await claim("small");

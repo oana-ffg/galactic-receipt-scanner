@@ -1,5 +1,17 @@
 # Processing API v2
 
+## First-pass PP confirmation
+
+The configured Luna worker now uses organization with PP-OCRv6. After saving
+the ordinary immutable Luna draft and preparing every frozen region, POST
+`/api/processing/confirmation` with `token`, `provider: "ppocr"`, the unchanged
+`pixel_pdf_sha256`, and ordered `artifacts: [{capture_id, sha256}]` for all retained
+pages. Each pin must resolve to stored PP-OCRv6 evidence with the same source hash,
+crop and rotation. The response preserves `ppocr` provenance and `evidence.initial_ocr`
+plus initial arithmetic. `assess`/`submit` use the existing confirmation hash and full
+reassessment contract. Prior Qwen-format confirmations below remain readable and
+supported for explicitly selected legacy/full-audit workflows, not the default pass.
+
 Use the existing client and [worker runbook](worker-runbook.md) for executable recipes.
 All model mutations use scoped machine credentials. Originals, retakes and timestamps
 remain immutable. Do not construct authentication or read application code during
