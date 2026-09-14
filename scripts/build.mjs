@@ -4,12 +4,13 @@ import { spawnSync } from "node:child_process";
 // Remove only generated output so obsolete LAN assets cannot enter a Site archive.
 await rm("dist", { recursive: true, force: true });
 for (const args of [
-  ["tsc", "--noEmit"],
-  ["tsc", "--noEmit", "-p", "tsconfig.worker.json"],
-  ["vite", "build", "--outDir", "dist/client"],
+  ["node_modules/typescript/bin/tsc", "--noEmit"],
+  ["node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.worker.json"],
+  ["node_modules/vite/bin/vite.js", "build", "--outDir", "dist/client"],
 ]) {
-  const r = spawnSync("npx", args, { stdio: "inherit" });
-  if (r.status) process.exit(r.status);
+  const r = spawnSync(process.execPath, args, { stdio: "inherit" });
+  if (r.error) throw r.error;
+  if (r.status !== 0) process.exit(r.status ?? 1);
 }
 await mkdir("dist/server", { recursive: true });
 await build({
