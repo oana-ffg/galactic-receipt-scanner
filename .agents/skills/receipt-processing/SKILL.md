@@ -138,6 +138,11 @@ a blocker to resolve in that execution context, not permission to introduce forw
 
 **Stop the entire batch when a worker fails or reports a blocking error**, including
 approval rejection, inaccessible originals, failed submission or failed PDF attestation.
+While a request is still running, a journal phase such as `submit-uncertain` or
+`pdf-uncertain` is the Python script's pre-request recovery marker, not a failure
+response. Await the actual result in that same worker session; do not interrupt,
+retry or stop the batch based on a transient phase alone. A completed response with
+`blocking: true`, a tool rejection, a process crash, or a failed worker is a stop.
 Do not spawn a replacement/next worker or reclaim the released document. Preserve private
 artifacts and report the failed stage, non-sensitive reason and known claim/save state
 to the owner. Release a known active, unsubmitted claim when safely possible; retain
