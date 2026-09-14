@@ -65,6 +65,8 @@ legacy runbook; do not copy them into this helper's stdin.
 - A document read needs both `op: "document"` and `document_id`, copied from the
   claim or context. A bare `{"op":"document"}` is incomplete.
 - `confirm`, `submit` and `pdf` each need only their `op`.
+- An assessment has exactly `op: "assess"`, `extraction`, and `rationale`.
+  Do not send `changed_fields` or a confirmation hash; the helper derives and pins them.
 - An `input_error` is a correctable request mistake: use its explanation to fix the
   same operation. Do not switch to an unrelated operation or abandon the claim.
 - Crop changes belong in `previews.layouts` before the draft. Do not put an images
