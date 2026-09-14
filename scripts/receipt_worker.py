@@ -476,7 +476,12 @@ class Worker:
         for previous in expected:
             saved = self.get_document(previous["id"])
             require(saved["revision"] == previous["revision"] + 1, "Saved revision differs; reconcile before continuing.")
-            require(saved["pages"] == previous["pages"], "Saved page membership differs; reconcile before continuing.")
+            expected_pages = deepcopy(previous["pages"])
+            # The server applies extraction.type to the claimed single-page document.
+            # Keep every source/layout field (and all donor metadata) strictly checked.
+            if previous["id"] == document_id and len(expected_pages) == 1:
+                expected_pages[0]["type"] = body["extraction"]["type"]
+            require(saved["pages"] == expected_pages, "Saved page membership differs; reconcile before continuing.")
             if "documents" in body:
                 require(saved["annotations"] == previous["annotations"] and saved["mergedInto"] == previous["mergedInto"]
                         and saved["duplicateOf"] == previous["duplicateOf"], "Saved grouping differs; reconcile before continuing.")

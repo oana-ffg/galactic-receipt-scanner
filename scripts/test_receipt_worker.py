@@ -112,6 +112,8 @@ class FakeScanner:
                     saved = deepcopy(doc)
                     saved["revision"] += 1
                     if doc["id"] == DID:
+                        if len(saved["pages"]) == 1:
+                            saved["pages"][0]["type"] = body["extraction"]["type"]
                         saved["filename"] = "2026-01-01_synthetic.pdf" if body["extraction"]["vendor"] else None
                         saved["status"] = "model-review"
                     self.documents[doc["id"]] = saved
@@ -531,6 +533,31 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(result["recovered"])
         self.assertEqual(self.worker.state["pdf"]["path"], original)
         self.assertTrue(all(call[0] == "GET" for call in self.fake.calls[before:]))
+
+    def test_submit_readback_accepts_server_classification_without_mutating_frozen_draft(self):
+        self.prepared()
+        frozen = deepcopy(self.worker.state["draft"])
+        result = self.send("submit")
+        self.assertEqual(result["phase"], "submitted")
+        self.assertEqual(self.worker.state["document"]["pages"][0]["type"], "receipt")
+        self.assertEqual(self.worker.state["draft"], frozen)
+
+    def test_submit_readback_rejects_changed_source_layout_or_wrong_classification(self):
+        self.prepared()
+        self.send("submit")
+        body = json.loads(self.fake.submit_bytes[0])
+        response = {"saved": [{"id": DID, "revision": 3}]}
+        original = deepcopy(self.fake.documents[DID]["pages"])
+        changes = {"captureId": OTHER, "sha256": "f" * 64, "rotation": 90,
+                   "crop": [0, 0, 1, 1], "type": "payment_slip"}
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                self.fake.documents[DID]["pages"] = deepcopy(original)
+                self.fake.documents[DID]["pages"][0][field] = value
+                error = ClientError if field in {"captureId", "sha256"} else module.InputError
+                message = "Discovered source hash changed" if error is ClientError else "Saved page membership differs"
+                with self.assertRaisesRegex(error, message):
+                    self.worker.finish_submit(body, response)
 
     def test_submit_readback_failure_resumes_without_replaying_mutation(self):
         grouping = {"donor_ids": [OTHER], "capture_ids": [DID, OTHER], "evidence": "Synthetic merge."}
