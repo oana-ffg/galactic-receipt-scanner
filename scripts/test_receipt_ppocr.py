@@ -45,7 +45,7 @@ class PPTests(unittest.TestCase):
         self.assertFalse(matches_prepared_ocr(value,'id','a'*64,[0,0,20,30],None,90))
         value['provenance']['engine']='tesseract.js synthetic'
         self.assertFalse(matches_prepared_ocr(value,'id','a'*64,[0,0,20,30],backend,90))
-        self.assertTrue(matches_prepared_ocr(value,'id','a'*64,[0,0,20,30],None,90))
+        self.assertFalse(matches_prepared_ocr(value,'id','a'*64,[0,0,20,30],None,90))
 
 
 if __name__=='__main__': unittest.main()

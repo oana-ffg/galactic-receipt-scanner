@@ -96,8 +96,7 @@ def matches_prepared_ocr(value, capture_id, source_sha, crop, backend, rotation)
     if not matches_ocr(value, capture_id, source_sha) or not matches_ocr_region(value, crop):
         return False
     engine = value["provenance"]["engine"]
-    return (engine.startswith("tesseract.js") if backend is None else
-            engine == backend.engine and value["source"].get("rotation") == rotation)
+    return backend is not None and engine == backend.engine and value["source"].get("rotation") == rotation
 
 
 class ScannerClient:
@@ -115,6 +114,33 @@ class ScannerClient:
             raise ClientError("Invalid scanner credential format.")
         self.opener = build_opener(NoRedirect())
         self.ocr_backend = None
+        self.node = "node"
+
+    def configure_ppocr(self, profile_path):
+        """Bind prepared PP and Node runtimes to this client's existing destination."""
+        profile_path = Path(profile_path)
+        if not profile_path.is_absolute() or profile_path.is_symlink() or profile_path.is_junction() or not profile_path.is_file():
+            raise ClientError("Use a prepared regular PP worker profile.")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        repo = Path(__file__).resolve().parent.parent
+        if not isinstance(profile, dict):
+            raise ClientError("Use a prepared PP worker profile object.")
+        repository = profile.get("repository")
+        if (profile.get("origin") != self.origin or not isinstance(repository, str)
+                or not Path(repository).is_absolute() or Path(repository).resolve() != repo
+                or Path(repository).is_symlink() or Path(repository).is_junction()):
+            raise ClientError("PP profile must match the configured scanner and checkout.")
+        if not isinstance(profile.get("node"), str):
+            raise ClientError("PP profile needs the prepared absolute Node executable.")
+        node = Path(profile["node"])
+        if (not node.is_absolute() or not node.is_file() or node.is_symlink() or node.is_junction()
+                or node.name.lower() not in {"node", "node.exe"}):
+            raise ClientError("PP profile needs the prepared absolute Node executable.")
+        if not isinstance(profile.get("ppocr"), dict):
+            raise ClientError("Configure PP-OCRv6 before processing; Tesseract is not a fallback.")
+        from receipt_ppocr import PPBackend
+        self.ocr_backend = PPBackend(profile_path, profile["ppocr"])
+        self.node = str(node)
 
     def request(self, path, data=None, content_type="application/json"):
         if (not path.startswith("/api/") or urlsplit(path).netloc or "#" in path
@@ -197,7 +223,7 @@ class ScannerClient:
         stem = root / ("preview-" + os.urandom(8).hex())
         manifest, output = stem.with_suffix(".pages.json"), stem.with_suffix(".pdf")
         write_new_file(manifest, json.dumps({"mode": "image-only", "pages": pages}).encode("utf-8"))
-        result = subprocess.run(["node", "scripts/receipt_pdf.mjs", str(manifest), str(output)],
+        result = subprocess.run([self.node, "scripts/receipt_pdf.mjs", str(manifest), str(output)],
                                 capture_output=True, timeout=180)
         if result.returncode:
             raise ClientError("Pixel-only PDF preview failed; preserve the source layout.")
@@ -211,14 +237,16 @@ class ScannerClient:
         stem = Path(directory) / ("source-layout-" + os.urandom(8).hex())
         manifest, output = stem.with_suffix(".source.json"), stem.with_suffix(".json")
         write_new_file(manifest, json.dumps(source).encode("utf-8"))
-        result = subprocess.run(["node", "scripts/receipt_ocr.mjs", str(manifest), str(output), "--layout-only"],
+        result = subprocess.run([self.node, "scripts/receipt_ocr.mjs", str(manifest), str(output), "--layout-only"],
                                 capture_output=True, timeout=60)
         if result.returncode:
             raise ClientError("Could not resolve source dimensions and detected OCR region.")
         return json.loads(output.read_text(encoding="utf-8"))["crop"]
 
     def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0):
-        """Verify an original and reuse or run CPU OCR, returning bounded references."""
+        """Verify an original and reuse or run prepared PP OCR, returning references."""
+        if self.ocr_backend is None or self.ocr_backend.engine != "PP-OCRv6":
+            raise ClientError("Configure PP-OCRv6 before processing; Tesseract is not a fallback.")
         root = Path(directory)
         original = self.original(capture_id, root / "originals")
         meta = self.get("/api/captures/" + capture_id)
@@ -251,12 +279,7 @@ class ScannerClient:
         manifest = run.with_suffix(".source.json")
         output = run.with_suffix(".ocr.json")
         write_new_file(manifest, json.dumps(original).encode())
-        if self.ocr_backend is not None:
-            self.ocr_backend.run(manifest, output)
-        else:
-            process = subprocess.run(["node", "scripts/receipt_ocr.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
-            if process.returncode:
-                raise ClientError("Local OCR failed; preserve the source and inspect the local runtime before retrying.")
+        self.ocr_backend.run(manifest, output)
         data = output.read_bytes()
         if not matches_prepared_ocr(json.loads(data), capture_id, original["sha256"], crop, self.ocr_backend, rotation):
             raise ClientError("Generated OCR does not match the verified source.")
@@ -285,7 +308,7 @@ class ScannerClient:
         run = root / (document_id + "-" + str(document["revision"]) + "-" + os.urandom(8).hex())
         manifest, output = run.with_suffix(".pages.json"), run.with_suffix(".pdf")
         write_new_file(manifest, json.dumps({"pages": pages}).encode())
-        process = subprocess.run(["node", "scripts/receipt_pdf.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
+        process = subprocess.run([self.node, "scripts/receipt_pdf.mjs", str(manifest), str(output)], capture_output=True, timeout=180)
         if process.returncode:
             raise ClientError("Searchable PDF generation failed; retain its sources and inspect the local layout/runtime.")
         data = output.read_bytes()
@@ -307,6 +330,7 @@ class ScannerClient:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=".local/processing-access.json")
+    parser.add_argument("--worker-profile", help="Prepared PP profile; otherwise discover .local/processing-host.json for prepare/pdf")
     parser.add_argument("--credentials-stdin", action="store_true", help="Read credentials from a secure provider pipe, never a command argument")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
@@ -318,7 +342,7 @@ def main():
     listing = commands.add_parser("captures", help="One current-take page; follow next using --before")
     listing.add_argument("--before")
     listing.add_argument("--limit", type=int, default=100, choices=range(1, 101))
-    prepare = commands.add_parser("prepare", help="Verify an original and run/reuse ordinary local OCR")
+    prepare = commands.add_parser("prepare", help="Verify an original and run/reuse prepared PP-OCRv6")
     prepare.add_argument("capture_id")
     generate = commands.add_parser("pdf", help="Generate, upload and verify a searchable PDF from saved document pages")
     generate.add_argument("document_id")
@@ -338,6 +362,16 @@ def main():
     pdf.add_argument("file")
     args = parser.parse_args()
     client = ScannerClient(credentials(args.config, args.credentials_stdin))
+    if args.command in {"prepare", "pdf"}:
+        profile_path = args.worker_profile
+        if not profile_path:
+            descriptor = Path(__file__).resolve().parent.parent / ".local" / "processing-host.json"
+            if descriptor.is_symlink() or descriptor.is_junction() or not descriptor.is_file():
+                raise ClientError("Configure the PP processing host before OCR or PDF generation.")
+            profile_path = json.loads(descriptor.read_text(encoding="utf-8")).get("worker_profile")
+        if not isinstance(profile_path, str) or not Path(profile_path).is_absolute():
+            raise ClientError("Use a prepared absolute PP profile path.")
+        client.configure_ppocr(profile_path)
     if args.command == "status":
         result = {**client.get("/api/processing/access"), "origin": client.origin}
     elif args.command == "get":

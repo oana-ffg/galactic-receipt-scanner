@@ -79,15 +79,12 @@ For a later Astra audit on the current PP host, the coordinator also supplies
 the already prepared backend before any OCR or PDF call:
 
 ```python
-from receipt_ppocr import PPBackend
 profile_path = os.environ["RECEIPT_WORKER_PROFILE"]
-profile = json.loads(Path(profile_path).read_text(encoding="utf-8"))
-assert profile["origin"] == client.origin
-client.ocr_backend = PPBackend(profile_path, profile["ppocr"])
+client.configure_ppocr(profile_path)
 ```
 
 This reuses PP artifacts and the prepared runtime. An unconfigured standalone client
-retains legacy Tesseract behavior; do not use it accidentally for the PP workflow.
+refuses OCR/PDF generation; Tesseract is never an automatic fallback.
 
 The Python API exposes the same implementation as the CLI, with less shell quoting and
 no model copying of tokens/hashes. Keep this prelude in a private worker script/session.
@@ -204,9 +201,9 @@ related candidates as required by the grouping rules; leave unrelated pages unco
 After visual grouping and saving `extraction-first-reading.json`, call `preview_pages`
 on exactly the retained ordered pages to freeze the image-only document PDF. Save its
 layouts into the copied document page records. Only then run
-`client.prepare(capture_id, work / "ocr", crop=final_page["crop"])` for every retained
+`client.prepare(capture_id, work / "ocr", crop=final_page["crop"], rotation=final_page["rotation"])` for every retained
 page and save the returned metadata. This reuses source/region-matched OCR or runs the
-prepared CPU Tesseract, uploads its
+prepared PP-OCRv6, uploads its
 artifact and verifies readback. Read only the OCR `text`/`lines` needed for comparison,
 never dump `text_only_pdf_layers`. Do not separately run/save OCR again after prepare
 succeeds. No installation or model download is part of this phase.

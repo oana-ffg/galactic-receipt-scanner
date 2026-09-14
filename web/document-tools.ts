@@ -74,12 +74,17 @@ export function registerDocumentTools() {
     },
     annotations: { readOnlyHint: false, untrustedContentHint: true },
     async execute(input: { id: string }) {
-      const { readDocument, saveDocuments, generateDocumentPdf } =
-        await import("./document-processing");
+      const {
+        readDocument,
+        saveDocuments,
+        generateDocumentPdf,
+        OcrPendingError,
+      } = await import("./document-processing");
       const { document: doc } = await readDocument(input.id);
       try {
         return await generateDocumentPdf(doc);
       } catch (error) {
+        if (error instanceof OcrPendingError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const { document: fresh } = await readDocument(input.id);
         fresh.broken = [

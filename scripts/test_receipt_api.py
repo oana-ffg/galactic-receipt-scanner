@@ -12,9 +12,34 @@ from receipt_api import ScannerClient, ClientError, NoRedirect, main
 
 
 class ClientTests(unittest.TestCase):
+    def test_pp_profile_binds_matching_destination_and_runtimes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            node = root / "node.exe"
+            node.write_bytes(b"synthetic executable; never run")
+            profile = root / "profile.json"
+            settings = {"origin": self.client.origin, "repository": str(Path(__file__).resolve().parent.parent),
+                        "node": str(node), "ppocr": {"python": "unused in mocked backend"}}
+            profile.write_text(json.dumps(settings))
+            with patch("receipt_ppocr.PPBackend") as backend:
+                self.client.configure_ppocr(profile)
+                backend.assert_called_once_with(profile, settings["ppocr"])
+                self.assertEqual(self.client.node, str(node))
+                self.assertIs(self.client.ocr_backend, backend.return_value)
+                for field, bad in [("origin", "https://other.example.test"), ("repository", ""),
+                                   ("repository", None), ("repository", "."), ("node", None),
+                                   ("node", str(profile)), ("ppocr", None)]:
+                    with self.subTest(field=field, bad=bad):
+                        profile.write_text(json.dumps({**settings, field: bad}))
+                        with self.assertRaises(ClientError): self.client.configure_ppocr(profile)
+                profile.write_text(json.dumps(settings))
+                with patch.object(Path, "is_junction", return_value=True):
+                    with self.assertRaises(ClientError): self.client.configure_ppocr(profile)
+
     def setUp(self):
         self.client = ScannerClient({"origin": "https://scanner.example.test", "sites_token": "synthetic-sites", "processing_token": "rsc_" + "s" * 43})
         self.client.source_region = Mock(return_value=[0,0,100,200])
+        self.client.ocr_backend = Mock(engine="PP-OCRv6")
         self.id = "00000000-0000-4000-8000-000000000001"
         self.body = b"\xff\xd8\xffsynthetic"
         self.sha = hashlib.sha256(self.body).hexdigest()
@@ -141,8 +166,8 @@ class ClientTests(unittest.TestCase):
 
 
     def ocr_fixture(self):
-        return {"text": "Synthetic shop 12,34", "source": {"captureId": self.id, "sha256": self.sha, "pixels": [100,200], "region": dict(left=0,top=0,width=100,height=200)},
-                "provenance": {"engine": "tesseract.js synthetic"},
+        return {"text": "Synthetic shop 12,34", "source": {"captureId": self.id, "sha256": self.sha, "pixels": [100,200], "region": dict(left=0,top=0,width=100,height=200), "rotation": 0},
+                "provenance": {"engine": "PP-OCRv6"},
                 "text_only_pdf_layers": [{"base64": "c3ludGhldGlj", "sha256": "f" * 64}]}
 
     def test_prepare_reuses_only_source_matched_ocr_and_skips_malformed_candidates(self):
@@ -168,10 +193,8 @@ class ClientTests(unittest.TestCase):
         self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
         self.client.get = Mock(return_value={"artifacts": []})
         self.client.request = Mock(side_effect=lambda path, body=None: json.dumps({"sha256": sha}).encode() if body is not None else data)
-        def generate(args, **kwargs):
-            Path(args[-1]).write_bytes(data)
-            return Mock(returncode=0)
-        with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=generate):
+        self.client.ocr_backend.run.side_effect = lambda manifest, output: Path(output).write_bytes(data)
+        with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=AssertionError("No Tesseract fallback")):
             result = self.client.prepare(self.id, directory)
             self.assertEqual(Path(result["ocr_path"]).name, self.id + "-" + sha + ".ocr.json")
             self.assertEqual(Path(result["ocr_path"]).read_bytes(), data)
@@ -189,15 +212,37 @@ class ClientTests(unittest.TestCase):
         def request(path, body=None):
             return json.dumps({"sha256": new_sha}).encode() if body is not None else (old_bytes if old_sha in path else new_bytes)
         self.client.request = Mock(side_effect=request)
-        def generate(args, **kwargs):
-            manifest = json.loads(Path(args[-2]).read_text())
+        def generate(manifest_path, output):
+            manifest = json.loads(Path(manifest_path).read_text())
             self.assertEqual(manifest["crop"], [10,20,80,170])
-            Path(args[-1]).write_bytes(new_bytes)
-            return Mock(returncode=0)
-        with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=generate) as run:
+            Path(output).write_bytes(new_bytes)
+        self.client.ocr_backend.run.side_effect = generate
+        with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=AssertionError("No Tesseract fallback")):
             result = self.client.prepare(self.id, directory, crop=[10,20,80,170])
             self.assertEqual(result["ocr_sha256"], new_sha)
-            run.assert_called_once()
+            self.client.ocr_backend.run.assert_called_once()
+
+    def test_prepare_requires_pp_before_reading_or_writing_receipts(self):
+        self.client.ocr_backend = None
+        self.client.get = Mock()
+        with self.assertRaisesRegex(ClientError, "Tesseract is not a fallback"):
+            self.client.prepare(self.id)
+        self.client.get.assert_not_called()
+
+    def test_tesseract_artifact_is_not_reused_for_pp(self):
+        old = self.ocr_fixture()
+        old["provenance"]["engine"] = "tesseract.js synthetic"
+        data = json.dumps(self.ocr_fixture()).encode()
+        legacy = json.dumps(old).encode()
+        sha, old_sha = hashlib.sha256(data).hexdigest(), hashlib.sha256(legacy).hexdigest()
+        self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
+        self.client.get = Mock(return_value={"artifacts": [{"kind": "ocr", "sha256": old_sha}]})
+        self.client.request = Mock(side_effect=lambda path, body=None: json.dumps({"sha256": sha}).encode() if body is not None else (legacy if old_sha in path else data))
+        self.client.ocr_backend.run.side_effect = lambda manifest, output: Path(output).write_bytes(data)
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.client.prepare(self.id, directory)
+            self.assertEqual(result["ocr_sha256"], sha)
+            self.client.ocr_backend.run.assert_called_once()
 
     def test_pdf_verifies_upload_without_redownloading_and_preserves_errors(self):
         self.client.get = Mock(return_value={"document": {"id": self.id, "revision": 3, "filename": "2026-01-01_synthetic.pdf", "pages": [{"captureId": self.id, "sha256": self.sha, "rotation": 0, "crop": None}]}})

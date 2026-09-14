@@ -71,7 +71,7 @@ for every processing operation. It uses this client internally and keeps tokens 
 ## Process and save
 
 For routine work prefer `prepare CAPTURE_ID`: it verifies the original, reuses source-matched
-ordinary OCR or runs the local CPU pass, saves and verifies the OCR artifact, and returns only
+PP-OCRv6 or runs the prepared PP pass, saves and verifies the OCR artifact, and returns only
 paths/hashes. Inspect the original image and read the OCR JSON's text/lines without printing
 its embedded PDF base64. `pdf DOCUMENT_ID` prepares missing OCR, generates from the saved page
 order, uploads it, and verifies the server-computed hash and acknowledged revision,
@@ -93,9 +93,14 @@ owner browser edits remain available. Renew a claim before its 20-minute expiry.
 expired/stale claim requires rereading the current assignment, never force-saving it.
 
 `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` stores an immutable ordinary OCR artifact.
-`node scripts/receipt_ocr.mjs PRIVATE_SOURCE_JSON PRIVATE_OCR_JSON` runs local Tesseract
-with installed Danish/English models and no inference API. The source manifest is the
-client's `original` result. Its output path must be new; keep prior artifacts for provenance.
+PP-OCRv6 is the standard for all new OCR and searchable PDFs. `prepare` and `pdf`
+use the prepared profile from `.local/processing-host.json`, or the global
+`--worker-profile PRIVATE_PROFILE` option before the subcommand. Python callers must
+first call `client.configure_ppocr(profile_path)`. Missing PP configuration is an
+actionable setup error; never fall back to Tesseract or install a new engine during
+a receipt run. Retain older Tesseract artifacts as historical evidence. Browser PDF
+generation only reads matching saved PP and reports pending when PP has not run.
+The processing host produces new OCR; there is no browser OCR button or tool.
 Read back the saved artifact using its hash. Do not print the PDF-layer base64 payload.
 
 `node scripts/receipt_pdf.mjs PRIVATE_PAGES_JSON PRIVATE_PDF` generates a searchable PDF.

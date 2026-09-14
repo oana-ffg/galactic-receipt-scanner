@@ -12,6 +12,8 @@ import type {
 } from "./documents";
 import type { Capture } from "./types";
 
+export class OcrPendingError extends Error {}
+
 export const readDocuments = () => api<DocumentCatalog>("/api/documents");
 export const readDocument = (id: string) =>
   api<{ document: DocumentView; captures: Capture[] }>(
@@ -67,8 +69,11 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
         const bytes = await response.arrayBuffer();
         if ((await sha256(bytes)) !== artifact.sha256)
           throw Error("Saved OCR checksum mismatch.");
-        const value = JSON.parse(new TextDecoder().decode(bytes)) as PdfOcr;
+        const value = JSON.parse(new TextDecoder().decode(bytes)) as PdfOcr & {
+          provenance?: { engine?: string };
+        };
         if (
+          value.provenance?.engine === "PP-OCRv6" &&
           value.source?.sha256 === page.sha256 &&
           value.source.captureId === page.captureId &&
           (value.source.rotation ?? 0) === page.rotation &&
@@ -83,7 +88,7 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
       }
     }
     if (!ocr)
-      throw Error(
+      throw new (artifactFailure ? Error : OcrPendingError)(
         `No usable saved OCR matches this page layout. Run the Luna processing flow with PP-OCR before generating the searchable PDF.${artifactFailure ? ` Saved OCR could not be read: ${artifactFailure}` : ""}`,
       );
     await addReceiptPage(

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { generateDocumentPdf } from "./document-processing";
+import { generateDocumentPdf, OcrPendingError } from "./document-processing";
 import { newDocument } from "./documents";
 import { sha256 } from "./checksum";
 import type { Capture } from "./types";
@@ -73,6 +73,15 @@ it("composes a PDF using saved PP OCR without running transcription", async () =
   expect(
     mocks.api.mock.calls.filter(([, options]) => options).map(([path]) => path),
   ).toEqual([`/api/documents/${id}/pdf?revision=${doc.revision}`]);
+});
+
+it("treats historical Tesseract as PP pending instead of silently reusing it", async () => {
+  await stored({ ...savedOcr(), provenance: { engine: "tesseract.js 7.0.0" } });
+  await expect(generateDocumentPdf(doc)).rejects.toBeInstanceOf(
+    OcrPendingError,
+  );
+  expect(mocks.addPage).not.toHaveBeenCalled();
+  expect(mocks.api.mock.calls.every(([, options]) => !options)).toBe(true);
 });
 it.each(["missing", "source", "crop", "rotation", "layer"])(
   "requires processing when saved OCR has a %s mismatch",

@@ -8,6 +8,7 @@ import {
   readDocuments,
   saveDocuments,
   generateDocumentPdf,
+  OcrPendingError,
 } from "./document-processing";
 import { registerSiteTools } from "./site-tools";
 import {
@@ -527,6 +528,7 @@ export async function mountReview(app: HTMLElement) {
             `Saved ${result.filename}. Inspect it before confirming the PDF check.`,
           );
         } catch (error) {
+          if (error instanceof OcrPendingError) throw error;
           current.broken = [
             ...new Set([...current.broken, `PDF failed: ${messageOf(error)}`]),
           ];

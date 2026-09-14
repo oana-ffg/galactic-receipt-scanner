@@ -21,7 +21,7 @@ class PPBackend:
         self.profile = str(Path(profile_path).resolve(strict=True))
         self.python = Path(settings['python'])
         if (not self.python.is_absolute() or not self.python.is_file() or
-                self.python.is_symlink() or self.python.name.lower() not in {'python', 'python.exe', 'python3'}):
+                self.python.is_symlink() or self.python.is_junction() or self.python.name.lower() not in {'python', 'python.exe', 'python3'}):
             raise ClientError('PP OCR needs a prepared absolute Python executable.')
         self.script = str(Path(__file__).resolve())
 
