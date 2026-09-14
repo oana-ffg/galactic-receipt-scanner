@@ -166,9 +166,13 @@ handwriting uncertainty, and verifies the resulting records. It does not accept 
 replacement document records or allow removing original target pages. At most 20 changed
 documents, 100 retained pages and 512 KiB per request are allowed.
 
-For a visually confirmed whole-document duplicate, use `grouping.duplicate_of` and
-`evidence` without donors or page moves. First retrieve and inspect both documents.
-Unique annotations/backs must be preserved; equal date/amount alone is insufficient.
+When all content of the claimed document is redundantly represented in a retained document
+from the same receipt, use `grouping.duplicate_of` and `evidence` without donors or page
+moves. First retrieve and inspect both documents; describe the covering page(s) and quality
+choice. The retained document can include additional continuation/slip pages. The claimed
+document keeps its original pages; they do not enter the retained PDF's page sequence.
+Unique annotations/backs must be preserved; partial overlap or equal date/amount alone is
+insufficient. Only the claimed document can receive this duplicate link.
 Luna cannot detach pages or grant human approval; Astra handles detach after its checkpoint.
 
 ## Failures and recovery

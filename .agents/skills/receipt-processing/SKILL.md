@@ -196,12 +196,24 @@ confidence that every line is visible; record any concealed coverage without aut
 separating the sections. Contradictory transaction details still need review.
 
 Repeated headers and identical ordered item blocks can instead be two photographs of the
-same section. Check the unique coverage each crop adds before assembling the PDF. Retain
-one representative of fully duplicated content, preserving alternative originals and unique
-annotations. Do not mark an upper-section-only document as a duplicate of a larger assembled
-document merely because one page matches; record the section overlap and use only supported
-grouping operations. Do not dismantle an existing receipt/slip group without inspecting all
-its pages and accounting for any pages left behind.
+same section. Explicitly check consecutive captures for this even when retake flags are null.
+Compare legibility, sharpness, glare, clipping and unique coverage; retain the better view,
+not simply the later capture. When all content of a separate poorer-view document is already
+represented in a retained document from the same receipt, mark the poorer document with
+`grouping.duplicate_of` pointing to that retained document. The retained document may also
+contain continuation pages and a payment slip; equal page counts are not required. Inspect
+both documents and explain which retained page covers each repeated section. Preserve unique
+annotations/backs; partial overlap alone is insufficient to mark a whole document redundant.
+
+Keep the duplicate's original pages and provenance in its own record, but do not add them to
+the retained document's ordered `pages`. `duplicateOf` is the association to the retained
+document; never rewrite capture `receipt_id`/`retake_of` or invent a page index to establish
+it. The bounded helper can mark only its claimed document as duplicate. If the poorer view
+is another document, record the candidate for its own claim/review; never choose the worse
+view merely to fit the current claim. If a redundant page is already inside a larger document
+with unique content, do not mark that whole document duplicate or silently drop the page;
+leave the page-level correction for supported review/detachment. Do not dismantle an existing
+receipt/slip group without inspecting all its pages and accounting for any pages left behind.
 
 Use legible item arithmetic as corroboration when it helps resolve a folded-page match.
 Count each physical printed row once across overlapping views; identical purchases printed
