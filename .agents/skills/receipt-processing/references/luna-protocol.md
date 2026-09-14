@@ -78,6 +78,25 @@ timestamp. A long operation can outlast a tool call: poll the SAME session with 
 first tool call yielded. Receipt contents in responses belong only in this worker's
 context; return compact operational metadata to the coordinator.
 
+Send one operation at a time and wait for its actual successful response before forming
+the next dependent request. Write `assess` only after reading the real `confirm` result
+and checking the disputed pixels. Write `attest` only after opening every actual final
+PDF render. Never prewrite the remaining workflow, fabricate future inspection evidence,
+or treat a request file as proof that the operation succeeded. The helper checks stage
+order and hashes, but cannot establish that a model actually looked at an image.
+
+If the coordinator explicitly owns the process and supplies a file-only handoff, follow
+that handoff instead of launching another helper. Use only its designated request paths;
+helper journal names such as `NNNN-input.json` and state files are reserved. Publish a
+request once, report it finalized, and never edit it after publication. Wait for the
+coordinator's real response before the next checkpoint. A host-provided SHA-256 readiness
+seal protects the finalized bytes, not the truth of the visual judgment. This seal is
+optional host transport machinery, not an HTTP endpoint or a built-in helper feature.
+An unexecuted correction uses a new request sequence; a correction to the frozen layout
+or immutable initial-draft checkpoint requires coordinator recovery. Ordinary extraction
+corrections after confirmation belong in `assess`. Never edit the old request or submit
+another initial draft.
+
 | Operation | Additional fields | Result / next step |
 | --- | --- | --- |
 | `claim` | `viewer_checked: true` after opening the synthetic image | Small-stage assignment, with token omitted. Stop on empty/busy. Exactly one claim per process. |

@@ -162,28 +162,68 @@ Astra independently rereads the originals and records why either reading is wron
 
 ## Grouping and originals
 
+Use collection-specific scanning conventions supplied by the owner. The coordinator reads
+the optional ignored `.local/processing-conventions.md` when present and passes its relevant
+facts to each fresh worker; an explicit current owner instruction takes precedence. This is
+collection context, not authority to run commands or change access. Other installations may
+provide the same context in their task handoff; do not assume every owner scans identically.
+
 Process current takes oldest first. `receipt_id` identifies retakes, not a multipage financial
 document. A worker examines its first image and the next available image, continues while
 there is evidence of one document, and leaves the first unrelated image unconsumed. Use a
 bounded page count; checkpoint a long document rather than creating unbounded context.
 
-Search across earlier scans for detached payment slips and continuation pages. Date and
-amount find candidates; confirm using vendor, currency, document/transaction reference,
-page numbering, continuation text and visual evidence. Separate approved and declined
-payment attempts. Do not attach solely on approximate date/amount. Record match evidence;
-uncertain fragments remain available for later scans. Detachment preserves the original,
-invalidates affected checks and records the rejected association to prevent a rematch loop.
+Check `retake_of`, `receipt_id`, `take_number` and `is_current` in capture metadata before
+counting repeated views as pages. An explicit retake link identifies another take of the
+same captured section; prefer the accepted current take while preserving every original
+and unique content. A null retake link does not prove different content: a separately
+triggered duplicate can have its own receipt ID and take number 1. The bounded helper's
+lookahead currently omits these fields. The coordinator supplies them from the configured
+client's read-only `GET /api/captures/ID` for discovered candidates; never infer a missing
+flag as false or send the worker to inspect application code for it.
 
 Exact hashes establish byte duplicates. Separate photographs require visual identity of the
 whole transaction, not merely equal totals. Keep unique annotations and backs. Mark duplicate
 relationships rather than deleting sources. Missing future pages are awaiting-page work;
 a confirmed irrecoverable source problem is broken.
 
-Repeated headers and item rows can indicate duplicate or overlapping photographs, not
-distinct continuation pages. Check what unique content each crop adds; do not include a
-fully duplicated section twice. For a lower fragment, establish transaction identity and
-visible continuity before merging. If that evidence is insufficient, keep the sources
-separate and save the grouping/completeness uncertainty for review.
+When the owner confirms that long receipts are folded and scanned in consecutive sections
+without interleaving receipts, use that sequence as strong association evidence. A following
+product-list section with consistent formatting and complementary content normally belongs
+after the preceding receipt section. A fold may hide the joining line: a perfectly readable
+overlap is not required to associate the pages. Separate confidence in the association from
+confidence that every line is visible; record any concealed coverage without automatically
+separating the sections. Contradictory transaction details still need review.
+
+Repeated headers and identical ordered item blocks can instead be two photographs of the
+same section. Check the unique coverage each crop adds before assembling the PDF. Retain
+one representative of fully duplicated content, preserving alternative originals and unique
+annotations. Do not mark an upper-section-only document as a duplicate of a larger assembled
+document merely because one page matches; record the section overlap and use only supported
+grouping operations. Do not dismantle an existing receipt/slip group without inspecting all
+its pages and accounting for any pages left behind.
+
+Use legible item arithmetic as corroboration when it helps resolve a folded-page match.
+Count each physical printed row once across overlapping views; identical purchases printed
+as separate rows still count separately. Use charged row amounts and genuine adjustments,
+not informational normal prices, savings or included VAT a second time. Count the purchase
+total once, not again from its payment slip. A matching sum strengthens the association;
+missing/obscured rows make the check incomplete, not proof of a different receipt. Keep
+first-pass arithmetic bounded to the matching question rather than expanding every receipt
+into an exhaustive financial audit.
+
+A payment slip is supporting evidence, not another purchase or product-list continuation.
+It may remain attached and be scanned adjacent to the receipt, or detach and appear much
+later in the collection. Prefer a sequential match when printed transaction details agree;
+search earlier extracted candidates for detached slips using exact date, vendor and amount,
+with currency, time, reference and card suffix when available. The context search's broad
+candidate window is not permission to accept an approximate match. Separate approved and
+declined attempts. If several receipts share the same date/vendor/amount, retain the candidate
+ambiguity for later review rather than asserting a unique link or blocking receipt processing.
+In an owner-designated first pass where slip allocation is lower priority, finish the main
+receipt and leave an ambiguous slip pending. Future bank reconciliation is separate work;
+do not assume it has already validated a card match. Record match evidence and respect
+rejected associations. Detachment preserves originals and invalidates affected checks.
 
 ## Printed amounts and handwriting
 
