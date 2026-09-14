@@ -103,7 +103,11 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
                 stage: "large",
                 model: "gpt-6-astra",
                 created_at: captures[0].created_at,
-                extraction: { ...extraction, vendor: "Synthetic Astra shop" },
+                extraction: {
+                  ...extraction,
+                  vendor: "Synthetic Astra shop",
+                  receipt_date: "2026-01-08",
+                },
                 sources: [{ capture_id: d.id, sha256: "synthetic" }],
               },
             ]
@@ -125,8 +129,48 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       currency: "JPY",
       adjustments: [{ description: "Synthetic discount", amount_minor: -25 }],
     };
+  attempts.get(docs[0].id)!.push({
+    revision: 2,
+    stage: "independent",
+    model: "future-reviewer",
+    created_at: captures[0].created_at,
+    extraction: { ...extraction, receipt_date: "2026-01-09" },
+    sources: [{ capture_id: docs[0].id, sha256: "synthetic" }],
+  });
+  const ocrText = JSON.stringify({
+    source: {
+      captureId: docs[0].id,
+      sha256: "synthetic",
+      pixels: [800, 2000],
+      region: { left: 0, top: 0, width: 800, height: 2000 },
+    },
+    provenance: { engine: "Synthetic OCR engine" },
+    text: "SYNTHETIC OCR SHOP\nSynthetic item 12,00\nTOTAL 12,00\nX8-01-2026 18:58",
+  });
+  const ocrHash = createHash("sha256").update(ocrText).digest("hex");
   let writes = 0;
   let failReadings = false;
+  let failOcr = true;
+  await page.route("**/api/captures/*", (route) =>
+    route.fulfill({
+      json: {
+        artifacts: route.request().url().endsWith(docs[0].id)
+          ? [
+              {
+                kind: "ocr",
+                sha256: ocrHash,
+                created_at: captures[0].created_at,
+              },
+            ]
+          : [],
+      },
+    }),
+  );
+  await page.route("**/api/files/*/ocr?*", (route) =>
+    failOcr
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ contentType: "application/json", body: ocrText }),
+  );
   await page.route("**/api/documents/*/pdf?*", (route) =>
     route.fulfill({ contentType: "application/pdf", body: pdfBytes }),
   );
@@ -220,15 +264,81 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     beforeScroll!.y,
   );
   await page.locator(".processing-review").evaluate((el) => (el.scrollTop = 0));
+  await form.getByLabel("Vendor", { exact: true }).fill("Draft stays intact");
   await page
-    .getByText("Compare saved Luna, Astra and human values", { exact: true })
+    .getByRole("button", { name: "Compare readings", exact: true })
     .click();
-  await expect(page.locator(".review-comparison table")).toContainText(
-    "Synthetic Luna shop",
+  const comparison = page.getByRole("region", {
+    name: "Model comparison",
+    exact: true,
+  });
+  await expect(comparison).toBeVisible();
+  await expect(form).toBeHidden();
+  await expect(
+    comparison.getByRole("button", { name: "Retry loading OCR" }),
+  ).toBeVisible();
+  failOcr = false;
+  await comparison.getByRole("button", { name: "Retry loading OCR" }).click();
+  await expect(
+    comparison.getByRole("columnheader", { name: /Synthetic OCR engine/ }),
+  ).toBeVisible();
+  await expect(
+    comparison.getByRole("columnheader", { name: /future-reviewer/ }),
+  ).toBeVisible();
+  const dateRow = comparison.getByRole("row").filter({
+    has: page.getByRole("rowheader", {
+      name: "Purchase date Different",
+      exact: true,
+    }),
+  });
+  await expect(dateRow).toContainText("2 January 2026");
+  await expect(dateRow).toContainText("8 January 2026");
+  await expect(dateRow).toContainText("9 January 2026");
+  await expect(dateRow).toContainText("X8-01-2026 18:58");
+  await comparison
+    .getByRole("checkbox", { name: "future-reviewer", exact: true })
+    .uncheck();
+  await expect(
+    comparison.getByRole("columnheader", { name: /future-reviewer/ }),
+  ).toHaveCount(0);
+  await expect(dateRow).toHaveClass("review-difference");
+  await expect(
+    comparison.getByRole("row").filter({
+      has: page.getByRole("rowheader", { name: "Total", exact: true }),
+    }),
+  ).toContainText("12.00 DKK");
+  await expect(comparison).toContainText("Synthetic Luna shop");
+  await expect(comparison).toContainText("Synthetic Astra shop");
+  await expect(
+    page.getByRole("img", { name: "PDF page 2 of 2" }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "test-results/model-comparison-synthetic.png",
+  });
+  await comparison.getByText("OCR text", { exact: true }).click();
+  await comparison
+    .getByRole("searchbox", { name: "Find in OCR text" })
+    .fill("X8");
+  await expect(comparison.locator(".ocr-transcript pre")).toHaveText(
+    "X8-01-2026 18:58",
   );
-  await expect(page.locator(".review-comparison table")).toContainText(
-    "Synthetic Astra shop",
+  await comparison.getByText("OCR text", { exact: true }).click();
+  await comparison
+    .getByText("Compare line items and adjustments", { exact: true })
+    .click();
+  for (const model of ["Luna", "Astra"]) {
+    const lines = comparison.getByRole("region", {
+      name: `${model} line items`,
+      exact: true,
+    });
+    await expect(lines).toContainText("Synthetic item");
+    await expect(lines).toContainText("Amount: 12.00 DKK");
+  }
+  await page.getByRole("button", { name: "Edit receipt", exact: true }).click();
+  await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
+    "Draft stays intact",
   );
+  expect(writes).toBe(0);
   await form.getByLabel("Vendor", { exact: true }).fill("Cancelled edit");
   await form.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
@@ -249,15 +359,51 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
     "Human corrected shop",
   );
-  expect(attempts.get(docs[0].id)![1].extraction.vendor).toBe(
-    "Synthetic Astra shop",
-  );
+  expect(
+    attempts.get(docs[0].id)!.find((a) => a.model === "gpt-6-astra")!.extraction
+      .vendor,
+  ).toBe("Synthetic Astra shop");
+  await page
+    .getByRole("button", { name: "Compare readings", exact: true })
+    .click();
+  await expect(
+    comparison.getByRole("columnheader", { name: /Human review/ }),
+  ).toBeVisible();
+  await expect(
+    comparison.getByRole("row").filter({
+      has: page.getByRole("rowheader", {
+        name: "Total Different",
+        exact: true,
+      }),
+    }),
+  ).toContainText("12.34 DKK");
+  await page.getByRole("button", { name: "Edit receipt", exact: true }).click();
   await page.locator("#review-model").selectOption("luna-only");
   await expect(page.locator("#review-list button")).toHaveCount(1);
   await page.locator("#review-list button").click();
+  await expect(page.locator("#review-message")).toBeEmpty();
+  expect(docs[2].processing!.has_human_review).toBe(false);
   await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
     "Synthetic Luna shop",
   );
+  await page
+    .getByRole("button", { name: "Compare readings", exact: true })
+    .click();
+  await expect(
+    comparison.getByRole("columnheader", { name: /Astra/ }),
+  ).toHaveCount(0);
+  await expect(comparison).toContainText(
+    "No saved OCR for these source pages.",
+  );
+  await expect(
+    comparison.getByRole("row").filter({
+      has: page.getByRole("rowheader", {
+        name: "Purchase date",
+        exact: true,
+      }),
+    }),
+  ).not.toHaveClass("review-difference");
+  await page.getByRole("button", { name: "Edit receipt", exact: true }).click();
   await expect(
     page.getByRole("img", { name: "Cropped scan 1 of 1" }),
   ).toBeVisible();

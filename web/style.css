@@ -820,7 +820,6 @@ header {
   vertical-align: top;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  min-width: 8rem;
 }
 .review-actions {
   position: sticky;
@@ -907,4 +906,90 @@ header {
 .review-line-items button {
   padding: 0.35rem;
   width: 100%;
+}
+
+.review-view-toggle {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #101820;
+  padding-block: 0.4rem 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.review-view-toggle button[aria-pressed="false"] {
+  background: #1a2934;
+  color: #edf3f7;
+  border: 1px solid #536674;
+}
+.review-comparison table {
+  table-layout: fixed;
+  font-size: 0.85rem;
+}
+.review-comparison caption {
+  text-align: left;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+.review-comparison small {
+  display: block;
+  font-weight: 400;
+  margin-top: 0.3rem;
+}
+.review-comparison .review-difference {
+  background: #342d1e;
+}
+.review-difference th small {
+  color: #f1d082;
+  font-weight: 700;
+}
+.model-line-lists {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.model-line-lists > section {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.model-line-lists ol {
+  padding-left: 1.5rem;
+}
+.model-line-lists li {
+  margin-block: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #536674;
+  font-size: 0.85rem;
+}
+.comparison-sources {
+  border: 1px solid #536674;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin: 0;
+}
+.comparison-sources label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.comparison-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.comparison-table-scroll th:first-child {
+  position: sticky;
+  left: 0;
+  background: #101820;
+  width: 90px;
+}
+.review-comparison [role="status"]:empty {
+  display: none;
+}
+.comparison-table-scroll .review-difference th {
+  background: #342d1e;
+}
+.ocr-excerpts p {
+  margin: 0 0 0.65rem;
+  white-space: pre-wrap;
 }

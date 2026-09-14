@@ -54,7 +54,7 @@ export async function mountReview(app: HTMLElement) {
   let selected: string | null = null;
   let categories: PurchaseCategory[] = [];
   let busy = false;
-  let disposePreview = () => {};
+  let disposeDetail = () => {};
   const message = app.querySelector<HTMLElement>("#review-message")!;
   const list = app.querySelector<HTMLElement>("#review-list")!;
   const detail = app.querySelector<HTMLElement>("#review-detail")!;
@@ -144,6 +144,7 @@ export async function mountReview(app: HTMLElement) {
       );
       button.onclick = () => {
         if (busy) return;
+        setMessage("");
         selected = d.id;
         renderList();
         renderDetail(d);
@@ -158,7 +159,7 @@ export async function mountReview(app: HTMLElement) {
   }
   function renderDetail(original: DocumentView) {
     const doc = structuredClone(original);
-    disposePreview();
+    disposeDetail();
     detail.replaceChildren();
     detail.append(el("h2", doc.filename ?? "Identify this document"));
     const reasons = el("ul", undefined, `review-reasons ${doc.status}`);
@@ -486,16 +487,17 @@ export async function mountReview(app: HTMLElement) {
     if (doc.processing) {
       const workspace = el("div", undefined, "receipt-review-panes");
       const preview = documentPreview(doc, catalog.captures);
-      disposePreview = preview.destroy;
-      workspace.append(
-        preview.element,
-        processingReview(doc, categories, action, async () => {
-          await refresh();
-          setMessage(
-            "Human review saved. Agent readings and originals are preserved.",
-          );
-        }),
-      );
+      const review = processingReview(doc, categories, action, async () => {
+        await refresh();
+        setMessage(
+          "Human review saved. Agent readings and originals are preserved.",
+        );
+      });
+      disposeDetail = () => {
+        preview.destroy();
+        review.destroy();
+      };
+      workspace.append(preview.element, review.element);
       const sourceDetails = el("details");
       sourceDetails.append(
         el("summary", "Originals and page organisation"),
@@ -720,15 +722,20 @@ export async function mountReview(app: HTMLElement) {
         const rows = await api<
           { revision: number; payload: string; created_at: string }[]
         >(`/api/documents/${doc.id}/history`);
-        const historyList = el("div");
+        const historyList = el("details");
+        historyList.open = true;
+        historyList.append(el("summary", "Decision history"));
         for (const row of rows) {
           const d = JSON.parse(row.payload);
-          historyList.append(
+          const entry = el("details");
+          entry.append(
             el(
-              "p",
-              `Revision ${row.revision} · ${new Date(row.created_at).toLocaleString()} · ${d.evidence || "No verification yet"}`,
+              "summary",
+              `Revision ${row.revision} · ${new Date(row.created_at).toLocaleString()}`,
             ),
+            el("p", d.evidence || "No verification yet"),
           );
+          historyList.append(entry);
         }
         history.replaceWith(historyList);
       });

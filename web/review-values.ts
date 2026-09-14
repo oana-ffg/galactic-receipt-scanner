@@ -33,6 +33,9 @@ export function reviewValues(doc: DocumentView, attempts: SavedReading[]) {
         ),
     )
     .sort((a, b) => b.revision - a.revision);
+  const models = current.filter(
+    (a, index) => current.findIndex((b) => b.model === a.model) === index,
+  );
   const luna = current.find((a) => a.stage === "small");
   const astra = current.find((a) => a.stage === "large");
   const human = current.find((a) => a.stage === "human");
@@ -46,6 +49,7 @@ export function reviewValues(doc: DocumentView, attempts: SavedReading[]) {
         ? luna
         : undefined;
   return {
+    models,
     luna,
     astra,
     human,

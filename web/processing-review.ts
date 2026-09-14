@@ -1,4 +1,5 @@
 import { currencyDigits, displayMoney, readMoney } from "./review-money";
+import { reviewComparison } from "./review-comparison";
 import { api } from "./api";
 import {
   arithmetic,
@@ -434,53 +435,23 @@ export function processingReview(
 ) {
   const panel = el("section");
   panel.className = "processing-review";
+  const controller = new AbortController();
   const load = async () => {
     panel.replaceChildren(el("p", "Loading saved agent readings…"));
     try {
       const data = await api<ReviewReadings>(
         `/api/processing/readings?document_id=${doc.id}`,
+        {
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(45000),
+          ]),
+        },
       );
       if (!panel.isConnected) return;
       const values = reviewValues(doc, data.attempts);
-      const comparison = el("details");
-      comparison.className = "review-comparison";
-      comparison.append(
-        el("summary", "Compare saved Luna, Astra and human values"),
-      );
-      const table = el("table");
-      const heading = el("tr");
-      for (const label of ["Field", "Luna", "Astra", "Human review"])
-        heading.append(el("th", label));
-      table.append(heading);
-      for (const key of Object.keys(
-        values.extraction,
-      ) as (keyof Extraction)[]) {
-        const row = el("tr");
-        row.append(el("th", key.replaceAll("_", " ")));
-        for (const reading of [values.luna, values.astra, values.human]) {
-          const value = reading?.extraction[key];
-          row.append(
-            el(
-              "td",
-              value === undefined
-                ? "No saved reading"
-                : value === null
-                  ? "Unknown"
-                  : typeof value === "object"
-                    ? JSON.stringify(value, null, 2)
-                    : String(value),
-            ),
-          );
-        }
-        table.append(row);
-      }
-      comparison.append(
-        el(
-          "p",
-          "Latest separate readings for these source pages. Amounts are minor units. Earlier readings may have been superseded; the prefill label identifies the active reading.",
-        ),
-        table,
-      );
+      const comparisonView = reviewComparison(doc, values, controller.signal);
+      const comparison = comparisonView.element;
       const history = el("details");
       history.append(
         el("summary", "All agent readings and confirmation evidence"),
@@ -526,7 +497,28 @@ export function processingReview(
           ),
         );
       reset();
-      panel.replaceChildren(editor, comparison, history);
+      comparison.append(history);
+      const toolbar = el("div");
+      toolbar.className = "review-view-toggle controls";
+      toolbar.setAttribute("role", "group");
+      toolbar.setAttribute("aria-label", "Review view");
+      const editButton = el("button", "Edit receipt");
+      const compareButton = el("button", "Compare readings");
+      const showComparison = (compare: boolean) => {
+        editor.hidden = compare;
+        comparison.hidden = !compare;
+        editButton.setAttribute("aria-pressed", String(!compare));
+        compareButton.setAttribute("aria-pressed", String(compare));
+        // Switching views never rebuilds the form or changes its draft values.
+        panel.scrollTop = 0;
+        if (compare) void comparisonView.loadOcr();
+      };
+      editButton.type = compareButton.type = "button";
+      editButton.onclick = () => showComparison(false);
+      compareButton.onclick = () => showComparison(true);
+      toolbar.append(editButton, compareButton);
+      showComparison(false);
+      panel.replaceChildren(toolbar, editor, comparison);
     } catch (error) {
       if (!panel.isConnected) return;
       const retry = el("button", "Retry loading readings");
@@ -535,7 +527,7 @@ export function processingReview(
     }
   };
   void load();
-  return panel;
+  return { element: panel, destroy: () => controller.abort() };
 }
 export function categorySetup(
   categories: PurchaseCategory[],
