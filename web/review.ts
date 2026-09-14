@@ -1,5 +1,6 @@
 import { documentPreview } from "./document-preview";
 import { matchesReviewFilters } from "./review-values";
+import { reviewOcrSource } from "./review-ocr";
 import { processingReview, categorySetup } from "./processing-review";
 import type { PurchaseCategory } from "./extraction";
 import { api } from "./api";
@@ -486,16 +487,24 @@ export async function mountReview(app: HTMLElement) {
     };
     if (doc.processing) {
       const workspace = el("div", undefined, "receipt-review-panes");
-      const preview = documentPreview(doc, catalog.captures);
-      const review = processingReview(doc, categories, action, async () => {
-        await refresh();
-        setMessage(
-          "Human review saved. Agent readings and originals are preserved.",
-        );
-      });
+      const ocrSource = reviewOcrSource(doc);
+      const preview = documentPreview(doc, catalog.captures, ocrSource);
+      const review = processingReview(
+        doc,
+        categories,
+        action,
+        async () => {
+          await refresh();
+          setMessage(
+            "Human review saved. Agent readings and originals are preserved.",
+          );
+        },
+        ocrSource,
+      );
       disposeDetail = () => {
         preview.destroy();
         review.destroy();
+        ocrSource.destroy();
       };
       workspace.append(preview.element, review.element);
       const sourceDetails = el("details");

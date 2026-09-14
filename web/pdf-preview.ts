@@ -9,6 +9,7 @@ export function pdfPreview(
   source: string,
   expectedHash: string,
   filename: string,
+  pageState?: { initialPage: number; onPageChange: (page: number) => void },
 ) {
   const element = document.createElement("section");
   element.className = "pdf-preview";
@@ -75,8 +76,12 @@ export function pdfPreview(
       if (closed) return;
       task = getDocument({ data, useSystemFonts: false });
       const pdf = await task.promise;
-      let pageNumber = 1;
+      let pageNumber = Math.min(
+        pdf.numPages,
+        Math.max(1, pageState?.initialPage ?? 1),
+      );
       const render = async () => {
+        pageState?.onPageChange(pageNumber);
         previous.disabled = next.disabled = zoom.disabled = true;
         canvas.hidden = true;
         status.textContent = `Rendering page ${pageNumber} of ${pdf.numPages}…`;

@@ -993,3 +993,41 @@ header {
   margin: 0 0 0.65rem;
   white-space: pre-wrap;
 }
+.ocr-overlay-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+.document-preview > p:empty {
+  display: none;
+}
+.document-preview-stage {
+  position: relative;
+  margin-inline: auto;
+  overflow: hidden;
+}
+.ocr-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+.ocr-overlay rect {
+  fill: #08263a;
+  fill-opacity: 0.94;
+  stroke: #68d7f2;
+  stroke-width: 1;
+}
+.ocr-overlay text {
+  fill: #eaffff;
+  font-family: sans-serif;
+}
+.ocr-overlay .ocr-uncertain rect {
+  fill: #34250b;
+  stroke: #ffcd63;
+}
+.ocr-overlay .ocr-uncertain text {
+  fill: #ffdc88;
+}

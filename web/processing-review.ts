@@ -1,4 +1,5 @@
 import { currencyDigits, displayMoney, readMoney } from "./review-money";
+import type { ReviewOcrSource } from "./review-ocr";
 import { reviewComparison } from "./review-comparison";
 import { api } from "./api";
 import {
@@ -432,6 +433,7 @@ export function processingReview(
   categories: PurchaseCategory[],
   act: (task: () => Promise<void>) => Promise<void>,
   refresh: () => Promise<void>,
+  ocrSource: ReviewOcrSource,
 ) {
   const panel = el("section");
   panel.className = "processing-review";
@@ -450,7 +452,12 @@ export function processingReview(
       );
       if (!panel.isConnected) return;
       const values = reviewValues(doc, data.attempts);
-      const comparisonView = reviewComparison(doc, values, controller.signal);
+      const comparisonView = reviewComparison(
+        doc,
+        values,
+        controller.signal,
+        ocrSource,
+      );
       const comparison = comparisonView.element;
       const history = el("details");
       history.append(

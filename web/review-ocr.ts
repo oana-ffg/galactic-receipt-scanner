@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { positionedOcr, type PositionedOcr } from "./ocr-overlay";
 import { sha256 } from "./checksum";
 import { messageOf } from "./errors";
 import type { DocumentView } from "./documents";
@@ -11,6 +12,7 @@ export interface ReviewOcr {
     createdAt: string;
     sameRegion: boolean;
     sha256: string;
+    positioned?: PositionedOcr | null;
   }[];
 }
 /** Load existing artifacts only. Opening comparison never starts OCR. */
@@ -89,6 +91,7 @@ export async function readReviewOcr(doc: DocumentView, signal?: AbortSignal) {
           createdAt: artifact.created_at,
           sameRegion,
           sha256: artifact.sha256,
+          positioned: positionedOcr(value),
         });
       } catch (error) {
         signal?.throwIfAborted();
@@ -129,3 +132,24 @@ export function ocrExcerpts(ocr: ReviewOcr, field: string): string[] {
       .map((line) => `Page ${page.number}: ${line}`),
   );
 }
+
+/** One lazy OCR read shared by the comparison and overlay for this selected document. */
+export function reviewOcrSource(doc: DocumentView) {
+  const controller = new AbortController();
+  let request: ReturnType<typeof readReviewOcr> | undefined;
+  return {
+    load: () =>
+      (request ??= readReviewOcr(doc, controller.signal).then(
+        (result) => {
+          if (result.errors.length) request = undefined;
+          return result;
+        },
+        (error) => {
+          request = undefined;
+          throw error;
+        },
+      )),
+    destroy: () => controller.abort(),
+  };
+}
+export type ReviewOcrSource = ReturnType<typeof reviewOcrSource>;

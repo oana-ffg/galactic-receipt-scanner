@@ -1,7 +1,11 @@
 import type { DocumentView } from "./documents";
 import { displayMoney } from "./review-money";
 import { messageOf } from "./errors";
-import { ocrExcerpts, readReviewOcr, type ReviewOcr } from "./review-ocr";
+import {
+  ocrExcerpts,
+  type ReviewOcrSource,
+  type ReviewOcr,
+} from "./review-ocr";
 import type { reviewValues, SavedReading } from "./review-values";
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
@@ -45,6 +49,7 @@ export function reviewComparison(
   doc: DocumentView,
   values: ReturnType<typeof reviewValues>,
   signal: AbortSignal,
+  ocrSource: ReviewOcrSource,
 ) {
   const section = el("section");
   section.className = "review-comparison";
@@ -284,7 +289,7 @@ export function reviewComparison(
     loading = true;
     status.replaceChildren(el("span", "Loading saved OCR…"));
     try {
-      const result = await readReviewOcr(doc, signal);
+      const result = await ocrSource.load();
       if (!section.isConnected || signal.aborted) return;
       ocr = result.engines;
       loaded = result.errors.length === 0;

@@ -92,6 +92,12 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       seen_capture_count: 4,
     },
   }));
+  const secondPage = {
+    ...captures[0],
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000004",
+  };
+  captures.push(secondPage);
+  docs[0].pages.push({ ...docs[0].pages[0], captureId: secondPage.id });
   const attempts = new Map<string, SavedReading[]>(
     docs.map((d) => [
       d.id,
@@ -108,7 +114,10 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
                   vendor: "Synthetic Astra shop",
                   receipt_date: "2026-01-08",
                 },
-                sources: [{ capture_id: d.id, sha256: "synthetic" }],
+                sources: d.pages.map((p) => ({
+                  capture_id: p.captureId,
+                  sha256: p.sha256,
+                })),
               },
             ]
           : []),
@@ -118,7 +127,10 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
           model: "gpt-5.6-luna",
           created_at: captures[0].created_at,
           extraction,
-          sources: [{ capture_id: d.id, sha256: "synthetic" }],
+          sources: d.pages.map((p) => ({
+            capture_id: p.captureId,
+            sha256: p.sha256,
+          })),
         },
       ],
     ]),
@@ -135,16 +147,34 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     model: "future-reviewer",
     created_at: captures[0].created_at,
     extraction: { ...extraction, receipt_date: "2026-01-09" },
-    sources: [{ capture_id: docs[0].id, sha256: "synthetic" }],
+    sources: docs[0].pages.map((p) => ({
+      capture_id: p.captureId,
+      sha256: p.sha256,
+    })),
   });
   const ocrText = JSON.stringify({
     source: {
-      captureId: docs[0].id,
+      captureId: secondPage.id,
       sha256: "synthetic",
       pixels: [800, 2000],
       region: { left: 0, top: 0, width: 800, height: 2000 },
+      coordinates: "original image pixels; top-left origin",
     },
     provenance: { engine: "Synthetic OCR engine" },
+    lines: [
+      {
+        text: "X8-01-2026",
+        box: { x0: 80, y0: 200, x1: 200, y1: 240 },
+        words: [
+          {
+            text: "X8-01-2026",
+            confidence: 70,
+            box: { x0: 80, y0: 200, x1: 200, y1: 240 },
+          },
+          { text: "UNSCORED", box: { x0: 210, y0: 200, x1: 330, y1: 240 } },
+        ],
+      },
+    ],
     text: "SYNTHETIC OCR SHOP\nSynthetic item 12,00\nTOTAL 12,00\nX8-01-2026 18:58",
   });
   const ocrHash = createHash("sha256").update(ocrText).digest("hex");
@@ -154,7 +184,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await page.route("**/api/captures/*", (route) =>
     route.fulfill({
       json: {
-        artifacts: route.request().url().endsWith(docs[0].id)
+        artifacts: route.request().url().endsWith(secondPage.id)
           ? [
               {
                 kind: "ocr",
@@ -215,7 +245,10 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       model: "human",
       created_at: captures[0].created_at,
       extraction: body.extraction,
-      sources: [{ capture_id: doc.id, sha256: "synthetic" }],
+      sources: doc.pages.map((p) => ({
+        capture_id: p.captureId,
+        sha256: p.sha256,
+      })),
     });
     return route.fulfill({
       json: { saved: [{ id: doc.id, revision: doc.revision }] },
@@ -333,6 +366,88 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     });
     await expect(lines).toContainText("Synthetic item");
     await expect(lines).toContainText("Amount: 12.00 DKK");
+  }
+  await page
+    .getByRole("checkbox", { name: "OCR overlay", exact: true })
+    .check();
+  await expect(page.getByLabel("Preview source", { exact: true })).toHaveValue(
+    "crop",
+  );
+  const overlay = page.getByRole("img", {
+    name: "Saved OCR overlay",
+    exact: true,
+  });
+  await expect(
+    page.getByRole("img", { name: "Cropped scan 2 of 2" }),
+  ).toBeVisible();
+  await expect(overlay).toBeVisible();
+  await expect(overlay).toHaveAttribute("viewBox", "0 0 656 1616");
+  await expect(overlay.locator("text")).toHaveText(["X8-01-2026", "UNSCORED"]);
+  await expect(overlay.locator("rect").first()).toHaveAttribute("x", "8");
+  await expect(overlay.locator("rect").first()).toHaveAttribute("y", "8");
+  await expect(overlay.locator("g.ocr-uncertain")).toHaveCount(2);
+  await expect(overlay.locator("title").last()).toContainText(
+    "OCR confidence unavailable",
+  );
+  await page
+    .getByRole("button", { name: "Previous scan", exact: true })
+    .click();
+  await expect(
+    page.getByRole("img", { name: "Cropped scan 1 of 2" }),
+  ).toBeVisible();
+  await expect(overlay).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "Receipt preview", exact: true }),
+  ).toContainText("no saved word/line positions for this page");
+  await page.getByRole("button", { name: "Next scan", exact: true }).click();
+  await expect(overlay).toBeVisible();
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const alignment = await page
+    .locator(".document-preview-stage")
+    .evaluate((stage) => {
+      const canvas = stage.querySelector("canvas")!.getBoundingClientRect(),
+        svg = stage.querySelector("svg")!.getBoundingClientRect();
+      return {
+        sameSize:
+          Math.abs(canvas.width - svg.width) < 1 &&
+          Math.abs(canvas.height - svg.height) < 1,
+        samePosition: canvas.x === svg.x && canvas.y === svg.y,
+      };
+    });
+  expect(alignment).toEqual({ sameSize: true, samePosition: true });
+  await page.screenshot({ path: "test-results/ocr-overlay-synthetic.png" });
+  await page
+    .getByRole("checkbox", { name: "OCR overlay", exact: true })
+    .uncheck();
+  await expect(overlay).toHaveCount(0);
+  await expect(page.getByLabel("Preview source", { exact: true })).toHaveValue(
+    "pdf",
+  );
+  await expect(
+    page.getByRole("img", { name: "PDF page 2 of 2" }),
+  ).toBeVisible();
+  // Toggle in the same JS turn as PDF navigation, before its async rendering completes.
+  for (const [buttonName, scanName, pdfName] of [
+    ["Previous page", "Cropped scan 1 of 2", "PDF page 1 of 2"],
+    ["Next page", "Cropped scan 2 of 2", "PDF page 2 of 2"],
+  ]) {
+    await page
+      .getByRole("button", { name: buttonName, exact: true })
+      .evaluate((button) => {
+        (button as HTMLButtonElement).click();
+        document
+          .querySelector<HTMLInputElement>(".ocr-overlay-toggle input")!
+          .click();
+      });
+    await expect(
+      page.getByRole("img", { name: scanName, exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("checkbox", { name: "OCR overlay", exact: true })
+      .uncheck();
+    await expect(
+      page.getByRole("img", { name: pdfName, exact: true }),
+    ).toBeVisible();
   }
   await page.getByRole("button", { name: "Edit receipt", exact: true }).click();
   await expect(form.getByLabel("Vendor", { exact: true })).toHaveValue(
