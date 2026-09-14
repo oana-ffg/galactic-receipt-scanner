@@ -1,3 +1,4 @@
+import { matchesReviewFilters } from "./review-values";
 import { processingReview, categorySetup } from "./processing-review";
 import type { PurchaseCategory } from "./extraction";
 import { api } from "./api";
@@ -47,7 +48,7 @@ function amount(value: string): number {
 
 export async function mountReview(app: HTMLElement) {
   app.innerHTML =
-    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="all">All documents</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
+    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button><button id="review-ocr" class="secondary">Transcribe next 20</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
   let selected: string | null = null;
   let categories: PurchaseCategory[] = [];
@@ -57,6 +58,10 @@ export async function mountReview(app: HTMLElement) {
   const detail = app.querySelector<HTMLElement>("#review-detail")!;
   const filter = app.querySelector<HTMLSelectElement>("#review-filter")!;
   const search = app.querySelector<HTMLInputElement>("#review-search")!;
+  const confidence =
+    app.querySelector<HTMLSelectElement>("#review-confidence")!;
+  const model = app.querySelector<HTMLSelectElement>("#review-model")!;
+  const human = app.querySelector<HTMLSelectElement>("#review-human")!;
   const setMessage = (text: string) => {
     message.textContent = text;
   };
@@ -95,6 +100,8 @@ export async function mountReview(app: HTMLElement) {
       `${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
     for (const d of catalog.documents) {
       if (d.status === "merged") continue;
+      if (!matchesReviewFilters(d, confidence.value, model.value, human.value))
+        continue;
       if (
         filter.value === "attention" &&
         !["review", "broken"].includes(d.status)
@@ -123,7 +130,7 @@ export async function mountReview(app: HTMLElement) {
         el("strong", label),
         el(
           "span",
-          `${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"}`,
+          `${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}${d.processing?.has_human_review ? " · Human reviewed" : ""}`,
         ),
         el(
           "small",
@@ -169,6 +176,8 @@ export async function mountReview(app: HTMLElement) {
       card.append(image);
       const controls = el("div", undefined, "controls");
       const zoom = el("button", "Inspect original", "secondary");
+      image.style.cursor = "zoom-in";
+      image.onclick = () => zoom.click();
       zoom.onclick = () =>
         inspectImage({
           title: `Original page ${index + 1}`,
@@ -463,11 +472,19 @@ export async function mountReview(app: HTMLElement) {
         );
       });
     };
-    detail.append(
-      doc.processing
-        ? processingReview(doc, categories, action, refresh)
-        : form,
-    );
+    if (doc.processing) {
+      const workspace = el("div", undefined, "receipt-review-panes");
+      workspace.append(
+        sources,
+        processingReview(doc, categories, action, async () => {
+          await refresh();
+          setMessage(
+            "Human review saved. Agent readings and originals are preserved.",
+          );
+        }),
+      );
+      detail.append(workspace);
+    } else detail.append(form);
     const outputs = el("div", undefined, "controls");
     const generate = el("button", "Generate PDF", "secondary");
     generate.onclick = () =>
@@ -700,6 +717,9 @@ export async function mountReview(app: HTMLElement) {
     detail.append(history);
   }
   filter.onchange = renderList;
+  confidence.onchange = renderList;
+  model.onchange = renderList;
+  human.onchange = renderList;
   search.oninput = renderList;
   app.querySelector<HTMLButtonElement>("#review-refresh")!.onclick = () =>
     void action(refresh);

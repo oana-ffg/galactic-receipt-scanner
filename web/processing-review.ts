@@ -5,6 +5,8 @@ import {
   type Extraction,
   type PurchaseCategory,
 } from "./extraction";
+import { reviewValues, type ReviewReadings } from "./review-values";
+import { messageOf } from "./errors";
 import type { DocumentView } from "./documents";
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
   const n = document.createElement(tag);
@@ -26,17 +28,24 @@ const number = (v: string) => {
     throw Error("Enter a number or leave unknown values blank.");
   return n;
 };
-export function processingReview(
+function reviewForm(
   doc: DocumentView,
   categories: PurchaseCategory[],
   act: (task: () => Promise<void>) => Promise<void>,
   refresh: () => Promise<void>,
+  extraction: Extraction,
+  source: string,
+  cancel: () => void,
 ) {
   const p = doc.processing!,
-    e = structuredClone(p.extraction),
+    e = structuredClone(extraction),
     section = el("section");
   section.append(
-    el("h3", "Extracted receipt"),
+    el("h3", "Human review"),
+    el(
+      "p",
+      `Prefilled from ${source}. Edit the fields, then accept or cancel.`,
+    ),
     el(
       "p",
       `Luna: ${p.small_model_certainty ?? "not parsed"} · Astra: ${p.large_model_confidence ?? "not reviewed"} · Human reviewed: ${p.has_human_review ? "yes" : "no"}`,
@@ -65,6 +74,7 @@ export function processingReview(
   }
   const form = el("form");
   form.className = "review-form";
+  form.setAttribute("aria-label", "Human review fields");
   const scalar = new Map<keyof Extraction, ReturnType<typeof input>>();
   for (const [key, label] of [
     ["vendor", "Vendor"],
@@ -85,6 +95,7 @@ export function processingReview(
   const selects = new Map<keyof Extraction, HTMLSelectElement>();
   for (const [key, label, values] of [
     ["type", "Document type", documentTypes],
+    ["certainty", "Review confidence", ["low", "medium", "high"]],
     [
       "completeness",
       "Page completeness",
@@ -231,9 +242,16 @@ export function processingReview(
     broken = input("Broken reasons", e.broken_reasons.join("\n"), true),
     evidence = input("Review findings", e.evidence, true);
   form.append(uncertainty.wrap, broken.wrap, evidence.wrap);
-  const save = el("button", "Save and mark human reviewed");
+  const save = el("button", "Accept human review");
   save.type = "submit";
-  form.append(save);
+  const cancelButton = el("button", "Cancel");
+  cancelButton.type = "button";
+  cancelButton.className = "secondary";
+  cancelButton.onclick = cancel;
+  const actions = el("div");
+  actions.className = "review-actions controls";
+  actions.append(save, cancelButton);
+  form.append(actions);
   form.onsubmit = (event) => {
     event.preventDefault();
     void act(async () => {
@@ -280,20 +298,139 @@ export function processingReview(
         .split("\n")
         .filter((l) => l.trim());
       e.evidence = evidence.control.value;
-      await api("/api/processing/human-review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          document_id: doc.id,
-          revision: doc.revision,
-          extraction: e,
-        }),
-      });
-      await refresh();
+      save.disabled = true;
+      cancelButton.disabled = true;
+      try {
+        await api("/api/processing/human-review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            document_id: doc.id,
+            revision: doc.revision,
+            extraction: e,
+          }),
+        });
+        await refresh();
+      } finally {
+        save.disabled = false;
+        cancelButton.disabled = false;
+      }
     });
   };
   section.append(form);
   return section;
+}
+/** Load immutable model values before enabling approval. */
+export function processingReview(
+  doc: DocumentView,
+  categories: PurchaseCategory[],
+  act: (task: () => Promise<void>) => Promise<void>,
+  refresh: () => Promise<void>,
+) {
+  const panel = el("section");
+  panel.className = "processing-review";
+  const load = async () => {
+    panel.replaceChildren(el("p", "Loading saved agent readings…"));
+    try {
+      const data = await api<ReviewReadings>(
+        `/api/processing/readings?document_id=${doc.id}`,
+      );
+      if (!panel.isConnected) return;
+      const values = reviewValues(doc, data.attempts);
+      const comparison = el("details");
+      comparison.className = "review-comparison";
+      comparison.append(
+        el("summary", "Compare saved Luna, Astra and human values"),
+      );
+      const table = el("table");
+      const heading = el("tr");
+      for (const label of ["Field", "Luna", "Astra", "Human review"])
+        heading.append(el("th", label));
+      table.append(heading);
+      for (const key of Object.keys(
+        values.extraction,
+      ) as (keyof Extraction)[]) {
+        const row = el("tr");
+        row.append(el("th", key.replaceAll("_", " ")));
+        for (const reading of [values.luna, values.astra, values.human]) {
+          const value = reading?.extraction[key];
+          row.append(
+            el(
+              "td",
+              value === undefined
+                ? "No saved reading"
+                : value === null
+                  ? "Unknown"
+                  : typeof value === "object"
+                    ? JSON.stringify(value, null, 2)
+                    : String(value),
+            ),
+          );
+        }
+        table.append(row);
+      }
+      comparison.append(
+        el(
+          "p",
+          "Latest separate readings for these source pages. Amounts are minor units. Earlier readings may have been superseded; the prefill label identifies the active reading.",
+        ),
+        table,
+      );
+      const history = el("details");
+      history.append(
+        el("summary", "All agent readings and confirmation evidence"),
+      );
+      for (const attempt of data.attempts) {
+        const entry = el("details");
+        entry.append(
+          el(
+            "summary",
+            `${attempt.model} · revision ${attempt.revision} · ${new Date(attempt.created_at).toLocaleString()}`,
+          ),
+          el("pre", JSON.stringify(attempt.extraction, null, 2)),
+        );
+        history.append(entry);
+      }
+      for (const reading of data.readings) {
+        const entry = el("details");
+        entry.append(
+          el(
+            "summary",
+            `${reading.model} draft and confirmation · ${new Date(reading.created_at).toLocaleString()}`,
+          ),
+          el("pre", JSON.stringify(reading, null, 2)),
+        );
+        history.append(entry);
+      }
+      const editor = el("div");
+      const reset = () =>
+        editor.replaceChildren(
+          reviewForm(
+            doc,
+            categories,
+            act,
+            refresh,
+            values.extraction,
+            values.source,
+            () => {
+              reset();
+              const status = el("p", "Edits cancelled. No review saved.");
+              status.setAttribute("role", "status");
+              editor.prepend(status);
+            },
+          ),
+        );
+      reset();
+      panel.replaceChildren(comparison, history, editor);
+    } catch (error) {
+      if (!panel.isConnected) return;
+      const retry = el("button", "Retry loading readings");
+      retry.onclick = () => void load();
+      panel.replaceChildren(el("p", messageOf(error)), retry);
+    }
+  };
+  void load();
+  return panel;
 }
 export function categorySetup(
   categories: PurchaseCategory[],

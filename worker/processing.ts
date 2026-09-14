@@ -185,7 +185,26 @@ export async function processingRoute(
     )
       .bind(id)
       .all<any>();
+    const attempts = await env.DB.prepare(
+      "SELECT revision,stage,model,payload,created_at FROM processing_attempts WHERE document_id=? ORDER BY revision DESC",
+    )
+      .bind(id)
+      .all<{
+        revision: number;
+        stage: string;
+        model: string;
+        payload: string;
+        created_at: string;
+      }>();
     return json({
+      attempts: attempts.results.map(({ payload, ...row }) => {
+        const saved = JSON.parse(payload);
+        return {
+          ...row,
+          extraction: saved.request.extraction,
+          sources: saved.sources,
+        };
+      }),
       readings: rows.results.map((row) => ({
         revision: row.revision,
         model: row.model,
@@ -392,7 +411,24 @@ export async function processingRoute(
       doc.checks.pdf = true;
       doc.reviewedPdfSha256 = checkedHash;
     }
-    return save(request, env, async () => captures, [doc], []);
+    const humanRecord = env.DB.prepare(
+      "INSERT INTO processing_attempts(token,document_id,revision,stage,model,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+    ).bind(
+      crypto.randomUUID(),
+      doc.id,
+      doc.revision + 1,
+      "human",
+      "human",
+      JSON.stringify({
+        request: { extraction: input.extraction },
+        sources: doc.pages.map((p) => ({
+          capture_id: p.captureId,
+          sha256: p.sha256,
+        })),
+      }),
+      new Date().toISOString(),
+    );
+    return save(request, env, async () => captures, [doc], [humanRecord]);
   }
   if (path === "/api/processing/detach" && method === "POST") {
     const input = await bodyJson(request);

@@ -228,6 +228,14 @@ it("requires interactive human approval and invalidates it when an old client ed
   d = (await ok(`/api/documents/${c.id}`)).document;
   expect(d.processing.has_human_review).toBe(true);
   expect(d.processing.human_review_revision).toBe(d.revision);
+  const saved = await ok(`/api/processing/readings?document_id=${c.id}`);
+  expect(saved.attempts.map((a: any) => a.stage)).toEqual(["human", "small"]);
+  expect(saved.attempts[0].extraction).toEqual(body.extraction);
+  expect(saved.attempts[1].extraction.certainty).toBe("low");
+  expect((await req("/api/processing/human-review", body)).status).toBe(409);
+  expect(
+    (await ok(`/api/processing/readings?document_id=${c.id}`)).attempts,
+  ).toHaveLength(2);
   const forged = structuredClone(d);
   forged.processing.small_model_certainty = "high";
   expect((await req("/api/documents", { documents: [forged] })).status).toBe(

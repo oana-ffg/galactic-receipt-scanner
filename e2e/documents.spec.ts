@@ -99,6 +99,8 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     "3 awaiting processing",
   );
   await expect(page.locator("#review-list button")).toHaveCount(0);
+  await page.locator("#review-confidence").selectOption("all");
+  await page.locator("#review-model").selectOption("all");
   await page.locator("#review-filter").selectOption("processing");
   await expect(page.locator("#review-list button")).toHaveCount(3);
   await page.locator("#review-filter").selectOption("attention");
@@ -393,9 +395,7 @@ test("human review edits structured values and detaches a wrong page into the po
   await page
     .getByLabel("Review findings", { exact: true })
     .fill("Human checked every synthetic source.");
-  await page
-    .getByRole("button", { name: "Save and mark human reviewed" })
-    .click();
+  await page.getByRole("button", { name: "Accept human review" }).click();
   await expect(page.getByText(/Human reviewed: yes/)).toBeVisible();
   const saved = await (
     await isolatedRequest.get(`/api/documents/${target.id}`)
