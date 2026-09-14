@@ -179,6 +179,12 @@ whole transaction, not merely equal totals. Keep unique annotations and backs. M
 relationships rather than deleting sources. Missing future pages are awaiting-page work;
 a confirmed irrecoverable source problem is broken.
 
+Repeated headers and item rows can indicate duplicate or overlapping photographs, not
+distinct continuation pages. Check what unique content each crop adds; do not include a
+fully duplicated section twice. For a lower fragment, establish transaction identity and
+visible continuity before merging. If that evidence is insufficient, keep the sources
+separate and save the grouping/completeness uncertainty for review.
+
 ## Printed amounts and handwriting
 
 In a later full financial audit, extract vendor, dates, references, currency, all line items, purchase total, charged total,
