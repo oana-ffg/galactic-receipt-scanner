@@ -1,3 +1,4 @@
+import { currencyDigits, displayMoney, readMoney } from "./review-money";
 import { api } from "./api";
 import {
   arithmetic,
@@ -41,25 +42,29 @@ function reviewForm(
     e = structuredClone(extraction),
     section = el("section");
   section.append(
-    el("h3", "Human review"),
+    el("h3", "Receipt values"),
     el(
       "p",
       `Prefilled from ${source}. Edit the fields, then accept or cancel.`,
     ),
+  );
+  const notes = el("details");
+  notes.append(
+    el("summary", "Review notes and document details"),
     el(
       "p",
       `Luna: ${p.small_model_certainty ?? "not parsed"} · Astra: ${p.large_model_confidence ?? "not reviewed"} · Human reviewed: ${p.has_human_review ? "yes" : "no"}`,
     ),
   );
   const a = arithmetic(e);
-  section.append(
+  notes.append(
     el(
       "p",
-      `Printed arithmetic: ${a.status}${a.difference !== null ? ` (${a.difference} minor units difference)` : ""}`,
+      `Saved reading arithmetic: ${a.status}${a.difference !== null ? ` (${a.difference} minor units difference)` : ""}`,
     ),
   );
   if (p.ocr_comparison) {
-    section.append(
+    notes.append(
       el(
         "p",
         `Plain OCR comparison: ${p.ocr_comparison.status}. The original image is the source of truth.`,
@@ -68,29 +73,41 @@ function reviewForm(
     const discrepancies = el("ul");
     for (const reason of p.ocr_comparison.disagreements)
       discrepancies.append(el("li", reason));
-    section.append(discrepancies);
+    notes.append(discrepancies);
     if (p.ocr_comparison.resolution)
-      section.append(el("p", p.ocr_comparison.resolution));
+      notes.append(el("p", p.ocr_comparison.resolution));
   }
   const form = el("form");
   form.className = "review-form";
   form.setAttribute("aria-label", "Human review fields");
+  const summary = el("div");
+  summary.className = "review-summary-fields";
+  form.append(summary);
   const scalar = new Map<keyof Extraction, ReturnType<typeof input>>();
   for (const [key, label] of [
     ["vendor", "Vendor"],
     ["receipt_date", "Purchase date"],
     ["reference", "Reference"],
     ["currency", "Currency"],
-    ["total_minor", "Printed total (minor units)"],
-    ["charged_total_minor", "Charged total (minor units)"],
-    ["vat_minor", "VAT shown (minor units)"],
+    ["total_minor", "Total"],
+    ["charged_total_minor", "Charged total"],
+    ["vat_minor", "VAT"],
     ["card_last_four", "Last four card digits"],
   ] as const) {
-    const field = input(label, e[key] === null ? "" : String(e[key]));
+    const money = key.endsWith("_minor");
+    const field = input(
+      label,
+      money
+        ? displayMoney(e[key] as number | null, e.currency)
+        : e[key] === null
+          ? ""
+          : String(e[key]),
+    );
+    if (money) (field.control as HTMLInputElement).inputMode = "decimal";
     scalar.set(key, field);
     if (key === "receipt_date")
       (field.control as HTMLInputElement).type = "date";
-    form.append(field.wrap);
+    (key === "card_last_four" ? notes : summary).append(field.wrap);
   }
   const selects = new Map<keyof Extraction, HTMLSelectElement>();
   for (const [key, label, values] of [
@@ -118,7 +135,7 @@ function reviewForm(
     }
     select.value = e[key];
     wrap.append(select);
-    form.append(wrap);
+    notes.append(wrap);
     selects.set(key, select);
   }
   const category = el("select");
@@ -134,7 +151,7 @@ function reviewForm(
   const categoryLabel = el("label", "Purchase category");
   categoryLabel.className = "review-field";
   categoryLabel.append(category);
-  form.append(categoryLabel);
+  notes.append(categoryLabel);
   const bools = new Map<keyof Extraction, HTMLInputElement>();
   for (const [key, label] of [
     ["has_handwriting", "Handwriting is present"],
@@ -150,17 +167,25 @@ function reviewForm(
     const wrap = el("label");
     wrap.className = "toggle";
     wrap.append(check, label);
-    form.append(wrap);
+    notes.append(wrap);
     bools.set(key, check);
   }
   const lineSection = el("div");
-  lineSection.append(
-    el("h4", "Line items"),
-    el(
-      "p",
-      "Amounts use minor units: 12.34 is 1234 for DKK. Leave unreadable values blank.",
-    ),
+  const currencyHint = el(
+    "p",
+    `Amounts in ${e.currency ?? "currency units (2 decimal places)"}. Leave unreadable values blank.`,
   );
+  lineSection.append(el("h4", "Line items"), currencyHint);
+  const table = el("table");
+  table.className = "review-line-items";
+  const header = el("tr");
+  for (const title of ["Item", "Qty", "Unit price", "Amount", ""])
+    header.append(el("th", title));
+  const tableHead = el("thead");
+  tableHead.append(header);
+  const tableBody = el("tbody");
+  table.append(tableHead, tableBody);
+  lineSection.append(table);
   const lineRows: {
     description: HTMLInputElement;
     quantity: HTMLInputElement;
@@ -169,28 +194,36 @@ function reviewForm(
     row: HTMLElement;
   }[] = [];
   const addLine = (l: Extraction["line_items"][number]) => {
-    const row = el("div");
-    row.className = "review-form";
+    const row = el("tr");
     const description = input("Item", l.description),
       quantity = input(
         "Quantity",
         l.quantity === null ? "" : String(l.quantity),
       ),
-      unit = input(
-        "Unit price",
-        l.unit_price_minor === null ? "" : String(l.unit_price_minor),
-      ),
-      amount = input(
-        "Line amount",
-        l.amount_minor === null ? "" : String(l.amount_minor),
-      );
-    row.append(description.wrap, quantity.wrap, unit.wrap, amount.wrap);
-    const remove = el("button", "Remove line");
+      unit = input("Unit price", displayMoney(l.unit_price_minor, e.currency)),
+      amount = input("Line amount", displayMoney(l.amount_minor, e.currency));
+    for (const [label, field] of [
+      ["Item", description],
+      ["Quantity", quantity],
+      ["Unit price", unit],
+      ["Line amount", amount],
+    ] as const) {
+      field.control.setAttribute("aria-label", label);
+      if (label !== "Item")
+        (field.control as HTMLInputElement).inputMode = "decimal";
+      const cell = el("td");
+      cell.append(field.control);
+      row.append(cell);
+    }
+    const remove = el("button", "×");
+    remove.setAttribute("aria-label", "Remove line");
     remove.type = "button";
     remove.className = "secondary";
     remove.onclick = () => row.remove();
-    row.append(remove);
-    lineSection.append(row);
+    const removeCell = el("td");
+    removeCell.append(remove);
+    row.append(removeCell);
+    tableBody.append(row);
     lineRows.push({
       description: description.control as HTMLInputElement,
       quantity: quantity.control as HTMLInputElement,
@@ -219,21 +252,75 @@ function reviewForm(
   for (const [key, label] of [
     [
       "adjustments",
-      "Document adjustments — description = signed minor units, one per line",
+      "Document adjustments — description = signed amount, one per line",
     ],
     [
       "payment_adjustments",
-      "Payment fees / adjustments — description = signed minor units, one per line",
+      "Payment fees / adjustments — description = signed amount, one per line",
     ],
   ] as const) {
     const field = input(
       label,
-      e[key].map((a) => `${a.description} = ${a.amount_minor}`).join("\n"),
+      e[key]
+        .map(
+          (a) =>
+            `${a.description} = ${displayMoney(a.amount_minor, e.currency)}`,
+        )
+        .join("\n"),
       true,
     );
     adjustments.set(key, field);
     form.append(field.wrap);
   }
+  let displayedCurrency = e.currency;
+  const currencyControl = scalar.get("currency")!.control;
+  const syncCurrency = () => {
+    const next = currencyControl.value.trim().toUpperCase() || null;
+    if (next === displayedCurrency) return;
+    currencyDigits(next);
+    const controls = [
+      ...["total_minor", "charged_total_minor", "vat_minor"].map(
+        (key) => scalar.get(key as keyof Extraction)!.control,
+      ),
+      ...lineRows
+        .filter((l) => l.row.isConnected)
+        .flatMap((l) => [l.unit, l.amount]),
+    ];
+    const updates = controls.map((control) => ({
+      control,
+      value: displayMoney(readMoney(control.value, displayedCurrency), next),
+    }));
+    for (const field of adjustments.values()) {
+      const value = field.control.value
+        .split("\n")
+        .map((line) => {
+          if (!line.trim()) return line;
+          const split = line.lastIndexOf("=");
+          if (split < 1)
+            throw Error(
+              "Use description = signed amount for each adjustment before changing currency.",
+            );
+          return `${line.slice(0, split).trim()} = ${displayMoney(readMoney(line.slice(split + 1), displayedCurrency), next)}`;
+        })
+        .join("\n");
+      updates.push({ control: field.control, value });
+    }
+    for (const update of updates) update.control.value = update.value;
+    displayedCurrency = next;
+    currencyControl.value = next ?? "";
+    currencyHint.textContent = `Amounts reformatted for ${next ?? "currency units (2 decimal places)"}, preserving the saved minor-unit values. Check the displayed amounts before accepting.`;
+  };
+  const currencyError = el("p");
+  currencyError.setAttribute("role", "alert");
+  scalar.get("currency")!.wrap.append(currencyError);
+  currencyControl.onchange = () => {
+    try {
+      syncCurrency();
+      currencyError.textContent = "";
+    } catch (error) {
+      currencyError.textContent = messageOf(error);
+    }
+  };
   const uncertainty = input(
       "Remaining uncertainties",
       e.uncertainties.join("\n"),
@@ -241,7 +328,8 @@ function reviewForm(
     ),
     broken = input("Broken reasons", e.broken_reasons.join("\n"), true),
     evidence = input("Review findings", e.evidence, true);
-  form.append(uncertainty.wrap, broken.wrap, evidence.wrap);
+  notes.append(uncertainty.wrap, broken.wrap, evidence.wrap);
+  form.append(notes);
   const save = el("button", "Accept human review");
   save.type = "submit";
   const cancelButton = el("button", "Cancel");
@@ -250,70 +338,87 @@ function reviewForm(
   cancelButton.onclick = cancel;
   const actions = el("div");
   actions.className = "review-actions controls";
-  actions.append(save, cancelButton);
+  const saveMessage = el("p");
+  saveMessage.setAttribute("role", "status");
+  actions.append(save, cancelButton, saveMessage);
   form.append(actions);
   form.onsubmit = (event) => {
     event.preventDefault();
     void act(async () => {
-      for (const [key, field] of scalar) {
-        const value = field.control.value.trim();
-        (e as unknown as Record<string, unknown>)[key] = [
-          "total_minor",
-          "charged_total_minor",
-          "vat_minor",
-        ].includes(key)
-          ? number(value)
-          : value || null;
-      }
-      for (const [key, select] of selects)
-        (e as unknown as Record<string, unknown>)[key] = select.value;
-      for (const [key, check] of bools)
-        (e as unknown as Record<string, unknown>)[key] = check.checked;
-      e.category_id = category.value || null;
-      e.line_items = lineRows
-        .filter((l) => l.row.isConnected)
-        .map((l) => ({
-          description: l.description.value,
-          quantity: number(l.quantity.value),
-          unit_price_minor: number(l.unit.value),
-          amount_minor: number(l.amount.value),
-        }));
-      for (const [key, field] of adjustments)
-        e[key] = field.control.value
-          .split("\n")
-          .filter((l) => l.trim())
-          .map((l) => {
-            const i = l.lastIndexOf("=");
-            const amount = number(l.slice(i + 1));
-            if (i < 1 || amount === null)
-              throw Error(
-                "Use description = signed amount for each adjustment.",
-              );
-            return { description: l.slice(0, i).trim(), amount_minor: amount };
-          });
-      e.uncertainties = uncertainty.control.value
-        .split("\n")
-        .filter((l) => l.trim());
-      e.broken_reasons = broken.control.value
-        .split("\n")
-        .filter((l) => l.trim());
-      e.evidence = evidence.control.value;
-      save.disabled = true;
-      cancelButton.disabled = true;
+      saveMessage.textContent = "";
       try {
-        await api("/api/processing/human-review", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            document_id: doc.id,
-            revision: doc.revision,
-            extraction: e,
-          }),
-        });
-        await refresh();
-      } finally {
-        save.disabled = false;
-        cancelButton.disabled = false;
+        syncCurrency();
+        currencyError.textContent = "";
+        const currency =
+          scalar.get("currency")!.control.value.trim().toUpperCase() || null;
+        for (const [key, field] of scalar) {
+          const value = field.control.value.trim();
+          (e as unknown as Record<string, unknown>)[key] = [
+            "total_minor",
+            "charged_total_minor",
+            "vat_minor",
+          ].includes(key)
+            ? readMoney(value, currency)
+            : key === "currency"
+              ? currency
+              : value || null;
+        }
+        for (const [key, select] of selects)
+          (e as unknown as Record<string, unknown>)[key] = select.value;
+        for (const [key, check] of bools)
+          (e as unknown as Record<string, unknown>)[key] = check.checked;
+        e.category_id = category.value || null;
+        e.line_items = lineRows
+          .filter((l) => l.row.isConnected)
+          .map((l) => ({
+            description: l.description.value,
+            quantity: number(l.quantity.value),
+            unit_price_minor: readMoney(l.unit.value, currency),
+            amount_minor: readMoney(l.amount.value, currency),
+          }));
+        for (const [key, field] of adjustments)
+          e[key] = field.control.value
+            .split("\n")
+            .filter((l) => l.trim())
+            .map((l) => {
+              const i = l.lastIndexOf("=");
+              const amount = readMoney(l.slice(i + 1), currency);
+              if (i < 1 || amount === null)
+                throw Error(
+                  "Use description = signed amount for each adjustment.",
+                );
+              return {
+                description: l.slice(0, i).trim(),
+                amount_minor: amount,
+              };
+            });
+        e.uncertainties = uncertainty.control.value
+          .split("\n")
+          .filter((l) => l.trim());
+        e.broken_reasons = broken.control.value
+          .split("\n")
+          .filter((l) => l.trim());
+        e.evidence = evidence.control.value;
+        save.disabled = true;
+        cancelButton.disabled = true;
+        try {
+          await api("/api/processing/human-review", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              document_id: doc.id,
+              revision: doc.revision,
+              extraction: e,
+            }),
+          });
+          await refresh();
+        } finally {
+          save.disabled = false;
+          cancelButton.disabled = false;
+        }
+      } catch (error) {
+        saveMessage.textContent = messageOf(error);
+        throw error;
       }
     });
   };
@@ -421,7 +526,7 @@ export function processingReview(
           ),
         );
       reset();
-      panel.replaceChildren(comparison, history, editor);
+      panel.replaceChildren(editor, comparison, history);
     } catch (error) {
       if (!panel.isConnected) return;
       const retry = el("button", "Retry loading readings");

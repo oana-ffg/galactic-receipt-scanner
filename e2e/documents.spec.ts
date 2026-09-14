@@ -387,7 +387,14 @@ test("human review edits structured values and detaches a wrong page into the po
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page.locator("#review-filter").selectOption("review");
   await page.locator("#review-list button").click();
-  await expect(page.getByText(/Luna: medium · Astra: medium/)).toBeVisible();
+  await page
+    .getByText("Review notes and document details", { exact: true })
+    .click();
+  await expect(
+    page
+      .locator(".processing-review")
+      .getByText(/Luna: medium · Astra: medium/),
+  ).toBeVisible();
   await expect(page.getByLabel("Handwriting is present")).toBeChecked();
   await page
     .getByLabel("Vendor", { exact: true })
@@ -396,6 +403,9 @@ test("human review edits structured values and detaches a wrong page into the po
     .getByLabel("Review findings", { exact: true })
     .fill("Human checked every synthetic source.");
   await page.getByRole("button", { name: "Accept human review" }).click();
+  await page
+    .getByText("Review notes and document details", { exact: true })
+    .click();
   await expect(page.getByText(/Human reviewed: yes/)).toBeVisible();
   const saved = await (
     await isolatedRequest.get(`/api/documents/${target.id}`)
@@ -404,6 +414,9 @@ test("human review edits structured values and detaches a wrong page into the po
   expect(saved.document.processing.human_review_revision).toBe(
     saved.document.revision,
   );
+  await page
+    .getByText("Originals and page organisation", { exact: true })
+    .click();
   await page
     .getByLabel("Reason for detaching page")
     .nth(1)

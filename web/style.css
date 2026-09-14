@@ -734,16 +734,66 @@ header {
 
 .receipt-review-panes {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 1fr);
-  gap: 1.5rem;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  height: calc(100dvh - 3rem);
+  min-height: 360px;
+  align-items: stretch;
+  scroll-margin-top: 1rem;
 }
-.receipt-review-panes > .review-sources {
-  position: sticky;
-  top: 1rem;
-  max-height: 90vh;
+.receipt-review-panes > .processing-review {
   overflow: auto;
-  grid-template-columns: 1fr;
+  min-height: 0;
+  padding: 0 0.6rem;
+  overscroll-behavior: contain;
+}
+.document-preview,
+.document-preview-content,
+.pdf-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.document-preview-content,
+.document-preview .pdf-preview {
+  flex: 1;
+}
+.document-preview-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: #080d12;
+}
+.document-preview-viewport canvas {
+  display: block;
+  margin: auto;
+}
+.document-preview-viewport canvas[hidden] {
+  display: none;
+}
+.document-preview .controls,
+.pdf-preview .controls {
+  gap: 0.4rem;
+}
+.document-preview button,
+.document-preview select {
+  padding: 0.5rem;
+}
+.document-preview p,
+.pdf-preview p {
+  font-size: 0.85rem;
+  margin: 0.5rem 0;
+}
+.pdf-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.pdf-dialog > .pdf-preview {
+  flex: 1;
 }
 .processing-review {
   min-width: 0;
@@ -780,11 +830,81 @@ header {
   z-index: 1;
 }
 @media (max-width: 1100px) {
-  .receipt-review-panes {
+  .review-workspace {
     grid-template-columns: 1fr;
   }
-  .receipt-review-panes > .review-sources {
+  #review-list {
+    display: flex;
     position: static;
-    max-height: none;
+    max-height: 10rem;
+    overflow: auto;
   }
+  #review-list .review-item {
+    min-width: 220px;
+    max-width: 280px;
+  }
+}
+@media (max-width: 600px) {
+  .receipt-review-panes {
+    gap: 0.5rem;
+  }
+  .document-preview .controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+.review-summary-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  align-items: start;
+}
+.review-field p:empty {
+  display: none;
+}
+.review-summary-fields .review-field:first-child {
+  grid-column: 1 / -1;
+}
+.processing-review h3 {
+  margin-top: 0;
+}
+.processing-review .review-form {
+  margin-top: 0.75rem;
+}
+.review-line-items {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+.review-line-items th {
+  text-align: left;
+  font-size: 0.8rem;
+}
+.review-line-items th:first-child {
+  width: 40%;
+}
+.review-line-items th:nth-child(2) {
+  width: 12%;
+}
+.review-line-items th:last-child {
+  width: 2rem;
+}
+.review-line-items td {
+  padding: 0.2rem 0.1rem;
+  vertical-align: top;
+}
+.review-line-items input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem 0.3rem;
+  border: 1px solid #536674;
+  border-radius: 0.25rem;
+  background: #101820;
+  color: #edf3f7;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.review-line-items button {
+  padding: 0.35rem;
+  width: 100%;
 }

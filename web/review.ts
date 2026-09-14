@@ -1,3 +1,4 @@
+import { documentPreview } from "./document-preview";
 import { matchesReviewFilters } from "./review-values";
 import { processingReview, categorySetup } from "./processing-review";
 import type { PurchaseCategory } from "./extraction";
@@ -53,6 +54,7 @@ export async function mountReview(app: HTMLElement) {
   let selected: string | null = null;
   let categories: PurchaseCategory[] = [];
   let busy = false;
+  let disposePreview = () => {};
   const message = app.querySelector<HTMLElement>("#review-message")!;
   const list = app.querySelector<HTMLElement>("#review-list")!;
   const detail = app.querySelector<HTMLElement>("#review-detail")!;
@@ -145,6 +147,9 @@ export async function mountReview(app: HTMLElement) {
         selected = d.id;
         renderList();
         renderDetail(d);
+        detail
+          .querySelector(".receipt-review-panes")
+          ?.scrollIntoView({ block: "start" });
       };
       list.append(button);
     }
@@ -153,11 +158,17 @@ export async function mountReview(app: HTMLElement) {
   }
   function renderDetail(original: DocumentView) {
     const doc = structuredClone(original);
+    disposePreview();
     detail.replaceChildren();
     detail.append(el("h2", doc.filename ?? "Identify this document"));
     const reasons = el("ul", undefined, `review-reasons ${doc.status}`);
     for (const reason of doc.reasons) reasons.append(el("li", reason));
-    detail.append(reasons);
+    const sourceWarnings = el("details");
+    sourceWarnings.append(
+      el("summary", `Source review notes (${doc.reasons.length})`),
+      reasons,
+    );
+    detail.append(doc.processing ? sourceWarnings : reasons);
     const sources = el("div", undefined, "review-sources");
     doc.pages.forEach((p, index) => {
       const capture = catalog.captures.find((c) => c.id === p.captureId)!;
@@ -474,8 +485,10 @@ export async function mountReview(app: HTMLElement) {
     };
     if (doc.processing) {
       const workspace = el("div", undefined, "receipt-review-panes");
+      const preview = documentPreview(doc, catalog.captures);
+      disposePreview = preview.destroy;
       workspace.append(
-        sources,
+        preview.element,
         processingReview(doc, categories, action, async () => {
           await refresh();
           setMessage(
@@ -483,7 +496,12 @@ export async function mountReview(app: HTMLElement) {
           );
         }),
       );
-      detail.append(workspace);
+      const sourceDetails = el("details");
+      sourceDetails.append(
+        el("summary", "Originals and page organisation"),
+        sources,
+      );
+      detail.append(workspace, sourceDetails);
     } else detail.append(form);
     const outputs = el("div", undefined, "controls");
     const generate = el("button", "Generate PDF", "secondary");
