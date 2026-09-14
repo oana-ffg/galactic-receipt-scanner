@@ -1,5 +1,5 @@
 import type { DocumentView } from "./documents";
-import { ocrOverlay, type OcrBox } from "./ocr-overlay";
+import { ocrOverlay, type OcrBox, type PositionedOcr } from "./ocr-overlay";
 import type { ReviewOcr, ReviewOcrSource } from "./review-ocr";
 import type { Capture } from "./types";
 import { detectedReceiptCrop } from "./receipt-crop";
@@ -49,7 +49,6 @@ export function documentPreview(
   let ocrErrors = 0;
   let loadingOcr = false;
   let closed = false;
-  let restoreSource: string | null = null;
   let activePage = 0;
   let updateOverlay = () => {};
   const loadOverlay = async () => {
@@ -71,7 +70,7 @@ export function documentPreview(
       }
       if (ocr.some((o) => o.engine === selected))
         overlayEngine.value = selected;
-      overlayEngine.hidden = !overlayToggle.checked || ocr.length < 2;
+      overlayEngine.hidden = source.value === "pdf" || ocr.length < 2;
       retryOcr.hidden = !overlayToggle.checked || !ocrErrors;
       updateOverlay();
     } catch (error) {
@@ -140,12 +139,16 @@ export function documentPreview(
     stage.append(canvas);
     viewport.append(stage);
     let displayed: { crop: OcrBox; pixels: number[] } | undefined;
+    let renderedOverlay:
+      { positioned: PositionedOcr; element: SVGSVGElement } | undefined;
     updateOverlay = () => {
-      stage.querySelector(".ocr-overlay")?.remove();
-      if (!overlayToggle.checked) {
-        overlayMessage.textContent = "";
-        return;
-      }
+      overlayMessage.style.visibility = overlayToggle.checked ? "" : "hidden";
+      if (renderedOverlay)
+        renderedOverlay.element.style.display = overlayToggle.checked
+          ? ""
+          : "none";
+      if (!overlayToggle.checked) return;
+
       if (!ocr) {
         overlayMessage.textContent = "Loading saved OCR positions…";
         return;
@@ -153,6 +156,10 @@ export function documentPreview(
       const engine = ocr.find((o) => o.engine === overlayEngine.value);
       const reading = engine?.pages.find((p) => p.number === pageIndex + 1);
       const positioned = reading?.positioned;
+      if (renderedOverlay && renderedOverlay.positioned !== positioned) {
+        renderedOverlay.element.remove();
+        renderedOverlay = undefined;
+      }
       if (!positioned?.items.length) {
         overlayMessage.textContent = `${engine?.engine ?? "OCR"}: no saved word/line positions for this page. View the OCR text in Compare readings.${ocrErrors ? " Some OCR loads failed; retry above." : ""}`;
         return;
@@ -163,9 +170,17 @@ export function documentPreview(
           "OCR image dimensions do not match this scan; overlay cannot be aligned.";
         return;
       }
-      stage.append(
-        ocrOverlay(positioned, displayed.crop, doc.pages[pageIndex].rotation),
-      );
+      if (!renderedOverlay) {
+        renderedOverlay = {
+          positioned,
+          element: ocrOverlay(
+            positioned,
+            displayed.crop,
+            doc.pages[pageIndex].rotation,
+          ),
+        };
+        stage.append(renderedOverlay.element);
+      }
       overlayMessage.textContent = `${engine!.engine} · saved OCR on the scan. Amber = low or unknown OCR confidence.${positioned.skipped ? ` ${positioned.skipped} invalid text boxes omitted.` : ""}${ocrErrors ? " Some OCR loads failed; retry above." : ""}`;
     };
     content.append(toolbar, status, viewport);
@@ -193,7 +208,8 @@ export function documentPreview(
       previous.disabled = next.disabled = zoom.disabled = true;
       canvas.hidden = true;
       displayed = undefined;
-      stage.querySelector(".ocr-overlay")?.remove();
+      renderedOverlay?.element.remove();
+      renderedOverlay = undefined;
       status.textContent = `Loading scan ${pageIndex + 1} of ${doc.pages.length}…`;
       image = new Image();
       image.onload = () => {
@@ -276,26 +292,18 @@ export function documentPreview(
     render();
   };
   overlayToggle.onchange = () => {
-    overlayEngine.hidden = !overlayToggle.checked || (ocr?.length ?? 0) < 2;
+    overlayEngine.hidden = (ocr?.length ?? 0) < 2;
+    overlayMessage.style.visibility = overlayToggle.checked ? "" : "hidden";
     retryOcr.hidden = !overlayToggle.checked || !ocrErrors;
     if (overlayToggle.checked) {
       if (source.value === "pdf") {
-        restoreSource = "pdf";
         source.value = "crop";
         void show();
       } else updateOverlay();
-      if (!ocr || ocrErrors) void loadOverlay();
-    } else {
-      overlayMessage.textContent = "";
-      if (restoreSource) {
-        source.value = restoreSource;
-        restoreSource = null;
-        void show();
-      } else updateOverlay();
-    }
+      if (!ocr) void loadOverlay();
+    } else updateOverlay();
   };
   source.onchange = () => {
-    restoreSource = null;
     if (source.value === "pdf") {
       overlayToggle.checked = false;
       overlayEngine.hidden = retryOcr.hidden = true;

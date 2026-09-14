@@ -446,14 +446,68 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       };
     });
   expect(alignment).toEqual({ sameSize: true, samePosition: true });
-  await page.screenshot({ path: "test-results/ocr-overlay-synthetic.png" });
+  const previewRequests: string[] = [];
+  const recordPreviewRequest = (request: { url(): string }) => {
+    if (/\/api\/(?:files\/|documents\/.*\/pdf)/.test(request.url()))
+      previewRequests.push(request.url());
+  };
+  page.on("request", recordPreviewRequest);
+  const toggling = await page
+    .locator(".document-preview")
+    .evaluate((preview) => {
+      const viewport = preview.querySelector<HTMLElement>(
+        ".document-preview-viewport",
+      )!;
+      const canvas = viewport.querySelector("canvas")!;
+      const svg = viewport.querySelector<SVGSVGElement>(".ocr-overlay")!;
+      const toggle = preview.querySelector<HTMLInputElement>(
+        ".ocr-overlay-toggle input",
+      )!;
+      viewport.scrollTop = 300;
+      viewport.scrollLeft = 100;
+      const before = {
+        top: viewport.scrollTop,
+        left: viewport.scrollLeft,
+        width: canvas.getBoundingClientRect().width,
+        viewportTop: viewport.getBoundingClientRect().top,
+      };
+      let visibleCorrectly = true;
+      for (let i = 0; i < 12; i++) {
+        toggle.click();
+        visibleCorrectly &&=
+          (getComputedStyle(svg).display !== "none") === toggle.checked;
+      }
+      return {
+        visibleCorrectly,
+        sameCanvas: canvas === viewport.querySelector("canvas"),
+        sameOverlay: svg === viewport.querySelector(".ocr-overlay"),
+        samePosition:
+          viewport.scrollTop === before.top &&
+          viewport.scrollLeft === before.left &&
+          viewport.getBoundingClientRect().top === before.viewportTop,
+        sameZoom: canvas.getBoundingClientRect().width === before.width,
+      };
+    });
+  expect(toggling).toEqual({
+    visibleCorrectly: true,
+    sameCanvas: true,
+    sameOverlay: true,
+    samePosition: true,
+    sameZoom: true,
+  });
   await page
     .getByRole("checkbox", { name: "OCR overlay", exact: true })
     .uncheck();
-  await expect(overlay).toHaveCount(0);
+  await expect(page.locator(".ocr-overlay")).toBeHidden();
   await expect(page.getByLabel("Preview source", { exact: true })).toHaveValue(
-    "pdf",
+    "crop",
   );
+  await expect(
+    page.getByRole("img", { name: "Cropped scan 2 of 2" }),
+  ).toBeVisible();
+  expect(previewRequests).toEqual([]);
+  page.off("request", recordPreviewRequest);
+  await page.getByLabel("Preview source", { exact: true }).selectOption("pdf");
   await expect(
     page.getByRole("img", { name: "PDF page 2 of 2" }),
   ).toBeVisible();
@@ -476,6 +530,9 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     await page
       .getByRole("checkbox", { name: "OCR overlay", exact: true })
       .uncheck();
+    await page
+      .getByLabel("Preview source", { exact: true })
+      .selectOption("pdf");
     await expect(
       page.getByRole("img", { name: pdfName, exact: true }),
     ).toBeVisible();
