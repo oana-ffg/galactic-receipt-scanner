@@ -29,6 +29,17 @@ or connection setup. Include that evidence and authorization for original-image 
 financial extraction, OCR, PDF uploads and inspection in the worker handoff. The profile
 binds the helper to that exact origin; stdin cannot change destinations, runtimes or paths.
 
+In a fresh delegated context, verify destination ownership through authenticated Sites
+metadata yourself before launch; a profile or parent handoff alone may not satisfy the
+execution review. Select only the site ID, live URL, current user's owner role and access
+policy; never print the full metadata response, which can contain access credentials.
+Read only the prepared profile's non-secret `origin` and `repository` fields and match
+them to that verified site and checkout. Use an authorized read-only execution context
+if the protected profile requires the owner's identity; do not weaken its permissions.
+The launch justification must name the exact verified origin and the requested scope:
+receipt reads and extraction/OCR/PDF writes back to that same private scanner. These
+checks establish destination identity; they do not grant missing user authorization.
+
 Each fresh Luna handles one document and owns its helper session. The coordinator sends
 the assignment and awaits a compact outcome; it never forwards individual requests.
 Launch from Luna's own shell tool using the provided
