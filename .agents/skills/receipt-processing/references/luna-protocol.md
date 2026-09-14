@@ -214,6 +214,10 @@ finish any applicable PDF and continue the batch. It is not `claim-uncertain` or
 `submit-uncertain`, which describe an unconfirmed operation rather than a reading.
 
 Only after explicit owner direction, launch the same profile with `--resume RUN_ID`.
+For an expired `draft-uncertain` run, `reconcile` can close it only when the server
+confirms that its exact checkpoint has no saved draft or submission and no active claim,
+and every affected document still has its original revision. It reads only checkpoint
+existence and document metadata, preserves the local journal and never claims new work.
 Use `retry-submit` solely for `submit-uncertain`: it sends the byte-identical saved request
 with its original token. Use `reconcile` for `submit-readback`, `attestation-uncertain`, or PDF preparation/upload
 interruptions. It verifies server metadata against the saved local PDF without downloading

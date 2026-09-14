@@ -67,13 +67,17 @@ class FakeScanner:
         self.pdf_uploads = []
         self.pdf_calls = 0
         self.lost_claim = False
+        self.categories = []
+        self.readings = {"draft_saved": False, "attempt_saved": False, "claim_active": False}
 
     def get(self, path):
         self.calls.append(("GET", path))
         if path == "/api/processing/access":
             return {"version": 2, "queueClaims": True}
         if path == "/api/processing/categories":
-            return []
+            return deepcopy(self.categories)
+        if path.startswith("/api/processing/readings?"):
+            return deepcopy(self.readings)
         if path.startswith("/api/processing/context?"):
             source = self.documents[OTHER]["pages"][0]
             return dict(document=deepcopy(self.documents[DID]), candidates=[],
@@ -276,6 +280,63 @@ class WorkerTests(unittest.TestCase):
         saved=json.loads(self.fake.submit_bytes[0])
         self.assertEqual(saved["extraction"]["vendor"],"Synthetic corrected shop")
         self.assertEqual(saved["assessment"]["changed_fields"],["vendor"])
+
+    def test_unknown_category_is_correctable_before_draft_is_frozen(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        value = extraction()
+        value["category_id"] = FOREIGN
+        result = self.worker.handle({"op": "draft", "extraction": value})
+        self.assertIn("Unknown purchase category", result["input_error"])
+        self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertNotIn("draft", self.worker.state)
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.fake.categories = [{"id": OTHER, "name": "Synthetic supplies"}]
+        value["category_id"] = OTHER
+        self.send("draft", extraction=value)
+        self.assertEqual(self.fake.initial_draft["extraction"]["category_id"], OTHER)
+
+    def test_unknown_reassessment_category_preserves_initial_and_can_be_corrected(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        self.send("draft", extraction=extraction())
+        self.send("prepare", capture_ids=[DID])
+        confirmation = self.send("confirm")
+        value = extraction()
+        value["category_id"] = FOREIGN
+        request = {"op": "assess", "extraction": value, "confirmation_sha256": confirmation["sha256"], "rationale": "Synthetic reassessment."}
+        self.assertIn("input_error", self.worker.handle(request))
+        self.assertNotIn("assessment", self.worker.state)
+        self.assertIsNone(self.worker.state["draft"]["extraction"]["category_id"])
+        value["category_id"] = None
+        self.assertTrue(self.worker.handle(request)["result"]["assessed"])
+
+    def test_expired_unsaved_draft_reconciliation_requires_unsaved_inactive_checkpoint_and_unchanged_documents(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        with patch.object(self.fake, "request", side_effect=ClientError("Synthetic rejected draft")):
+            self.assertTrue(self.worker.handle({"op": "draft", "extraction": extraction()})["blocking"])
+        run_id = self.worker.state["run_id"]
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        self.assertFalse(self.worker.handle({"op": "reconcile"})["ok"])
+        expiry = self.worker.state["claim"]["expires"] / 1000
+        with patch.object(module.time, "time", return_value=expiry + 211):
+            original = deepcopy(self.fake.readings)
+            for key in original:
+                for value in (True, None, 0):
+                    self.fake.readings[key] = value
+                    self.assertFalse(self.worker.handle({"op": "reconcile"})["ok"])
+                    self.assertEqual(self.worker.state["phase"], "draft-uncertain")
+                self.fake.readings = deepcopy(original)
+            self.fake.documents[DID]["revision"] += 1
+            self.assertFalse(self.worker.handle({"op": "reconcile"})["ok"])
+            self.fake.documents[DID]["revision"] -= 1
+            writes = sum(method == "POST" for method, _ in self.fake.calls)
+            result = self.send("reconcile")
+            self.assertEqual(result["phase"], "released")
+            self.assertEqual(writes, sum(method == "POST" for method, _ in self.fake.calls))
+            self.assertTrue((self.worker.work / self.worker.state["checkpoint_request"]).exists())
 
     def test_complete_one_document_protocol(self):
         self.prepared()

@@ -392,6 +392,7 @@ class Worker:
         validation = self.check("validate", extraction=extraction)
         if validation["errors"]:
             return {"validation": validation, "drafted": False}
+        self.check_category(extraction)
         claim = self.active()
         documents = self.grouping(message["grouping"], extraction) if message.get("grouping") else [deepcopy(self.get_document(claim["document"]["id"]))]
         target = next(d for d in documents if d["id"] == claim["document"]["id"])
@@ -420,6 +421,13 @@ class Worker:
         self.checkpoint()
         return self.database_checkpoint("draft", {"token":claim["token"], "model":"gpt-5.6-luna", "extraction":extraction,
              "documents":deepcopy(documents), "pixel_pdf_sha256":pixel_pdf["sha256"], "images":frozen["images"]})
+
+    def check_category(self, extraction):
+        category_id = extraction.get("category_id")
+        if category_id is not None:
+            categories = self.client.get("/api/processing/categories")
+            require(any(category.get("id") == category_id for category in categories),
+                    "Unknown purchase category. Use categories and copy its exact id; then retry the same operation.")
 
     def database_checkpoint(self, endpoint, body):
         previous_state = deepcopy(self.state)
@@ -581,6 +589,22 @@ class Worker:
             return self.restore_pdf()
         if op == "reconcile":
             require(self.resumed, "Reconciliation requires an explicitly resumed run.")
+            if self.state["phase"] == "draft-uncertain":
+                claim = self.state["claim"]
+                require(time.time() * 1000 >= claim["expires"] + 210000,
+                        "Draft claim may still be active; preserve it until its lease and request margin have elapsed.")
+                status = self.client.get("/api/processing/readings?document_id=" + claim["document"]["id"] + "&checkpoint_token=" + claim["token"])
+                verify(all(status.get(key) is False for key in ("draft_saved", "attempt_saved", "claim_active")),
+                       "Checkpoint may be saved or active; preserve the uncertain draft for explicit checkpoint recovery.")
+                for original in self.state["draft"]["documents"]:
+                    current = self.get_document(original["id"])
+                    verify(current["revision"] == original["revision"],
+                           "An affected document changed; preserve the uncertain draft for review.")
+                self.record("expired-unsaved-draft", {"checkpoint_unsaved": True, "claim_expired": True})
+                self.state["phase"] = "released"
+                self.state.pop("failed", None)
+                self.checkpoint()
+                return self.summary()
             if self.state["phase"] == "claim-uncertain":
                 # Server leases last 20 minutes. Include request timeout and clock margin.
                 require(time.time() >= self.state["claim_started"] + 20*60 + 90 + 120,
@@ -781,6 +805,7 @@ class Worker:
                 raise ProtocolInputError("Read the actual confirm result and assess its exact confirmation_sha256.")
             validation=self.check("validate",extraction=message["extraction"])
             if validation["errors"]: return {"assessed":False,"validation":validation}
+            self.check_category(message["extraction"])
             rationale=message["rationale"]
             require(isinstance(rationale,str) and 0<len(rationale.strip())<=20000,"Explain corrections, retained values and unresolved disagreements.")
             initial=self.state["draft"]["extraction"]

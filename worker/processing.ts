@@ -43,7 +43,15 @@ async function activeLock(env: Env) {
 }
 export async function protectBlindParse(request: Request, env: Env) {
   if (!request.headers.has("authorization")) return;
-  const path = new URL(request.url).pathname;
+  const url = new URL(request.url),
+    path = url.pathname;
+  // This mode exposes checkpoint existence only, never previous model readings.
+  if (
+    path === "/api/processing/readings" &&
+    request.method === "GET" &&
+    url.searchParams.has("checkpoint_token")
+  )
+    return;
   if (
     !path.startsWith("/api/documents") &&
     path !== "/api/processing/readings" &&
@@ -179,6 +187,32 @@ export async function processingRoute(
   if (path === "/api/processing/readings" && method === "GET") {
     const id = url.searchParams.get("document_id");
     requireThat(id && UUID.test(id), 400, "Choose a document.");
+    if (url.searchParams.has("checkpoint_token")) {
+      const checkpoint = url.searchParams.get("checkpoint_token");
+      requireThat(
+        checkpoint && UUID.test(checkpoint),
+        400,
+        "Choose a valid checkpoint.",
+      );
+      const status = await env.DB.prepare(
+        `SELECT
+        EXISTS(SELECT 1 FROM processing_drafts WHERE token=?1 AND document_id=?2) AS draft_saved,
+        EXISTS(SELECT 1 FROM processing_attempts WHERE token=?1 AND document_id=?2) AS attempt_saved,
+        EXISTS(SELECT 1 FROM processing_lock WHERE token=?1 AND document_id=?2 AND expires > unixepoch()*1000) AS claim_active`,
+      )
+        .bind(checkpoint, id)
+        .first<{
+          draft_saved: number;
+          attempt_saved: number;
+          claim_active: number;
+        }>();
+      requireThat(status, 500, "Checkpoint status unavailable.");
+      return json({
+        draft_saved: !!status.draft_saved,
+        attempt_saved: !!status.attempt_saved,
+        claim_active: !!status.claim_active,
+      });
+    }
     const rows = await env.DB.prepare(
       `SELECT d.revision,d.model,d.payload AS initial,d.created_at,c.payload AS confirmation,c.sha256 AS confirmation_sha256,a.payload AS updated
       FROM processing_drafts d LEFT JOIN processing_confirmations c ON c.token=d.token LEFT JOIN processing_attempts a ON a.token=d.token

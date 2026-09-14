@@ -114,6 +114,76 @@ async function category() {
 async function claim(stage = "small") {
   return (await ok("/api/processing/claim", { stage }, true)).claim;
 }
+it("exposes only token-scoped checkpoint status while preserving blind reading protection", async () => {
+  const c = await capture(),
+    lease = await claim();
+  const path = `/api/processing/readings?document_id=${c.id}`;
+  const statusPath = path + `&checkpoint_token=${lease.token}`;
+  expect((await req(path, undefined, true)).status).toBe(409);
+  expect(await ok(statusPath, undefined, true)).toEqual({
+    draft_saved: false,
+    attempt_saved: false,
+    claim_active: true,
+  });
+  for (const invalid of ["", "invalid"]) {
+    expect(
+      (await req(path + `&checkpoint_token=${invalid}`, undefined, true))
+        .status,
+    ).toBe(400);
+  }
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare(
+      "INSERT INTO processing_drafts(token,document_id,revision,model,payload,created_at) VALUES(?,?,1,'gpt-5.6-luna',?,datetime('now'))",
+    )
+    .bind(
+      lease.token,
+      c.id,
+      JSON.stringify({ private: "Initial reading must not be exposed" }),
+    )
+    .run();
+  expect(await ok(statusPath, undefined, true)).toEqual({
+    draft_saved: true,
+    attempt_saved: false,
+    claim_active: true,
+  });
+  await db
+    .prepare(
+      "INSERT INTO processing_attempts(token,document_id,revision,stage,model,payload,created_at) VALUES(?,?,1,'small','gpt-5.6-luna',?,datetime('now'))",
+    )
+    .bind(
+      lease.token,
+      c.id,
+      JSON.stringify({ private: "Final reading must not be exposed" }),
+    )
+    .run();
+  await db
+    .prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
+    .bind(lease.token)
+    .run();
+  expect(await ok(statusPath, undefined, true)).toEqual({
+    draft_saved: true,
+    attempt_saved: true,
+    claim_active: false,
+  });
+  expect(
+    await ok(
+      path + `&checkpoint_token=${crypto.randomUUID()}`,
+      undefined,
+      true,
+    ),
+  ).toEqual({ draft_saved: false, attempt_saved: false, claim_active: false });
+  expect(
+    await ok(
+      `/api/processing/readings?document_id=${crypto.randomUUID()}&checkpoint_token=${lease.token}`,
+      undefined,
+      true,
+    ),
+  ).toEqual({ draft_saved: false, attempt_saved: false, claim_active: false });
+  expect((await req(path, undefined, true)).status).toBe(409);
+  const unauthenticated = await mf.dispatchFetch(origin + statusPath);
+  expect(unauthenticated.status).toBe(401);
+});
 it("preserves category definition history and rejects machine edits and stale revisions", async () => {
   const id = await category();
   const previous = (await ok("/api/processing/categories")).find(
