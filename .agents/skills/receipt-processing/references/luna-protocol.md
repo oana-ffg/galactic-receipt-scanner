@@ -24,6 +24,14 @@ only the exact Python executable, `-X utf8 -B -I`, absolute `scripts/receipt_wor
 `--profile`, and the exact private profile path. The same prefix covers the optional
 validated `--resume RUN_ID`; duplicate profile overrides and option abbreviations are rejected. Never allow arbitrary Python or shells.
 
+The prepared launch uses an existing standing rule; do not request a new broader rule.
+Omit the shell tool's `prefix_rule` argument when that exact allow is already present.
+If the tool requires a prefix proposal, copy the full eight-element tuple from the
+standing rule, including the exact profile path after `--profile`. Never stop the prefix
+at `--profile` or omit any executable/argument. If the full standing rule is absent,
+report a setup blocker rather than proposing a substitute. An approval rejection still
+stops the batch; changing the proposed prefix does not authorize retrying a denied launch.
+
 Verify the source/destination belongs to the owner through authenticated Sites metadata
 or connection setup. Include that evidence and authorization for original-image reads,
 financial extraction, OCR, PDF uploads and inspection in the worker handoff. The profile
@@ -36,6 +44,8 @@ policy; never print the full metadata response, which can contain access credent
 Read only the prepared profile's non-secret `origin` and `repository` fields and match
 them to that verified site and checkout. Use an authorized read-only execution context
 if the protected profile requires the owner's identity; do not weaken its permissions.
+A denied profile read is not permission to skip this check and launch blindly. Complete
+the authorized read-only identity check or report the unavailable prerequisite before claim.
 The launch justification must name the exact verified origin and the requested scope:
 receipt reads and extraction/OCR/PDF writes back to that same private scanner. These
 checks establish destination identity; they do not grant missing user authorization.

@@ -22,9 +22,11 @@ ownership, reimbursement or bank allocation. In existing extraction `evidence` n
 write Category with supporting items and, below high certainty, Confidence with specific
 uncertain fields and reasons. Refresh reassessed notes without rewriting the initial reading.
 
-1. Claim the small stage. Fetch and hash-check the claimed originals and next available
-   image. Inspect detected crop pixels by default, with raw originals available when
-   uncertain. Confirm paper margins and save crop/rotation with the final page layout.
+1. Claim the small stage. Preview the first claimed page alone, inspect its crop and
+   record `observe` with its own identifying values before retrieving context or other
+   pages. Then inspect the next available image and possible matches through the bounded
+   protocol. Use raw originals only when uncertain. Confirm paper margins and save
+   crop/rotation with the final page layout.
    Continue only while pages belong together; leave the
    first unrelated lookahead in the pool. Preserve the claimed document as the retained
    target when grouping; include existing source documents in the atomic submit.
@@ -56,7 +58,7 @@ uncertain fields and reasons. Refresh reassessed notes without rewriting the ini
    Keep unresolved discrepancies explicit and confidence honest. PP's text confidence is
    not Astra confidence. `confirm` and `assess` are required even if no values change.
 7. Submit the reassessed parse and any grouping changes atomically. Exact retries are idempotent;
-   conflicts require a fresh read. Use client `pdf DOCUMENT_ID` to generate the searchable image PDF when date/vendor
+   conflicts require a fresh read. Use the protocol's `pdf` operation to generate the searchable image PDF when date/vendor
    are known, inspect it and save the PDF attestation. Return brief saved IDs, revisions,
    status, filename and concrete failures. A saved model-review/awaiting-page/broken
    result completes this worker's document: the coordinator continues the Luna queue.
