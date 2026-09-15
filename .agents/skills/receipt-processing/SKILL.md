@@ -138,6 +138,22 @@ Retain coordination until the requested count is verified complete, the queue is
 empty/busy, or an actual blocking failure occurs. Progress updates are not a final
 handoff: do not end the task while a worker is active or further assigned documents
 remain. A long-running batch alone is not a stop condition.
+
+Context pressure is not a stop or handoff condition either. Keep a compact private
+checkpoint in `.local/receipt-worker/batch-BATCH_ID-coordinator.json` with the batch ID,
+guard session ID, active Luna identity/session reference, requested count, verified
+completed run IDs, and next action. Do not include claim tokens, credentials, images,
+OCR or extraction payloads. Continue through automatic context compaction in the same
+Terra task; verify the same guard session is still active before dispatching another
+worker. Do not transfer coordination to the caller or ask it to finish the batch.
+If the actual guard/worker session is lost, follow the failure and reconciliation rules;
+the checkpoint does not authorize a replacement process or a new task to take ownership.
+
+Keep each handoff and result compact. Require the protocol's relevant neighbor checks,
+not a mechanical inspection of every previous/next image for every complete receipt.
+The preceding scan is mandatory for an orphan slip or fragment; forward inspection
+continues until a clear boundary or the end of available scans.
+
 Verify each compact result against its completed Python journal: no active/uncertain claim,
 no failure, intended ordered capture IDs equal the draft and saved document page IDs,
 and final PDF attested (or explicitly inapplicable). Count saved review dispositions as
