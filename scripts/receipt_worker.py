@@ -1084,7 +1084,14 @@ def main():
     parser.add_argument("--profile", required=True, action=Once)
     parser.add_argument("--resume", action=Once)
     args = parser.parse_args()
-    worker = Worker(json.loads(Path(args.profile).read_text(encoding="utf-8")), args.resume, args.profile)
+    try:
+        profile_text = Path(args.profile).read_text(encoding="utf-8")
+    except PermissionError:
+        print(json.dumps({"ok": False, "blocking": True, "error_code": "profile_access_denied",
+            "stage": "profile_read", "claim_started": False,
+            "error": "The prepared profile is unreadable in this execution context. Check the required launch permissions; this worker has not started."}), flush=True)
+        return 1
+    worker = Worker(json.loads(profile_text), args.resume, args.profile)
     disable_console_echo()
     print(json.dumps(worker.preflight()), flush=True)
     heartbeat = threading.Thread(target=worker.heartbeat, daemon=True)
@@ -1124,7 +1131,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except (InputError, ClientError, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         print(json.dumps({"ok": False, "blocking": True, "error": "Worker startup or persistence failed; inspect the private profile and journal."}), flush=True)
         sys.exit(1)

@@ -53,14 +53,20 @@ checks establish destination identity; they do not grant missing user authorizat
 Each fresh Luna handles one document and owns its helper session. The coordinator sends
 the assignment and awaits a compact outcome; it never forwards individual requests.
 Launch from Luna's own shell tool using the provided
-absolute paths and exact argument order, `tty: true` and `login: false`:
+absolute paths and exact argument order, `tty: true`, `login: false`, and
+`sandbox_permissions: "require_escalated"` in the shell tool call:
 
 ```text
 PYTHON -X utf8 -B -I WORKER --profile PROFILE
 ```
 
-On PowerShell, use `&` with each path quoted. Request the already-authorized escalated
-execution context for this exact command. The resulting session stays running. Keep its
+On PowerShell, use `&` with each path quoted. The existing allow rule authorizes the
+exact launch; it does not select the execution context when `sandbox_permissions` is
+omitted. Include that field explicitly. A `profile_access_denied` startup response
+means this process could not read the prepared profile and made no claim; report the
+launch configuration failure to the coordinator without weakening profile permissions.
+This does not override the stop-on-worker-failure or approval-rejection rules.
+The resulting authorized session stays running. Keep its
 session ID and use `write_stdin` for subsequent operations: `chars` is `JSON.stringify`
 of ONE request object followed by a newline. Do not wrap the launch in a changing script,
 pipe a script to Python, start another helper per operation, or put tokens in arguments.

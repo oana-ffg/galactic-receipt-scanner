@@ -10,6 +10,23 @@ import receipt_worker as module
 
 
 class WorkerSessionTests(unittest.TestCase):
+    def test_protected_profile_denial_is_specific_and_cannot_start_worker(self):
+        with patch.object(module.sys, 'argv', ['receipt_worker.py', '--profile', 'private-profile.json']), \
+             patch.object(module.Path, 'read_text', side_effect=PermissionError('secret-path-must-not-escape')), \
+             patch.object(module, 'Worker') as worker, \
+             patch.object(module.sys, 'stdout', io.StringIO()) as output, \
+             patch.object(module.sys, 'stderr', io.StringIO()) as errors:
+            self.assertEqual(module.main(), 1)
+        worker.assert_not_called()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['error_code'], 'profile_access_denied')
+        self.assertEqual(result['stage'], 'profile_read')
+        self.assertFalse(result['claim_started'])
+        self.assertTrue(result['blocking'])
+        self.assertNotIn('secret-path', output.getvalue())
+        self.assertNotIn('private-profile', output.getvalue())
+        self.assertEqual(errors.getvalue(), '')
+
     def run_session(self, phase, failed=None, result=None):
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory) / 'profile.json'
