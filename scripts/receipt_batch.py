@@ -10,6 +10,8 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from receipt_api import ClientError
+from receipt_batch_verify import verify_run
 from receipt_worker import InputError, Once, artifact_directory, replace_journal_file, require, write_new_file
 
 
@@ -101,11 +103,17 @@ def main():
     parser.add_argument("--owner", required=True, action=Once)
     parser.add_argument("--resolve", action=Once)
     parser.add_argument("--reason", action=Once)
+    parser.add_argument("--verify", action=Once)
     args = parser.parse_args()
     # The scheduled owner's standing approval covers processing, never recovery.
     require(not args.resolve or args.owner != "receipt-processing-scheduled",
             "Scheduled processing cannot resolve an unfinished batch; use owner-directed recovery.")
-    base = Path(__file__).resolve().parent.parent / ".local" / "receipt-worker"
+    repo = Path(__file__).resolve().parent.parent
+    if args.verify is not None:
+        require(args.resolve is None and args.reason is None, "Verification cannot request recovery.")
+        print(json.dumps(verify_run(repo, args.verify, args.owner)), flush=True)
+        return
+    base = repo / ".local" / "receipt-worker"
     try:
         guard = BatchGuard(base, args.owner)
     except BatchBusy:
@@ -138,6 +146,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (InputError, OSError, KeyError, TypeError, ValueError) as error:
+    except (InputError, ClientError, OSError, KeyError, TypeError, ValueError) as error:
         print(json.dumps(dict(blocking=True, error="Batch guard failed; preserve its state for inspection.", error_type=type(error).__name__)), flush=True)
         sys.exit(1)

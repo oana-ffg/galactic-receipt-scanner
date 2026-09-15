@@ -154,6 +154,14 @@ not a mechanical inspection of every previous/next image for every complete rece
 The preceding scan is mandatory for an orphan slip or fragment; forward inspection
 continues until a clear boundary or the end of available scans.
 
+Before counting each worker, run the documented Python `receipt_batch.py --verify
+RUN_ID` command and require `verified: true`. It checks actual journal paths, the live
+saved attempt and closed claim, page order/layout and PDF attestation. Store the
+returned verification-file reference in the coordinator checkpoint. Do not transcribe
+page IDs, hashes or sequence filenames into a hand-written verification summary;
+the generated proof contains those values. A missing file, command error or partial
+output is a failure to verify, never evidence of success.
+
 Verify each compact result against its completed Python journal: no active/uncertain claim,
 no failure, intended ordered capture IDs equal the draft and saved document page IDs,
 and final PDF attested (or explicitly inapplicable). Count saved review dispositions as

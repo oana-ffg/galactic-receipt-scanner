@@ -65,6 +65,24 @@ is claimed during preflight. All artifacts live under the repository's ignored
 
 ## Batch coordination
 
+After each worker completes, the Terra parent verifies it with a separate read-only
+command using the same prepared executable and exact batch-script prefix:
+
+```text
+PYTHON -X utf8 -B -I BATCH_SCRIPT --owner OWNER --verify RUN_ID
+```
+
+Here `BATCH_SCRIPT` is the checkout's absolute `scripts/receipt_batch.py` path.
+`OWNER` must exactly match the owner used to start the held guard. Scheduled runs
+use `receipt-processing-scheduled`, matching their narrow standing approval; manual
+batches retain their own task owner.
+This command does not acquire or replace the held guard and does not claim work.
+It reads `.local/processing-host.json`, validates the worker's existing destination,
+checks saved state and emits `verified: true` plus an immutable private verification
+file. Require exit zero and that complete result before counting the document; retain
+the generated file reference instead of manually copying page IDs or PDF hashes.
+
+
 The Terra parent uses the prepared Python executable to launch the checkout's absolute
 `scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`.
 This local script reads no credentials and holds one OS lock until the batch finishes.

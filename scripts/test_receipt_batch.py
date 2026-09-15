@@ -101,6 +101,24 @@ class BatchGuardTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
                 guard.assert_not_called()
 
+    def test_verification_never_opens_a_second_batch_guard(self):
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'receipt-processing-scheduled', '--verify', 'a' * 32,
+        ]), patch.object(module, 'BatchGuard') as guard, \
+             patch.object(module, 'verify_run', return_value=dict(verified=True)) as verify, \
+             patch.object(module.sys, 'stdout', io.StringIO()):
+            module.main()
+            verify.assert_called_once()
+            guard.assert_not_called()
+
+    def test_empty_verify_argument_cannot_start_a_batch(self):
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'receipt-processing-scheduled', '--verify', '',
+        ]), patch.object(module, 'BatchGuard') as guard:
+            with self.assertRaises(module.InputError):
+                module.main()
+            guard.assert_not_called()
+
     def test_lock_open_failure_is_not_busy(self):
         with patch.object(Path, 'open', side_effect=PermissionError('Synthetic denied directory')):
             with self.assertRaises(PermissionError):
