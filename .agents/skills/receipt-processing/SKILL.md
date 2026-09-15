@@ -30,10 +30,10 @@ descriptor is missing, follow existing connection setup and runtime discovery be
 asking for anything unavailable. Ask only about a concrete missing prerequisite or
 ambiguous destination, not the already-defined batch size or stage.
 
-If the caller is not Terra and managed delegation is available, delegate coordination
-to a Terra subagent with `fork_turns: none`, supplying this request, discovered paths
+If the caller is not Sol and managed delegation is available, delegate coordination
+to a Sol subagent with `fork_turns: none`, supplying this request, discovered paths
 and verified connection facts. Wait for its outcome in this task; do not ask the user
-to switch models or create another chat. Terra then uses fresh Luna workers below.
+to switch models or create another chat. Sol then uses fresh Luna workers below.
 Do not create a recurring schedule from a bare invocation. Respect actual permission
 failures and the stop-on-worker-failure rule; the defaults do not bypass approvals.
 
@@ -112,7 +112,7 @@ part of the current default. Preserve all original attempts.
 
 ## Coordinator
 
-Use **Terra (`gpt-5.6-terra`) for coordination**, including WebMCP authorization when
+Use **Sol (`gpt-5.6-sol`) for coordination**, including WebMCP authorization when
 needed. Use the delegation route above when the invoking task uses another model.
 The coordinator uses only connection status, public connection requests, encrypted
 responses, worker instructions and compact result metadata. Never load receipt images,
@@ -122,7 +122,7 @@ only the private client config path to workers, never credentials. Reuse a valid
 connection; if expired/revoked, obtain new owner-authorized access without silently
 falling back to a personal secret store.
 
-Before dispatching any Luna workers, the Terra parent holds a batch guard across the
+Before dispatching any Luna workers, the Sol parent holds a batch guard across the
 entire batch. See [batch coordination](references/luna-protocol.md#batch-coordination)
 for its exact local call. A busy guard ends this invocation without claiming work;
 a blocked/unclean prior batch requires owner-directed investigation. This also applies
@@ -144,7 +144,7 @@ checkpoint in `.local/receipt-worker/batch-BATCH_ID-coordinator.json` with the b
 guard session ID, active Luna identity/session reference, requested count, verified
 completed run IDs, and next action. Do not include claim tokens, credentials, images,
 OCR or extraction payloads. Continue through automatic context compaction in the same
-Terra task; verify the same guard session is still active before dispatching another
+Sol task; verify the same guard session is still active before dispatching another
 worker. Do not transfer coordination to the caller or ask it to finish the batch.
 If the actual guard/worker session is lost, follow the failure and reconciliation rules;
 the checkpoint does not authorize a replacement process or a new task to take ownership.

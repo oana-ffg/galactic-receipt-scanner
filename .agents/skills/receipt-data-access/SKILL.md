@@ -26,14 +26,14 @@ secret provider for optional personal integrations; browser password storage is 
 proof of shell credential access.
 A 401/403 is an access failure, not a missing original. Do not spoof identity headers.
 
-## Authorize a connection with Terra
+## Authorize a connection with Sol
 
 1. Resolve the Site's exact HTTPS origin. Create a new ignored private directory with
    `node scripts/receipt_connection.mjs init PRIVATE_DIRECTORY SITE_ORIGIN CONNECTION_NAME processing 1`.
    Its output contains only a public-key request and paths. The private key remains on
    this host. On Windows, keep the directory in the user's private profile and ensure
    other users cannot read it; POSIX private file modes are enforced by the helper/client.
-2. With Terra, open the normal `/agent-access` page in the owner's signed-in browser.
+2. With Sol, open the normal `/agent-access` page in the owner's signed-in browser.
    Invoke its `create_processing_connection` WebMCP tool with the returned `request`
    object unchanged. The normal owner UI also accepts `request.json` when site tools
    are unavailable. Authorization is a write operation and retains normal tool approvals.
@@ -41,7 +41,7 @@ A 401/403 is an access failure, not a missing original. Do not spoof identity he
    `node scripts/receipt_connection.mjs complete PRIVATE_DIRECTORY RESPONSE_FILE`.
    Only this helper decrypts it. It prints the client config path and expiry, never keys.
 4. Verify `status` and a hash-checked original through that config before claiming access
-   works. Terra should fetch verification facts only; Luna inspects the original pixels.
+   works. Sol should fetch verification facts only; Luna inspects the original pixels.
    Pass the config path to each fresh worker. All client commands accept `--config` before
    the subcommand. Original/PDF/OCR helpers launch locally and make no model API calls.
 5. The owner can list and revoke named connections on `/agent-access`. For scheduled jobs,
