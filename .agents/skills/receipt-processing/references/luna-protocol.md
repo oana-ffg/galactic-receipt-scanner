@@ -215,6 +215,15 @@ not a guessed crop. Changing a preview after `draft` is rejected.
 
 ## Grouping and duplicates
 
+Read the initial `context` and inspect the first available `next_images` crop even
+when the claimed page looks complete: that neighbor can be a payment slip or retake.
+Continue through matching sections until the first unrelated/ambiguous scan, which
+must be inspected and explicitly excluded. If all images in a returned lookahead
+window are retained, request `context` with `filters.after_capture` set to its last ID
+to check beyond it; stop when the next boundary is inspected or the response has no
+next images. Python rejects a draft that skips this check before any immutable save.
+Do not use an uninspected neighbor's metadata as proof that it is unrelated.
+
 Before every draft, explicitly decide the document's complete ordered page list.
 Include `page_review: {"capture_ids": [...], "excluded": [...]}`. `capture_ids` lists
 all pages intended for this PDF in order. For every other capture opened through

@@ -68,6 +68,7 @@ class FakeScanner:
         self.pdf_calls = 0
         self.lost_claim = False
         self.categories = []
+        self.next_images = []
         self.readings = {"draft_saved": False, "attempt_saved": False, "claim_active": False}
 
     def get(self, path):
@@ -79,9 +80,8 @@ class FakeScanner:
         if path.startswith("/api/processing/readings?"):
             return deepcopy(self.readings)
         if path.startswith("/api/processing/context?"):
-            source = self.documents[OTHER]["pages"][0]
-            return dict(document=deepcopy(self.documents[DID]), candidates=[],
-                next_images=[dict(id=OTHER, sha256=source["sha256"], document_id=OTHER)],
+            return dict(document=deepcopy(self.documents[DID]), candidates=[deepcopy(self.documents[OTHER])],
+                next_images=[] if "after_capture=" in path else deepcopy(self.next_images),
                 rejected_associations=[], candidates_truncated=False)
         if path.startswith("/api/documents/"):
             return {"document": deepcopy(self.documents[path.rsplit("/", 1)[1]])}
@@ -239,6 +239,42 @@ class WorkerTests(unittest.TestCase):
         self.send("prepare", capture_ids=list(ids))
         confirmation = self.send("confirm")
         self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
+
+    def test_available_neighbor_must_be_inspected_even_if_not_selected(self):
+        self.fake.next_images = [dict(id=OTHER, sha256=self.fake.documents[OTHER]["pages"][0]["sha256"], document_id=OTHER)]
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        request = dict(op="draft", extraction=extraction(), page_review=dict(capture_ids=[DID], excluded=[]))
+        self.assertIn("Inspect the next available", self.worker.handle(request)["input_error"])
+        self.assertNotIn("draft", self.worker.state)
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        # Advancing the query does not erase the obligation to inspect the first neighbor.
+        self.send("context", filters=dict(after_capture=OTHER))
+        self.assertIn("Inspect the next available", self.worker.handle(request)["input_error"])
+        self.send("previews", capture_ids=[OTHER])
+        request["page_review"]["excluded"] = [dict(capture_id=OTHER, reason="Different transaction on a complete receipt.")]
+        self.assertTrue(self.worker.handle(request)["result"]["drafted"])
+
+    def test_retained_lookahead_requires_checking_the_following_boundary(self):
+        self.fake.next_images = [dict(id=OTHER, sha256=self.fake.documents[OTHER]["pages"][0]["sha256"], document_id=OTHER)]
+        self.claimed()
+        self.send("previews", capture_ids=[DID, OTHER])
+        request = dict(op="draft", extraction=extraction(), page_review=dict(capture_ids=[DID, OTHER], excluded=[]),
+                       grouping=dict(donor_ids=[OTHER], capture_ids=[DID, OTHER], evidence="Complementary synthetic sections."))
+        self.assertIn("All lookahead pages are retained", self.worker.handle(request)["input_error"])
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.send("context", filters=dict(after_capture=OTHER))
+        self.assertEqual(self.worker.handle(request)["result"]["pages"], 2)
+
+    def test_draft_requires_initial_context_even_when_there_are_no_neighbors(self):
+        self.send("claim", viewer_checked=True)
+        self.send("previews", capture_ids=[DID])
+        request=dict(op="draft", extraction=extraction(), page_review=dict(capture_ids=[DID], excluded=[]))
+        self.assertIn("Read the initial context", self.worker.handle(request)["input_error"])
+        self.send("context", filters=dict(date="2026-01-01"))
+        self.assertIn("Read the initial context", self.worker.handle(request)["input_error"])
+        self.send("context")
+        self.assertTrue(self.worker.handle(request)["result"]["drafted"])
 
     def test_missing_grouping_cannot_freeze_recognized_continuation(self):
         self.claimed()

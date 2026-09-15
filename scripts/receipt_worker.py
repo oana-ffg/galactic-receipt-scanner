@@ -394,6 +394,20 @@ class Worker:
                 and selected == retained,
                 "page_review.capture_ids must exactly match the ordered pages to save. "
                 "To retain adjacent pages, supply grouping with their donor_ids and ordered capture_ids before draft.")
+        windows = self.state.get("lookahead_windows")
+        require(windows and windows[0]["after_capture"] is None,
+                "Read the initial context before drafting so adjacent scans can be checked.")
+        for window in windows:
+            ids = window["capture_ids"]
+            boundary = next((cid for cid in ids if cid not in retained), None)
+            if boundary is not None:
+                require(boundary in self.state["sources"],
+                        "Inspect the next available scan before draft; it may be a continuation, payment slip or duplicate. "
+                        "Retain it with grouping or explain its exclusion in page_review.")
+            elif ids:
+                require(any(later["after_capture"] == ids[-1] for later in windows),
+                        "All lookahead pages are retained. Request context with filters.after_capture set to the last "
+                        "lookahead ID and inspect the next boundary before freezing the document.")
         excluded = review["excluded"]
         require(isinstance(excluded, list) and len(excluded) <= 100,
                 "page_review.excluded must list each inspected page left outside this document.")
@@ -707,7 +721,9 @@ class Worker:
             filters = message.get("filters", {})
             require(isinstance(filters, dict) and set(filters) <= {"after_capture", "date", "total_minor", "currency"}, "Unknown receipt context filter.")
             if "after_capture" in filters:
-                require(filters["after_capture"] in self.state.get("lookahead_ids", []), "Continue only from the previous returned lookahead.")
+                frontier = self.state.get("lookahead_ids", [])
+                require(set(filters) == {"after_capture"} and frontier and filters["after_capture"] == frontier[-1],
+                        "Advance chronological context only from the last returned lookahead ID, without candidate-search filters.")
             if "date" in filters:
                 require(isinstance(filters["date"], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", filters["date"]), "Use a source-supported YYYY-MM-DD date.")
                 try:
@@ -731,7 +747,17 @@ class Worker:
                     self.state["capture_ids"].append(capture["id"])
                 if capture.get("document_id") and capture["document_id"] not in self.state["document_ids"]:
                     self.state["document_ids"].append(capture["document_id"])
-            self.state["lookahead_ids"] = [c["id"] for c in context.get("next_images", [])]
+            if not filters or set(filters) == {"after_capture"}:
+                ids = [c["id"] for c in context.get("next_images", [])]
+                verify(len(ids) == len(set(ids)), "Chronological context repeated a capture; preserve this run for inspection.")
+                windows = self.state.setdefault("lookahead_windows", [])
+                if "after_capture" in filters:
+                    seen = {cid for window in windows for cid in window["capture_ids"]}
+                    verify(not seen.intersection(ids), "Chronological context did not advance; preserve this run for inspection.")
+                window = {"after_capture": filters.get("after_capture"), "capture_ids": ids}
+                if window not in windows:
+                    windows.append(window)
+                self.state["lookahead_ids"] = ids
             self.record("context", context)
             return clean(context)
         if op in {"originals", "prepare"}:
