@@ -154,6 +154,11 @@ not a mechanical inspection of every previous/next image for every complete rece
 The preceding scan is mandatory for an orphan slip or fragment; forward inspection
 continues until a clear boundary or the end of available scans.
 
+Each Luna first inspects the claimed page alone and records the protocol's `observe`
+reading before viewing neighbors. This keeps the claimed scan's amount/card identity
+separate from candidate receipts. Same merchant and date do not make different payment
+amounts or card transactions duplicates. Preserve uncertain matches for review.
+
 Before counting each worker, run the documented Python `receipt_batch.py --verify
 RUN_ID` command and require `verified: true`. It checks actual journal paths, the live
 saved attempt and closed claim, page order/layout and PDF attestation. Store the

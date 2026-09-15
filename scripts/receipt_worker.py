@@ -2,7 +2,7 @@
 """One-document receipt worker protocol. No arbitrary URLs, paths or shell commands."""
 import argparse
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import errno
 import hashlib
 import json
@@ -27,7 +27,7 @@ WINDOWS_REPLACE_ATTEMPTS = 7
 WINDOWS_TRANSIENT_REPLACE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EBUSY}
 WINDOWS_TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
 OPERATIONS = {
-    "status", "claim", "context", "document", "originals", "previews", "draft", "prepare", "confirm", "assess", "categories",
+    "status", "claim", "observe", "context", "document", "originals", "previews", "draft", "prepare", "confirm", "assess", "categories",
     "category", "validate", "submit", "pdf", "render", "attest", "renew", "release",
     "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit",
 }
@@ -359,6 +359,7 @@ class Worker:
             original = self.get_document(duplicate)
             require(not original["mergedInto"] and not original["duplicateOf"], "Duplicate target must be retained.")
             require({p["captureId"] for p in original["pages"]} <= self.state["sources"].keys(), "Verify both documents before marking a duplicate.")
+            self.check_claimed_observation((original.get("processing") or {}).get("extraction") or {}, allow_unknown=True)
             target["duplicateOf"] = duplicate
         target["pages"] = [deepcopy(pages[cid]) for cid in selected]
         for donor in donors:
@@ -421,6 +422,57 @@ class Worker:
                 "Account for every inspected non-retained page exactly once in page_review.excluded. "
                 "A known continuation belongs in grouping; it is not a missing future page.")
 
+    def observe_claimed(self, message):
+        require(self.state["phase"] == "claimed" and not self.state.get("draft_saved"),
+                "Record the claimed scan before its immutable draft.")
+        require(set(message) <= {"op", "observation", "correction_reason"}, "Unknown observation option.")
+        value = message.get("observation")
+        require(isinstance(value, dict) and set(value) == {
+            "capture_id", "type", "vendor", "receipt_date", "currency", "total_minor", "card_last_four"},
+            "Observe the claimed capture ID, type, vendor, date, currency, total and card suffix; use null for unreadable fields.")
+        claimed = self.state["claim"]["document"]["pages"][0]["captureId"]
+        require(value["capture_id"] == claimed and claimed in self.state.get("layouts", {}),
+                "Open the first claimed scan's crop by itself before recording its reading.")
+        require(value["type"] in {"receipt", "payment-slip", "fragment", "other"}, "Invalid observed scan type.")
+        require(value["vendor"] is None or isinstance(value["vendor"], str) and 0 < len(value["vendor"].strip()) <= 300,
+                "Observed vendor must be text or null.")
+        require(value["receipt_date"] is None or isinstance(value["receipt_date"], str)
+                and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value["receipt_date"]), "Observed date must be ISO format or null.")
+        if value["receipt_date"] is not None:
+            try:
+                date.fromisoformat(value["receipt_date"])
+            except ValueError:
+                raise InputError("Observed date must be a real calendar date.") from None
+        require(value["currency"] is None or isinstance(value["currency"], str)
+                and re.fullmatch(r"[A-Z]{3}", value["currency"]), "Observed currency must be three letters or null.")
+        require(value["total_minor"] is None or type(value["total_minor"]) is int and abs(value["total_minor"]) <= 10**11,
+                "Observed total must be integer minor units or null.")
+        require(value["card_last_four"] is None or isinstance(value["card_last_four"], str)
+                and re.fullmatch(r"[0-9]{4}", value["card_last_four"]), "Observed card suffix must be four digits or null.")
+        previous = self.state.get("claimed_observation")
+        if previous is not None:
+            reason = message.get("correction_reason")
+            require(isinstance(reason, str) and 0 < len(reason.strip()) <= 2000,
+                    "Reinspect the claimed crop and explain a correction; never copy a neighbor's values.")
+        self.state["claimed_observation"] = deepcopy(value)
+        self.record("claimed-observation", {"observation": value, "previous": previous,
+                                           "correction_reason": message.get("correction_reason")})
+        return {"observed": True, "capture_id": claimed}
+
+    def check_claimed_observation(self, extraction, *, allow_unknown=False):
+        value = self.state.get("claimed_observation")
+        require(value is not None, "Observe the claimed scan independently before draft.")
+        if value["type"] == "payment-slip":
+            total = extraction.get("charged_total_minor")
+            if total is None:
+                total = extraction.get("total_minor")
+            for printed, proposed, label in [(value["total_minor"], total, "payment amount"),
+                    (value["currency"], extraction.get("currency"), "currency"),
+                    (value["card_last_four"], extraction.get("card_last_four"), "card suffix")]:
+                require(printed is None or (allow_unknown and proposed is None) or printed == proposed,
+                        "Draft " + label + " contradicts the claimed payment slip. Recheck source identity before grouping; "
+                        "a neighboring transaction cannot replace this scan's visible values.")
+
     def draft(self, message):
         require(self.state["phase"] == "claimed", "Freeze one Luna draft before OCR preparation.")
         require(set(message) <= {"op", "extraction", "grouping", "category_name", "page_review"}, "Unknown draft option.")
@@ -428,6 +480,7 @@ class Worker:
         validation = self.check("validate", extraction=extraction)
         if validation["errors"]:
             return {"validation": validation, "drafted": False}
+        self.check_claimed_observation(extraction)
         self.check_category(extraction, message.get("category_name"))
         claim = self.active()
         documents = self.grouping(message["grouping"], extraction) if message.get("grouping") else [deepcopy(self.get_document(claim["document"]["id"]))]
@@ -721,7 +774,12 @@ class Worker:
             result = self.post("renew", {"token": claim["token"]})
             claim["expires"] = result["expires"]
             return result
+        if op == "observe":
+            self.renew_if_needed()
+            return self.observe_claimed(message)
         if op == "context":
+            require(self.state.get("claimed_observation"),
+                    "Preview and observe the first claimed scan alone before retrieving neighboring transactions.")
             filters = message.get("filters", {})
             require(isinstance(filters, dict) and set(filters) <= {"after_capture", "date", "total_minor", "currency"}, "Unknown receipt context filter.")
             if "after_capture" in filters:
@@ -769,6 +827,9 @@ class Worker:
         if op in {"originals", "prepare"}:
             ids = message.get("capture_ids", [])
             require(isinstance(ids, list) and 0 < len(ids) <= 100 and set(ids) <= set(self.state["capture_ids"]), "Use capture IDs discovered in the claimed context.")
+            if op == "originals" and not self.state.get("claimed_observation"):
+                claimed = self.state["claim"]["document"]["pages"][0]["captureId"]
+                require(ids == [claimed], "Inspect only the first claimed scan before observing it.")
             values = []
             for cid in dict.fromkeys(ids):
                 self.renew_if_needed()
@@ -797,6 +858,9 @@ class Worker:
             require(set(message) <= {"op", "capture_ids", "layouts"}, "Unknown preview option.")
             require(isinstance(ids, list) and 0 < len(ids) <= 100 and len(ids) == len(set(ids))
                     and set(ids) <= set(self.state["capture_ids"]), "Use unique capture IDs discovered in the claimed context.")
+            if not self.state.get("claimed_observation"):
+                claimed = self.state["claim"]["document"]["pages"][0]["captureId"]
+                require(ids == [claimed], "Preview the first claimed scan alone, then observe it before viewing other pages.")
             require(isinstance(overrides, dict) and set(overrides) <= set(ids), "Layout overrides must belong to requested pages.")
             values = []
             self.state.setdefault("layouts", {})

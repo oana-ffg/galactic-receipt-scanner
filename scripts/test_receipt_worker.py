@@ -231,6 +231,9 @@ class WorkerTests(unittest.TestCase):
 
     def claimed(self):
         self.send("claim", viewer_checked=True)
+        self.send("previews", capture_ids=[DID])
+        self.send("observe", observation=dict(capture_id=DID, type="receipt", vendor="Synthetic",
+            receipt_date=None, currency=None, total_minor=None, card_last_four=None))
         self.send("context")
 
     def prepared(self, ids=(DID,), *, grouping=None, value=None, layouts=None):
@@ -240,6 +243,100 @@ class WorkerTests(unittest.TestCase):
         self.send("prepare", capture_ids=list(ids))
         confirmation = self.send("confirm")
         self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
+
+    def test_claimed_scan_is_observed_before_neighbor_context(self):
+        self.send("claim", viewer_checked=True)
+        result = self.worker.handle(dict(op="context"))
+        self.assertIn("observe", result["input_error"])
+        self.assertFalse(any(path.startswith("/api/processing/context?") for method, path in self.fake.calls))
+        self.send("previews", capture_ids=[DID])
+        self.send("observe", observation=dict(capture_id=DID, type="payment-slip", vendor="Synthetic",
+            receipt_date="2026-01-01", currency="DKK", total_minor=1250, card_last_four="1234"))
+        self.send("context")
+
+    def test_neighbor_values_cannot_replace_claimed_payment_slip(self):
+        self.claimed()
+        self.send("observe", observation=dict(capture_id=DID, type="payment-slip", vendor="Synthetic",
+            receipt_date="2026-01-01", currency="DKK", total_minor=1250, card_last_four="1234"),
+            correction_reason="Synthetic claimed page is a payment slip.")
+        value = extraction()
+        value.update(total_minor=4500, charged_total_minor=4500, currency="DKK", card_last_four="1234")
+        result = self.worker.handle(dict(op="draft", extraction=value,
+            page_review=dict(capture_ids=[DID], excluded=[])))
+        self.assertIn("contradicts", result["input_error"])
+        self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        value.update(total_minor=1250, charged_total_minor=1250)
+        self.assertTrue(self.send("draft", extraction=value)["drafted"])
+
+    def test_claimed_observation_cannot_use_foreign_capture_or_silent_correction(self):
+        self.claimed()
+        value = dict(self.worker.state["claimed_observation"], capture_id=OTHER)
+        self.assertIn("claimed scan", self.worker.handle(dict(op="observe", observation=value))["input_error"])
+        value["capture_id"] = DID
+        self.assertIn("explain a correction", self.worker.handle(dict(op="observe", observation=value))["input_error"])
+
+    def test_observation_persists_and_known_fields_cannot_disappear(self):
+        self.claimed()
+        previous = deepcopy(self.worker.state["claimed_observation"])
+        observation = dict(capture_id=DID, type="payment-slip", vendor="Synthetic", receipt_date="2026-01-01",
+                           currency="DKK", total_minor=1250, card_last_four="1234")
+        self.send("observe", observation=observation, correction_reason="Synthetic independent slip observation.")
+        self.assertEqual(json.loads((self.worker.work / "state.json").read_text())["claimed_observation"], observation)
+        records = sorted(self.worker.work.glob("*-claimed-observation.json"))
+        self.assertEqual(len(records), 2)
+        first, corrected = [json.loads(path.read_text()) for path in records]
+        self.assertEqual(first["observation"], previous)
+        self.assertIsNone(first["previous"])
+        self.assertEqual(corrected["previous"], previous)
+        self.assertEqual(corrected["observation"], observation)
+        self.assertEqual(corrected["correction_reason"], "Synthetic independent slip observation.")
+        for field in ["charged_total_minor", "currency", "card_last_four"]:
+            value = extraction()
+            value.update(total_minor=None, charged_total_minor=1250, currency="DKK", card_last_four="1234")
+            value[field] = None
+            with self.assertRaises(module.InputError):
+                self.worker.check_claimed_observation(value)
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+
+    def test_before_observation_raw_access_is_limited_to_claimed_scan(self):
+        self.send("claim", viewer_checked=True)
+        self.worker.discover(self.fake.documents[OTHER])
+        before = len(self.fake.calls)
+        result = self.worker.handle(dict(op="originals", capture_ids=[DID, OTHER]))
+        self.assertIn("first claimed scan", result["input_error"])
+        self.assertEqual(len(self.fake.calls), before)
+
+    def test_before_observation_previews_are_limited_to_claimed_scan(self):
+        self.send("claim", viewer_checked=True)
+        self.worker.discover(self.fake.documents[OTHER])
+        before = len(self.fake.calls)
+        result = self.worker.handle(dict(op="previews", capture_ids=[DID, OTHER]))
+        self.assertIn("first claimed scan", result["input_error"])
+        self.assertEqual(len(self.fake.calls), before)
+
+    def test_payment_slip_cannot_duplicate_known_different_transaction(self):
+        self.claimed()
+        self.send("observe", observation=dict(capture_id=DID, type="payment-slip", vendor="Synthetic",
+            receipt_date="2026-01-01", currency="DKK", total_minor=1250, card_last_four="1234"),
+            correction_reason="Synthetic independent slip reading.")
+        self.send("previews", capture_ids=[DID, OTHER])
+        value = extraction()
+        value.update(total_minor=1250, charged_total_minor=1250, currency="DKK", card_last_four="1234")
+        retained = dict(value, total_minor=4500, charged_total_minor=4500)
+        self.fake.documents[OTHER]["processing"] = dict(extraction=retained)
+        result = self.worker.handle(dict(op="draft", extraction=value,
+            grouping=dict(duplicate_of=OTHER, evidence="Synthetic incorrect duplicate proposal."),
+            page_review=dict(capture_ids=[DID], excluded=[dict(capture_id=OTHER, reason="Synthetic duplicate target.")])))
+        self.assertIn("contradicts", result["input_error"])
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.assertIsNone(self.fake.documents[DID]["duplicateOf"])
+
+    def test_observation_rejects_invalid_calendar_date(self):
+        self.claimed()
+        value = dict(self.worker.state["claimed_observation"], receipt_date="2026-02-30")
+        self.assertIn("real calendar date", self.worker.handle(dict(op="observe", observation=value,
+            correction_reason="Synthetic date validation."))["input_error"])
 
     def test_orphan_slip_checks_previous_receipt_before_freezing(self):
         self.fake.previous_images = [dict(id=OTHER, sha256=self.fake.documents[OTHER]["pages"][0]["sha256"], document_id=OTHER)]
@@ -296,6 +393,8 @@ class WorkerTests(unittest.TestCase):
     def test_draft_requires_initial_context_even_when_there_are_no_neighbors(self):
         self.send("claim", viewer_checked=True)
         self.send("previews", capture_ids=[DID])
+        self.send("observe", observation=dict(capture_id=DID, type="receipt", vendor="Synthetic",
+            receipt_date=None, currency=None, total_minor=None, card_last_four=None))
         request=dict(op="draft", extraction=extraction(), page_review=dict(capture_ids=[DID], excluded=[]))
         self.assertIn("Read the initial context", self.worker.handle(request)["input_error"])
         self.send("context", filters=dict(date="2026-01-01"))
@@ -569,7 +668,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.fake.documents[DID]["pages"][0]["rotation"], 90)
 
     def test_rotation_only_override_cannot_authorize_undetected_raw_layout(self):
-        self.claimed()
+        self.send("claim", viewer_checked=True)
         original_image_pdf = self.fake.image_pdf
 
         def undetected(pages, directory):
