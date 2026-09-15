@@ -76,6 +76,31 @@ class BatchGuardTests(unittest.TestCase):
         state = json.loads((self.base / 'batch-state.json').read_text())
         self.assertEqual(state['phase'], 'blocked')
 
+    def test_scheduled_owner_cannot_resolve_before_opening_guard(self):
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+            '--resolve', 'a' * 32, '--reason', 'Automatic retry',
+        ]), patch.object(module, 'BatchGuard') as guard:
+            with self.assertRaisesRegex(module.InputError, 'Scheduled processing cannot resolve'):
+                module.main()
+            guard.assert_not_called()
+
+    def test_repeated_guard_arguments_are_rejected_before_opening_guard(self):
+        for extra in [
+            ['--owner', 'manual-recovery'],
+            ['--resolve', 'b' * 32],
+            ['--reason', 'Changed reason'],
+        ]:
+            with self.subTest(extra=extra), patch.object(module.sys, 'argv', [
+                'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+                '--resolve', 'a' * 32, '--reason', 'Automatic retry', *extra,
+            ]), patch.object(module, 'BatchGuard') as guard, \
+                 patch.object(module.sys, 'stderr', io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    module.main()
+                self.assertEqual(error.exception.code, 2)
+                guard.assert_not_called()
+
     def test_lock_open_failure_is_not_busy(self):
         with patch.object(Path, 'open', side_effect=PermissionError('Synthetic denied directory')):
             with self.assertRaises(PermissionError):

@@ -10,7 +10,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from receipt_worker import InputError, artifact_directory, replace_journal_file, require, write_new_file
+from receipt_worker import InputError, Once, artifact_directory, replace_journal_file, require, write_new_file
 
 
 class BatchBusy(Exception):
@@ -98,10 +98,13 @@ class BatchGuard:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--owner", required=True)
-    parser.add_argument("--resolve")
-    parser.add_argument("--reason")
+    parser.add_argument("--owner", required=True, action=Once)
+    parser.add_argument("--resolve", action=Once)
+    parser.add_argument("--reason", action=Once)
     args = parser.parse_args()
+    # The scheduled owner's standing approval covers processing, never recovery.
+    require(not args.resolve or args.owner != "receipt-processing-scheduled",
+            "Scheduled processing cannot resolve an unfinished batch; use owner-directed recovery.")
     base = Path(__file__).resolve().parent.parent / ".local" / "receipt-worker"
     try:
         guard = BatchGuard(base, args.owner)

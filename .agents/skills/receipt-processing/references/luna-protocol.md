@@ -126,6 +126,13 @@ legacy runbook; do not copy them into this helper's stdin.
   with `extraction.category_id: null`. The Python script resolves the registry ID before
   saving. Do not transcribe UUIDs when selecting by name. It rejects unknown/ambiguous
   names and conflicting non-null IDs without guessing or creating categories.
+- For every merchant family, read category descriptions as well as names. The registry
+  is not a closed list. If no category fits a known merchant family and visible purchase,
+  use `category` with a precise descriptive `name` and `description` first. Then copy its
+  returned exact `name` into `category_name` and keep `extraction.category_id: null` in
+  `draft`/`assess`. Otherwise leave the category unresolved with an explanation.
+  Do not force a specialist hardware purchase into a mixed-goods discount-retailer
+  category just because the shop offers discount prices; preserve existing definitions.
 - An attestation includes `pdf_sha256`, copied from the actual final `pdf`/`render`
   result's `sha256` after inspecting every returned page. Never use the draft PDF hash.
 - An `input_error` is a correctable request mistake: use its explanation to fix the
