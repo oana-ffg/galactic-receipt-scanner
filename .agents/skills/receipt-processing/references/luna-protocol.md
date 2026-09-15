@@ -63,6 +63,41 @@ The expected image is a small green square. This verifies local viewer access; n
 is claimed during preflight. All artifacts live under the repository's ignored
 `.local/receipt-worker/RUN_ID`, using inherited Windows workspace permissions.
 
+## Batch coordination
+
+The Terra parent uses the prepared Python executable to launch the checkout's absolute
+`scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`.
+This local script reads no credentials and holds one OS lock until the batch finishes.
+It is separate from Luna's `receipt_worker.py` process. Request the authorized execution
+context for the fixed script where needed; do not weaken permissions or bypass rejection.
+
+Wait for `acquired: true` before dispatch. `busy: true` means another batch owns the lock:
+finish this invocation without claiming, replacing, or interrupting it. `blocking: true`
+means investigate the preserved prior state; do not spawn a worker. In each fresh Luna
+handoff, state that the Terra parent already holds the batch guard; Luna must not acquire
+a second one. Send `{"op":"status"}` to the SAME guard session and require `phase: active`
+before each new worker. If that session died, stop; do not restart the guard or continue
+under an unverified lock. Keep every worker sequential and await its actual completion.
+
+After the assigned count is verified, or a worker confirms the queue is empty/busy,
+send `{"op":"finish"}` and require `ok: true, phase: complete` before the parent final.
+The script refuses to finish over a failed or unfinished worker journal. On an actual
+worker failure send `{"op":"block","reason":"non-sensitive failure summary"}` and stop.
+Unexpected process exit leaves an active/blocked record that prevents automatic restart.
+Never declare an incomplete batch complete merely to release the guard.
+
+For an authorized recurring task, an actual blocking failure also pauses that task's
+automation using the app's automation tool and reports the affected run/stage. Review
+flags on successfully saved receipts do not pause processing. Do not autonomously
+clear the hold or repeatedly retry a failed batch every scheduled interval.
+
+After explicit owner direction, investigate the failed batch and reconcile any worker
+first. Resolve only that exact batch with the same script plus `--resolve BATCH_ID`
+and `--reason` containing a concrete resolution explanation, keeping `--owner` as the
+recovery task ID. This appends a resolution event, checks the worker is closed, and
+permits a future run without changing historical events. A still-running guard remains
+busy; do not kill it or rewrite `batch-state.json` to bypass the lock.
+
 ## One-document sequence
 
 Apply [the supermarket rules](supermarket-classification.md) only to supermarket receipts.
@@ -77,7 +112,7 @@ the **Parse** section of `processing-api.md` for the extraction fields. Its rout
 tokens and raw checkpoint bodies are for the client's implementation and Astra's
 legacy runbook; do not copy them into this helper's stdin.
 
-- A draft has only `op: "draft"`, `extraction`, and optionally `grouping` and `category_name`.
+- A draft requires `op: "draft"`, `extraction`, and `page_review`; it also accepts `grouping` and `category_name`.
   Never add `model`, `images`, `pixel_pdf_sha256`, `token` or `documents` to it. The
   helper creates and pins those values from the already inspected previews.
 - A document read needs both `op: "document"` and `document_id`, copied from the
@@ -131,7 +166,7 @@ direct launch as a configuration failure rather than starting a second process.
 | `originals`  | `capture_ids` from claim/context/documents                                                                               | Optional raw-image paths when a crop, grouping or source completeness needs checking; not the default visual input.                                                                                                                                                               |
 | `categories` | None                                                                                                                     | Existing category registry.                                                                                                                                                                                                                                                       |
 | `category`   | `name`, `description`                                                                                                    | Create/reuse a needed private category. Do not invent registry IDs.                                                                                                                                                                                                               |
-| `draft`      | `extraction`; optional `grouping` below                                                                                  | After crop review, freeze Luna's independent reading, grouping and layout. Returns ordered pixel-only PDF page renders; inspect EVERY page before OCR. The initial extraction/layout/image hashes are saved immutably in the database; no OCR or Qwen runs here.                  |
+| `draft`      | `extraction`, `page_review`; optional `grouping` below                                                                                  | After crop review, freeze Luna's independent reading, grouping and layout. Returns ordered pixel-only PDF page renders; inspect EVERY page before OCR. The initial extraction/layout/image hashes are saved immutably in the database; no OCR or Qwen runs here.                  |
 | `prepare`    | `capture_ids` for all and only the draft's retained pages                                                                | Only after `draft`: source-hash/crop/rotation-matched PP artifacts plus text/polygons/confidence for comparison and invisible PDF search text. No model download or installation.                                                                                                 |
 | `validate`   | `extraction` using the complete [API contract](processing-api.md#parse)                                                  | Actual shared schema/arithmetic checks. Correct validation errors locally; never change printed digits to force balance.                                                                                                                                                          |
 | `confirm`    | None                                                                                                                     | Pin the exact saved PP artifacts for all frozen pages and return server OCR/math comparisons. This performs no Qwen inference.                                                                                                                                                    |
@@ -180,6 +215,34 @@ not a guessed crop. Changing a preview after `draft` is rejected.
 
 ## Grouping and duplicates
 
+Before every draft, explicitly decide the document's complete ordered page list.
+Include `page_review: {"capture_ids": [...], "excluded": [...]}`. `capture_ids` lists
+all pages intended for this PDF in order. For every other capture opened through
+`previews` or `originals`, `excluded` contains `{"capture_id": ..., "reason": ...}`
+explaining the visual decision (unrelated transaction, redundant view, or an ambiguous
+association). Use an empty array when none were excluded. Python checks this against
+the actual grouping and rejects mismatches before saving; correct the request in the
+same session. This review is required even for a single-page document.
+
+**Viewing the next images does not attach them.** When a viewed continuation or matching
+slip belongs to this document, read its `document` and send `grouping.donor_ids`, ordered
+`grouping.capture_ids`, and visual `grouping.evidence` in the same draft. These capture
+IDs must exactly match `page_review.capture_ids`. "One document per Luna" means one
+whole receipt and its supporting pages, not one capture. Do not call an available,
+recognized continuation "awaiting pages" just because it began as a separate record.
+
+After draft succeeds, compare the returned `layouts` capture IDs and order, `pages`,
+and `page_review` with that decision, then open every returned render. A discrepancy
+is a workflow failure needing preserved-state recovery, not an incomplete receipt to
+submit. Do not discard dates/totals or rewrite the explanation to accommodate a page
+you accidentally omitted. Truly missing or ambiguous sources still permit a saved
+review/awaiting-pages outcome and the next document.
+
+For duplicate marking, `page_review.capture_ids` still lists the claimed document's
+unchanged original pages. List inspected pages of the retained duplicate target in
+`excluded`, explaining that they stay in that retained document, outside this PDF.
+
+
 For a visual merge/reordering, `draft.grouping` contains `donor_ids`, ordered
 `capture_ids` and a nonempty `evidence` string (at most 2000 characters). IDs must come
 from this run's context/document responses. Read donor documents and inspect every
@@ -201,6 +264,13 @@ insufficient. Only the claimed document can receive this duplicate link.
 Luna cannot detach pages or grant human approval; Astra handles detach after its checkpoint.
 
 ## Failures and recovery
+
+A failed worker remains a hold even after its known claim was safely released; a new
+process cannot silently start another document. After explicit owner direction and
+repair, resume that exact run and send `reconcile` with a nonempty `rationale` for a
+released failure. Python records the resolution alongside the original failure, then
+clears the hold. This never clears uncertain writes or edits historical requests.
+Scheduled runs must not acknowledge their own failure to keep processing.
 
 `input_error` means the requested operation was rejected locally; correct the stated
 input without repeating a remote write. A `validate`/`draft` response with validation

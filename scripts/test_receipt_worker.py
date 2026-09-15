@@ -219,6 +219,9 @@ class WorkerTests(unittest.TestCase):
         return worker
 
     def send(self, op, **fields):
+        if op == "draft" and "page_review" not in fields:
+            ids = fields.get("grouping", {}).get("capture_ids", [DID])
+            fields["page_review"] = dict(capture_ids=ids, excluded=[])
         result = self.worker.handle({"op": op, **fields})
         self.assertTrue(result["ok"], result)
         self.assertNotIn(TOKEN, json.dumps(result))
@@ -237,6 +240,57 @@ class WorkerTests(unittest.TestCase):
         confirmation = self.send("confirm")
         self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
 
+    def test_missing_grouping_cannot_freeze_recognized_continuation(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID, OTHER])
+        request = dict(op="draft", extraction=extraction(),
+                       page_review=dict(capture_ids=[DID, OTHER], excluded=[]))
+        result = self.worker.handle(request)
+        self.assertIn("supply grouping", result["input_error"])
+        self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertNotIn("draft", self.worker.state)
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        request["grouping"] = dict(donor_ids=[OTHER], capture_ids=[DID, OTHER],
+                                   evidence="Consecutive complementary sections of a synthetic receipt.")
+        result = self.worker.handle(request)["result"]
+        self.assertEqual(result["pages"], 2)
+        self.assertEqual(result["page_review"], request["page_review"])
+
+    def test_page_review_accounts_for_exclusions_and_order_before_saving(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID, OTHER])
+        bad = [None, {}, {"capture_ids": [DID], "excluded": []},
+               {"capture_ids": [OTHER, DID], "excluded": []},
+               {"capture_ids": [DID], "excluded": [{"capture_id": OTHER, "reason": " "}]},
+               {"capture_ids": [DID], "excluded": [{"capture_id": FOREIGN, "reason": "Unrelated"}]},
+               {"capture_ids": [DID], "excluded": [{"capture_id": OTHER, "reason": "Unrelated"}] * 2}]
+        for review in bad:
+            result = self.worker.handle(dict(op="draft", extraction=extraction(), page_review=review))
+            self.assertIn("input_error", result)
+            self.assertNotIn("draft", self.worker.state)
+            self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        review = dict(capture_ids=[DID], excluded=[dict(capture_id=OTHER,
+                      reason="Different printed transaction reference on a complete unrelated receipt.")])
+        result = self.send("draft", extraction=extraction(), page_review=review)
+        self.assertEqual(result["pages"], 1)
+        self.assertEqual(self.worker.state["draft"]["page_review"], review)
+
+    def test_failed_released_worker_blocks_fresh_automatic_run(self):
+        self.claimed()
+        self.fake.raw[DID] = b"wrong bytes"
+        self.assertTrue(self.worker.handle(dict(op="originals", capture_ids=[DID]))["blocking"])
+        self.send("release")
+        self.worker.lock.close()
+        with self.assertRaisesRegex(module.InputError, "Previous worker failed"):
+            self.make_worker()
+        self.worker = self.make_worker(self.worker.state["run_id"])
+        self.assertIn("input_error", self.worker.handle(dict(op="reconcile")))
+        self.send("reconcile", rationale="Owner requested recovery after the synthetic input was repaired.")
+        self.assertTrue(list(self.worker.work.glob("*-failure-resolution.json")))
+        self.worker.lock.close()
+        self.worker = self.make_worker()
+        self.assertEqual(self.worker.state["phase"], "ready")
+
     def test_checkpoint_lost_acknowledgements_replay_exactly_without_new_qwen(self):
         self.claimed()
         self.send("previews", capture_ids=[DID])
@@ -252,7 +306,7 @@ class WorkerTests(unittest.TestCase):
                     if len(writes)==1: raise ClientError("Synthetic lost acknowledgement")
                 return result
             with patch.object(self.fake,"request",side_effect=lose_once):
-                message={"op":"draft","extraction":extraction()} if endpoint=="draft" else {"op":"confirm"}
+                message={"op":"draft","page_review":{"capture_ids":[DID],"excluded":[]},"extraction":extraction()} if endpoint=="draft" else {"op":"confirm"}
                 failed=self.worker.handle(message)
                 self.assertTrue(failed["blocking"])
                 self.assertEqual(self.worker.state["phase"],endpoint+"-uncertain")
@@ -302,14 +356,14 @@ class WorkerTests(unittest.TestCase):
         self.send("previews", capture_ids=[DID])
         self.fake.categories = [{"id": OTHER, "name": "Synthetic supplies"}]
         for name in ("synthetic supplies", "Synthetic", "", 3):
-            result = self.worker.handle({"op": "draft", "extraction": extraction(), "category_name": name})
+            result = self.worker.handle({"op": "draft", "page_review": {"capture_ids": [DID], "excluded": []}, "extraction": extraction(), "category_name": name})
             self.assertIn("input_error", result)
             self.assertNotIn("draft", self.worker.state)
         value = extraction()
         value["category_id"] = OTHER
-        self.assertIn("input_error", self.worker.handle({"op": "draft", "extraction": value, "category_name": "Synthetic supplies"}))
+        self.assertIn("input_error", self.worker.handle({"op": "draft", "page_review": {"capture_ids": [DID], "excluded": []}, "extraction": value, "category_name": "Synthetic supplies"}))
         self.fake.categories.append({"id": FOREIGN, "name": "Synthetic supplies"})
-        self.assertIn("input_error", self.worker.handle({"op": "draft", "extraction": extraction(), "category_name": "Synthetic supplies"}))
+        self.assertIn("input_error", self.worker.handle({"op": "draft", "page_review": {"capture_ids": [DID], "excluded": []}, "extraction": extraction(), "category_name": "Synthetic supplies"}))
         self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
 
     def test_unknown_category_is_correctable_before_draft_is_frozen(self):
@@ -317,7 +371,7 @@ class WorkerTests(unittest.TestCase):
         self.send("previews", capture_ids=[DID])
         value = extraction()
         value["category_id"] = FOREIGN
-        result = self.worker.handle({"op": "draft", "extraction": value})
+        result = self.worker.handle({"op": "draft", "page_review": {"capture_ids": [DID], "excluded": []}, "extraction": value})
         self.assertIn("Unknown purchase category", result["input_error"])
         self.assertEqual(self.worker.state["phase"], "claimed")
         self.assertNotIn("draft", self.worker.state)
@@ -346,7 +400,7 @@ class WorkerTests(unittest.TestCase):
         self.claimed()
         self.send("previews", capture_ids=[DID])
         with patch.object(self.fake, "request", side_effect=ClientError("Synthetic rejected draft")):
-            self.assertTrue(self.worker.handle({"op": "draft", "extraction": extraction()})["blocking"])
+            self.assertTrue(self.worker.handle({"op": "draft", "page_review": {"capture_ids": [DID], "excluded": []}, "extraction": extraction()})["blocking"])
         run_id = self.worker.state["run_id"]
         self.worker.lock.close()
         self.worker = self.make_worker(run_id)
@@ -559,7 +613,7 @@ class WorkerTests(unittest.TestCase):
         self.fake.documents[OTHER]["handwriting"] = "present"
         self.claimed()
         self.send("previews", capture_ids=[DID, OTHER])
-        result = self.worker.handle({"op": "draft", "extraction": extraction(),
+        result = self.worker.handle({"op": "draft", "page_review": {"capture_ids": [DID, OTHER], "excluded": []}, "extraction": extraction(),
             "grouping": {"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
                          "evidence": "Synthetic grouping contradicts recorded handwriting."}})
         self.assertIn("input_error", result)

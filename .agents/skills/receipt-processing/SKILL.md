@@ -73,7 +73,9 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
    association is uncertain; do not feed full camera photos by default. Preserve original
    bytes and record the chosen crop/rotation against their source hashes.
 2. Finalize the ordered document layout and save Luna's first extraction plus an
-   **image-only PDF before ordinary OCR**. Inspect all retained pages. This fixes which
+   **image-only PDF before ordinary OCR**. Supply the required `page_review` and explicit
+   `grouping` for donor pages per the Luna protocol; merely viewing them does not attach
+   them. Inspect all retained pages and verify the returned page IDs/order. This fixes which
    pixels belong to the document before later comparison; a single first-page preview
    is insufficient for a multipage document.
 3. Persist the initial Luna reading and frozen layout in the database. Prepare the
@@ -120,6 +122,13 @@ only the private client config path to workers, never credentials. Reuse a valid
 connection; if expired/revoked, obtain new owner-authorized access without silently
 falling back to a personal secret store.
 
+Before dispatching any Luna workers, the Terra parent holds a batch guard across the
+entire batch. See [batch coordination](references/luna-protocol.md#batch-coordination)
+for its exact local call. A busy guard ends this invocation without claiming work;
+a blocked/unclean prior batch requires owner-directed investigation. This also applies
+to manual batches, so a scheduled task cannot slip between their workers. The guard
+does not replace each worker's claim or final verification.
+
 Spawn managed workers **one at a time**, each with `fork_turns: none`: use
 `gpt-5.6-luna` for the hourly small stage and `gpt-6-astra` for the daily large stage.
 Follow the [worker runbook](references/worker-runbook.md) for the coordinator handoff: provide
@@ -129,6 +138,11 @@ Retain coordination until the requested count is verified complete, the queue is
 empty/busy, or an actual blocking failure occurs. Progress updates are not a final
 handoff: do not end the task while a worker is active or further assigned documents
 remain. A long-running batch alone is not a stop condition.
+Verify each compact result against its completed Python journal: no active/uncertain claim,
+no failure, intended ordered capture IDs equal the draft and saved document page IDs,
+and final PDF attested (or explicitly inapplicable). Count saved review dispositions as
+completed work, but report retained pages separately from worker count; fragments are
+not proof of distinct complete receipts. Do not count a worker's narrative alone.
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
 

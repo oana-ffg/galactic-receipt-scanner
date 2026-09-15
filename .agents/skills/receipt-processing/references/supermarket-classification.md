@@ -2,7 +2,10 @@
 
 Apply these four categories only to supermarket receipts. Reuse matching private registry
 IDs and descriptions. Animal supply, vet, fuel and discount-retailer categories keep their
-existing definitions.
+existing definitions. Choose the merchant family before choosing a basket category.
+A pet shop remains Animal supply even if it sells a personal snack; describe that item
+in the notes without applying a Supermarket category. If the vendor/family is unknown,
+leave the category unresolved rather than treating every cat-food fragment as a supermarket.
 
 Distinguish explicit cat products (cat food, treats, litter), plausible shelter supplies
 (kitchen rolls, trash bags, cleaning supplies, plain meat), and clearly personal items.

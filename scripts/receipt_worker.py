@@ -61,7 +61,7 @@ def validate_request(message):
     required = {
         "document": {"document_id": str},
         "validate": {"extraction": dict},
-        "draft": {"extraction": dict},
+        "draft": {"extraction": dict, "page_review": dict},
         "assess": {"extraction": dict, "rationale": str, "confirmation_sha256": str},
         "attest": {"pdf_sha256": str},
     }.get(message["op"], {})
@@ -201,6 +201,7 @@ class Worker:
             previous_id = json.loads(pointer.read_text(encoding="utf-8"))["run_id"]
             require(re.fullmatch(r"[0-9a-f]{32}", previous_id), "Invalid previous run reference.")
             previous = json.loads((base / previous_id / "state.json").read_text(encoding="utf-8"))
+            require(not previous.get("failed"), "Previous worker failed; owner-directed reconciliation is required before another document.")
             require(previous["phase"] in {"ready", "complete", "released", "empty"}, "Previous worker has unfinished state; resume that run before claiming another document.")
         self.resumed = resume is not None
         run_id = resume if self.resumed else uuid.uuid4().hex
@@ -385,9 +386,30 @@ class Worker:
                 and sum(len(d["pages"]) for d in [target] + donors) == len(pages), "Grouping did not preserve every source page exactly once.")
         return [target] + donors
 
+    def check_page_review(self, review, retained):
+        require(isinstance(review, dict) and set(review) == {"capture_ids", "excluded"},
+                "Draft requires page_review with ordered capture_ids and excluded pages with reasons.")
+        selected = review["capture_ids"]
+        require(isinstance(selected, list) and all(isinstance(cid, str) for cid in selected)
+                and selected == retained,
+                "page_review.capture_ids must exactly match the ordered pages to save. "
+                "To retain adjacent pages, supply grouping with their donor_ids and ordered capture_ids before draft.")
+        excluded = review["excluded"]
+        require(isinstance(excluded, list) and len(excluded) <= 100,
+                "page_review.excluded must list each inspected page left outside this document.")
+        for item in excluded:
+            require(isinstance(item, dict) and set(item) == {"capture_id", "reason"}
+                    and isinstance(item["capture_id"], str)
+                    and isinstance(item["reason"], str) and 0 < len(item["reason"].strip()) <= 2000,
+                    "Each excluded page needs capture_id and a concrete visual reason for keeping it separate.")
+        ids = [item["capture_id"] for item in excluded]
+        require(len(ids) == len(set(ids)) and set(ids) == set(self.state["sources"]) - set(retained),
+                "Account for every inspected non-retained page exactly once in page_review.excluded. "
+                "A known continuation belongs in grouping; it is not a missing future page.")
+
     def draft(self, message):
         require(self.state["phase"] == "claimed", "Freeze one Luna draft before OCR preparation.")
-        require(set(message) <= {"op", "extraction", "grouping", "category_name"}, "Unknown draft option.")
+        require(set(message) <= {"op", "extraction", "grouping", "category_name", "page_review"}, "Unknown draft option.")
         extraction = deepcopy(message["extraction"])
         validation = self.check("validate", extraction=extraction)
         if validation["errors"]:
@@ -398,6 +420,7 @@ class Worker:
         target = next(d for d in documents if d["id"] == claim["document"]["id"])
         layouts = self.state.get("layouts", {})
         retained = [p["captureId"] for p in target["pages"]]
+        self.check_page_review(message.get("page_review"), retained)
         require(set(retained) <= layouts.keys(), "Preview every retained page before freezing the Luna draft.")
         for document in documents:
             for page in document["pages"]:
@@ -413,6 +436,7 @@ class Worker:
                "Frozen pixel layout differs from the reviewed previews.")
         rendered = self.render_file(pixel_pdf["path"], pixel_pdf["pages"], 300, "draft-page")
         frozen = {"extraction": extraction, "grouping": deepcopy(message.get("grouping")),
+                  "page_review": deepcopy(message["page_review"]),
                   "target": deepcopy(target),
                   "documents": documents,
                   "layouts": [layouts[cid] for cid in retained], "pixel_pdf": pixel_pdf, "rendered": rendered, "images": receipt_qwen.describe_images(rendered)}
@@ -459,7 +483,8 @@ class Worker:
             self.state["draft_saved"] = True
             frozen = self.state["draft"]
             result = {"drafted":True, "document_id":frozen["target"]["id"], "pages":len(frozen["layouts"]),
-                "pixel_pdf_sha256":frozen["pixel_pdf"]["sha256"], "rendered":frozen["rendered"], "layouts":frozen["layouts"]}
+                "pixel_pdf_sha256":frozen["pixel_pdf"]["sha256"], "rendered":frozen["rendered"], "layouts":frozen["layouts"],
+                "page_review":frozen.get("page_review")}
         else:
             self.state["confirmation"] = response
             result = response
@@ -596,6 +621,14 @@ class Worker:
             return self.restore_pdf()
         if op == "reconcile":
             require(self.resumed, "Reconciliation requires an explicitly resumed run.")
+            if self.state["phase"] == "released" and self.state.get("failed"):
+                rationale = message.get("rationale")
+                require(isinstance(rationale, str) and 0 < len(rationale.strip()) <= 2000,
+                        "Owner-directed recovery of a released failure requires a rationale.")
+                self.record("failure-resolution", {"failure": deepcopy(self.state["failed"]), "rationale": rationale})
+                self.state.pop("failed", None)
+                self.checkpoint()
+                return self.summary()
             if self.state["phase"] == "draft-uncertain":
                 claim = self.state["claim"]
                 require(time.time() * 1000 >= claim["expires"] + 210000,
