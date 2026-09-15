@@ -1041,7 +1041,11 @@ def main():
             with worker.mutex:
                 result = worker.handle(message)
             print(json.dumps(result, ensure_ascii=False), flush=True)
-            if isinstance(message, dict) and message.get("op") == "quit":
+            if (isinstance(message, dict) and message.get("op") == "quit"
+                    or worker.state["phase"] in {"complete", "empty"}
+                    and not worker.state.get("failed") and result.get("ok") is not False):
+                # A finished one-document process must release its lock without
+                # relying on the model to remember a separate cleanup request.
                 break
     finally:
         worker.stop_heartbeat.set()

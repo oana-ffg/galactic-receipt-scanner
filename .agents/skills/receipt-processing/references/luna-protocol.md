@@ -55,6 +55,12 @@ session ID and use `write_stdin` for subsequent operations: `chars` is `JSON.str
 of ONE request object followed by a newline. Do not wrap the launch in a changing script,
 pipe a script to Python, start another helper per operation, or put tokens in arguments.
 
+After a successful `complete` or `empty` result, Python exits automatically and
+releases its worker lock. Wait for that same shell session to finish with exit code
+zero before reporting completion; do not send `quit` to an already exited process.
+Use `quit` for early closure or an older still-running helper. A terminal result alone
+does not authorize starting the next worker while its process is still running.
+
 The helper prints one ready response after checking access, prepared dependencies and
 the renderer, reassessment API and prepared PP runtime/models. Require the ready response
 to advertise `confirmation_provider: ppocr`; a legacy Qwen profile needs setup before
@@ -213,7 +219,7 @@ do not transcribe handwriting. Follow the processing skill's grouping and accura
 
 The normal sequence is `claim` → `context`/`previews` → visual grouping and initial
 extraction → `draft` → inspect all draft pages → `prepare` → `confirm` → reassess from
-pixels → `assess` → `submit` → `pdf` → inspect all final pages → `attest` → `quit`.
+pixels → `assess` → `submit` → `pdf` → inspect all final pages → `attest` → process exit.
 Use categories/context as needed before freezing. Do not request an external math/OCR
 check before saving the initial draft; `draft` already validates its schema internally.
 
