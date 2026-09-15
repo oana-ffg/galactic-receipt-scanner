@@ -87,7 +87,7 @@ is claimed during preflight. All artifacts live under the repository's ignored
 
 ## Batch coordination
 
-After each worker completes, the Sol parent verifies it with a separate read-only
+After each worker completes, the coordinator verifies it with a separate read-only
 command using the same prepared executable and exact batch-script prefix:
 
 ```text
@@ -105,7 +105,7 @@ file. Require exit zero and that complete result before counting the document; r
 the generated file reference instead of manually copying page IDs or PDF hashes.
 
 
-The Sol parent uses the prepared Python executable to launch the checkout's absolute
+The coordinator uses the prepared Python executable to launch the checkout's absolute
 `scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`.
 This local script reads no credentials and holds one OS lock until the batch finishes.
 It is separate from Luna's `receipt_worker.py` process. Request the authorized execution
@@ -114,7 +114,7 @@ context for the fixed script where needed; do not weaken permissions or bypass r
 Wait for `acquired: true` before dispatch. `busy: true` means another batch owns the lock:
 finish this invocation without claiming, replacing, or interrupting it. `blocking: true`
 means investigate the preserved prior state; do not spawn a worker. In each fresh Luna
-handoff, state that the Sol parent already holds the batch guard; Luna must not acquire
+handoff, state that the coordinator already holds the batch guard; Luna must not acquire
 a second one. Send `{"op":"status"}` to the SAME guard session and require `phase: active`
 before each new worker. If that session died, stop; do not restart the guard or continue
 under an unverified lock. Keep every worker sequential and await its actual completion.
