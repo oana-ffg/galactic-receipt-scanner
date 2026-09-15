@@ -111,6 +111,14 @@ This local script reads no credentials and holds one OS lock until the batch fin
 It is separate from Luna's `receipt_worker.py` process. Request the authorized execution
 context for the fixed script where needed; do not weaken permissions or bypass rejection.
 
+When launching either the batch guard or a Luna Python process through `functions.exec`,
+return the full `exec_command` result with `text(result)`, not just
+`text(result.output)`. The live `session_id` is a separate field; output text alone
+loses the handle needed for `write_stdin`. Record the guard's returned session ID in
+its coordinator checkpoint immediately, before dispatching a worker. Retain each
+worker's session ID in that worker's context. If the outer tool returns a running
+cell ID, resume that same cell with `functions.wait` to obtain the launch result.
+Confirm a live session ID and the expected ready/acquired response before proceeding.
 Wait for `acquired: true` before dispatch. `busy: true` means another batch owns the lock:
 finish this invocation without claiming, replacing, or interrupting it. `blocking: true`
 means investigate the preserved prior state; do not spawn a worker. In each fresh Luna
