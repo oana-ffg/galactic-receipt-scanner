@@ -435,6 +435,10 @@ class Worker:
         layouts = self.state.get("layouts", {})
         retained = [p["captureId"] for p in target["pages"]]
         self.check_page_review(message.get("page_review"), retained)
+        previous = self.state.get("previous_ids", [])
+        if previous and (extraction["type"] == "payment-slip" or extraction["completeness"] == "fragment"):
+            require(previous[0] in self.state["sources"],
+                    "Inspect the immediately preceding scan for a payment slip or fragment; it may hold the main receipt or earlier section.")
         require(set(retained) <= layouts.keys(), "Preview every retained page before freezing the Luna draft.")
         for document in documents:
             for page in document["pages"]:
@@ -739,7 +743,7 @@ class Worker:
             self.discover(context["document"])
             for candidate in context.get("candidates", []):
                 self.discover(candidate.get("document", candidate))
-            for capture in context.get("next_images", []):
+            for capture in context.get("previous_images", []) + context.get("next_images", []):
                 expected = self.state["capture_hashes"].get(capture["id"])
                 verify(expected in (None, capture["sha256"]), "Lookahead source hash changed.")
                 self.state["capture_hashes"][capture["id"]] = capture["sha256"]
@@ -747,6 +751,8 @@ class Worker:
                     self.state["capture_ids"].append(capture["id"])
                 if capture.get("document_id") and capture["document_id"] not in self.state["document_ids"]:
                     self.state["document_ids"].append(capture["document_id"])
+            if not filters:
+                self.state["previous_ids"] = [c["id"] for c in context.get("previous_images", [])]
             if not filters or set(filters) == {"after_capture"}:
                 ids = [c["id"] for c in context.get("next_images", [])]
                 verify(len(ids) == len(set(ids)), "Chronological context repeated a capture; preserve this run for inspection.")

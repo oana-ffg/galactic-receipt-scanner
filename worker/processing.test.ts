@@ -775,3 +775,55 @@ it("pins PDF attestation to current pages/hash and approves humans only at the f
     (await ok(`/api/documents/${c.id}`)).document.processing.has_human_review,
   ).toBe(false);
 });
+
+it("finds an undated exact-amount receipt for a slip and exposes chronological predecessors", async () => {
+  const receipt = await capture();
+  const first = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: first.token,
+      model: "gpt-5.6-luna",
+      extraction: { ...extraction(), receipt_date: null, currency: null },
+    },
+    true,
+  );
+  const slip = await capture();
+  const second = await claim();
+  expect(second.document.id).toBe(slip.id);
+  const base = `/api/processing/context?token=${second.token}`;
+  const context = await ok(
+    base + "&date=2026-01-02&total_minor=1234&currency=DKK",
+    undefined,
+    true,
+  );
+  expect(context.candidates.map((d: any) => d.id)).toContain(receipt.id);
+  expect(context.previous_images.map((c: any) => c.id)).toEqual([receipt.id]);
+  expect(context.next_images).toEqual([]);
+  const different = await ok(
+    base + "&date=2026-01-02&total_minor=1235&currency=DKK",
+    undefined,
+    true,
+  );
+  expect(different.candidates).toEqual([]);
+});
+
+it("never treats a known conflicting currency or distant known date as a missing-field candidate", async () => {
+  const receipt = await capture();
+  const first = await claim();
+  await ok(
+    "/api/processing/submit",
+    { token: first.token, model: "gpt-5.6-luna", extraction: extraction() },
+    true,
+  );
+  await capture();
+  const second = await claim();
+  const base = `/api/processing/context?token=${second.token}&total_minor=1234`;
+  for (const filter of [
+    "&date=2026-01-02&currency=EUR",
+    "&date=2026-02-01&currency=DKK",
+  ]) {
+    const context = await ok(base + filter, undefined, true);
+    expect(context.candidates.map((d: any) => d.id)).not.toContain(receipt.id);
+  }
+});

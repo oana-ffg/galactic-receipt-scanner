@@ -69,6 +69,7 @@ class FakeScanner:
         self.lost_claim = False
         self.categories = []
         self.next_images = []
+        self.previous_images = []
         self.readings = {"draft_saved": False, "attempt_saved": False, "claim_active": False}
 
     def get(self, path):
@@ -80,7 +81,7 @@ class FakeScanner:
         if path.startswith("/api/processing/readings?"):
             return deepcopy(self.readings)
         if path.startswith("/api/processing/context?"):
-            return dict(document=deepcopy(self.documents[DID]), candidates=[deepcopy(self.documents[OTHER])],
+            return dict(document=deepcopy(self.documents[DID]), candidates=[deepcopy(self.documents[OTHER])], previous_images=deepcopy(self.previous_images),
                 next_images=[] if "after_capture=" in path else deepcopy(self.next_images),
                 rejected_associations=[], candidates_truncated=False)
         if path.startswith("/api/documents/"):
@@ -239,6 +240,32 @@ class WorkerTests(unittest.TestCase):
         self.send("prepare", capture_ids=list(ids))
         confirmation = self.send("confirm")
         self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=deepcopy(self.worker.state["draft"]["extraction"]), rationale="Synthetic reassessment retains the pixel-supported initial reading.")
+
+    def test_orphan_slip_checks_previous_receipt_before_freezing(self):
+        self.fake.previous_images = [dict(id=OTHER, sha256=self.fake.documents[OTHER]["pages"][0]["sha256"], document_id=OTHER)]
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        value=extraction()
+        value["type"]="payment-slip"
+        request=dict(op="draft", extraction=value, page_review=dict(capture_ids=[DID], excluded=[]))
+        self.assertIn("preceding scan", self.worker.handle(request)["input_error"])
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.send("previews", capture_ids=[OTHER])
+        request["page_review"]["excluded"]=[dict(capture_id=OTHER, reason="Different transaction on the preceding receipt.")]
+        self.assertTrue(self.worker.handle(request)["result"]["drafted"])
+
+    def test_fragment_checks_previous_receipt_before_freezing(self):
+        self.fake.previous_images = [dict(id=OTHER, sha256=self.fake.documents[OTHER]["pages"][0]["sha256"], document_id=OTHER)]
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        value=extraction()
+        value["completeness"]="fragment"
+        request=dict(op="draft", extraction=value, page_review=dict(capture_ids=[DID], excluded=[]))
+        self.assertIn("preceding scan", self.worker.handle(request)["input_error"])
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.send("previews", capture_ids=[OTHER])
+        request["page_review"]["excluded"]=[dict(capture_id=OTHER, reason="Different transaction on the preceding receipt.")]
+        self.assertTrue(self.worker.handle(request)["result"]["drafted"])
 
     def test_available_neighbor_must_be_inspected_even_if_not_selected(self):
         self.fake.next_images = [dict(id=OTHER, sha256=self.fake.documents[OTHER]["pages"][0]["sha256"], document_id=OTHER)]

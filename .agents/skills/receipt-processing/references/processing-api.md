@@ -28,7 +28,7 @@ uploads handled by the client. Never print claim tokens; build query strings in 
 | POST /api/processing/claim | `{stage:"small"}` or `{stage:"large"}` | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Stop on null. |
 | POST /api/processing/renew | `{token}` | `{expires}`, epoch milliseconds. |
 | POST /api/processing/release | `{token}` | `{released:true}`. Only for an active claim being abandoned. |
-| GET /api/processing/context?token=â€¦ | Optional after_capture, date, total_minor, currency | `{document,ocr_comparison,independent_parse,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`. |
+| GET /api/processing/context?token=â€¦ | Optional after_capture, date, total_minor, currency | `{document,ocr_comparison,independent_parse,previous_images,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`. |
 | GET /api/processing/categories | none | Array of `{id,name,description}`, **no categories wrapper**. |
 | POST /api/processing/categories | `{name,description}` | `{id,name,description}`. Name 1â€“150 characters; description 1â€“2000. |
 | POST /api/processing/draft | `{token,model,extraction}`; small stage also requires frozen `documents,pixel_pdf_sha256,images` | `{saved:true}`; immutable independent checkpoint. |
@@ -42,11 +42,20 @@ One renewable global lease prevents overlapping model work and expires after 20 
 A token assigns ONE document. Claim pages use `captureId`; context `next_images` use
 `id`, with `sha256`, `created_at` and `document_id`. Fetching lookahead does not attach it.
 
-Context returns two next images; continue with `after_capture`. Historical candidates use
-source-read date, total_minor and currency with a Â±3-day and max(2%,100 minor units) window.
-This searches previously extracted documents, not every unprocessed scan. Empty results
-do not establish no match. At most 50 candidates are returned; respect truncation and
-rejected associations, and confirm attachments visually.
+Context returns two next images in chronological order; continue with `after_capture`.
+It also returns `previous_images`: up to two current captures before the earliest page
+of the claimed document, nearest first, with the same metadata as `next_images`.
+These previous images do not change when advancing the lookahead cursor. Inspect the
+nearest previous crop for an orphan payment slip or fragment before freezing a draft.
+
+Historical candidates use source-read date, total_minor and currency. When a candidate
+has both date and currency, matching uses a ±3-day and max(2%,100 minor units) window.
+A candidate missing date or currency requires an exact amount match; any known date
+must still be within three days and any known currency must agree. Missing fields can
+be resolved by a slip, but never imply a match by themselves. This searches previously
+extracted documents, not every unprocessed scan. Empty results do not establish no
+match. At most 50 candidates are returned; respect truncation and rejected associations,
+and confirm attachments visually.
 
 Astra must save its draft BEFORE reading context, documents or prior OCR. Before that,
 use originals and categories only. Context then exposes the independent parse, Luna's

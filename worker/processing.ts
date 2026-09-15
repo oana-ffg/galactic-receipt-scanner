@@ -949,6 +949,18 @@ export async function processingRoute(
           ),
         );
     requireThat(last >= 0, 400, "Unknown page cursor.");
+    const first = Math.min(
+      ...doc.pages
+        .map((p) => ordered.findIndex((c) => c.id === p.captureId))
+        .filter((i) => i >= 0),
+    );
+    const neighbor = (c: (typeof ordered)[number]) => ({
+      id: c.id,
+      sha256: c.sha256,
+      created_at: c.created_at,
+      document_id: docs.find((d) => d.pages.some((p) => p.captureId === c.id))
+        ?.id,
+    });
     const date = url.searchParams.get("date"),
       total = url.searchParams.get("total_minor"),
       currency = url.searchParams.get("currency");
@@ -958,19 +970,24 @@ export async function processingRoute(
         !date ||
         total === null ||
         !currency ||
-        !e?.receipt_date ||
+        !e ||
         e.total_minor === null ||
-        e.currency !== currency ||
+        (e.currency !== null && e.currency !== currency) ||
         d.mergedInto ||
         d.duplicateOf ||
         d.id === doc.id
       )
         return false;
+      // A slip can supply a receipt's hidden date/currency. Keep exact-amount
+      // candidates with those missing fields available for visual association.
+      const amountDelta = Math.abs(e.total_minor - Number(total));
       return (
-        Math.abs(Date.parse(e.receipt_date) - Date.parse(date)) <=
-          3 * 86400000 &&
-        Math.abs(e.total_minor - Number(total)) <=
-          Math.max(100, Math.abs(Number(total)) * 0.02)
+        (!e.receipt_date ||
+          Math.abs(Date.parse(e.receipt_date) - Date.parse(date)) <=
+            3 * 86400000) &&
+        (e.receipt_date && e.currency
+          ? amountDelta <= Math.max(100, Math.abs(Number(total)) * 0.02)
+          : amountDelta === 0)
       );
     });
     const relevantIds = [doc.id, ...matches.slice(0, 50).map((d) => d.id)];
@@ -990,13 +1007,11 @@ export async function processingRoute(
           ? JSON.parse(lock.draft).extraction
           : JSON.parse(lock.draft)
         : null,
-      next_images: ordered.slice(last + 1, last + 3).map((c) => ({
-        id: c.id,
-        sha256: c.sha256,
-        created_at: c.created_at,
-        document_id: docs.find((d) => d.pages.some((p) => p.captureId === c.id))
-          ?.id,
-      })),
+      previous_images: ordered
+        .slice(Math.max(0, first - 2), first)
+        .reverse()
+        .map(neighbor),
+      next_images: ordered.slice(last + 1, last + 3).map(neighbor),
       candidates: matches.slice(0, 50).map((d) => ({
         id: d.id,
         revision: d.revision,

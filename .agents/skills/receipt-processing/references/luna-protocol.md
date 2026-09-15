@@ -224,6 +224,15 @@ to check beyond it; stop when the next boundary is inspected or the response has
 next images. Python rejects a draft that skips this check before any immutable save.
 Do not use an uninspected neighbor's metadata as proof that it is unrelated.
 
+For a standalone payment slip or product-list fragment, also inspect the nearest
+`previous_images` capture (nearest first) before drafting. It can be the main receipt
+or earlier section already processed separately. These IDs are available to `document`,
+`previews` and `grouping` just like lookahead IDs. A slip can supply a date hidden on
+the receipt: use vendor, amount, time, reference/card suffix and scan sequence as
+evidence; a missing field is not a conflicting field. Date/amount/currency search
+also returns exact-amount candidates with a missing date/currency. These are candidates
+for pixel comparison, never automatic matches; preserve genuinely ambiguous associations.
+
 Before every draft, explicitly decide the document's complete ordered page list.
 Include `page_review: {"capture_ids": [...], "excluded": [...]}`. `capture_ids` lists
 all pages intended for this PDF in order. For every other capture opened through
