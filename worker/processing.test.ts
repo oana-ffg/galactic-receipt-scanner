@@ -308,6 +308,78 @@ it("allows one claim, saves structured amounts atomically, and makes retries ide
   expect(await claim("large")).toBeNull();
   expect((await req(`/api/files/${c.id}/raw`)).status).toBe(200);
 });
+it("targets an awaiting-pages review without falling back to the queue or bypassing the lease", async () => {
+  const first = await capture(),
+    cat = await category(),
+    lease = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: lease.token,
+      model: "gpt-5.6-luna",
+      extraction: { ...extraction(cat), completeness: "fragment" },
+    },
+    true,
+  );
+  const target = (await ok(`/api/documents/${first.id}`)).document;
+  expect(target.status).toBe("awaiting-pages");
+  await capture(); // An unrelated queued capture must never replace the requested target.
+  const request = {
+    stage: "large",
+    document_id: target.id,
+    revision: target.revision,
+  };
+  for (const invalid of [
+    { ...request, stage: "small" },
+    { ...request, revision: undefined },
+    { ...request, revision: -1 },
+    { stage: "large", revision: target.revision },
+  ])
+    expect((await req("/api/processing/claim", invalid, true)).status).toBe(
+      400,
+    );
+  expect(
+    (
+      await req(
+        "/api/processing/claim",
+        { ...request, document_id: crypto.randomUUID() },
+        true,
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await req(
+        "/api/processing/claim",
+        { ...request, revision: target.revision + 1 },
+        true,
+      )
+    ).status,
+  ).toBe(409);
+  expect((await req("/api/processing/claim", request)).status).toBe(403);
+  const other = await claim();
+  expect((await ok("/api/processing/claim", request, true)).reason).toBe(
+    "busy-or-changed",
+  );
+  await ok("/api/processing/release", { token: other.token }, true);
+  const review = (await ok("/api/processing/claim", request, true)).claim;
+  expect(review.document.id).toBe(target.id);
+  expect(review.document.processing).toBeUndefined();
+  expect(await claim()).toBeNull();
+  const draft = {
+    token: review.token,
+    model: "gpt-6-astra",
+    extraction: extraction(cat),
+  };
+  await ok("/api/processing/draft", draft, true);
+  await ok("/api/processing/submit", draft, true);
+  const corrected = (await ok(`/api/documents/${first.id}`)).document;
+  expect(corrected.processing.large_model_confidence).toBe("high");
+  expect(corrected.processing.has_human_review).toBe(false);
+  const readings = await ok(`/api/processing/readings?document_id=${first.id}`);
+  expect(JSON.stringify(readings)).toContain("fragment");
+  expect(JSON.stringify(readings)).toContain("gpt-6-astra");
+});
 it("checks all receipts even at high certainty, gates Astra comparison, preserves blind parses", async () => {
   const c = await capture(),
     cat = await category(),
@@ -387,6 +459,19 @@ it("requires interactive human approval and invalidates it when an old client ed
   d = (await ok(`/api/documents/${c.id}`)).document;
   expect(d.processing.has_human_review).toBe(true);
   expect(d.processing.human_review_revision).toBe(d.revision);
+  expect(
+    (
+      await req(
+        "/api/processing/claim",
+        {
+          stage: "large",
+          document_id: d.id,
+          revision: d.revision,
+        },
+        true,
+      )
+    ).status,
+  ).toBe(409);
   const saved = await ok(`/api/processing/readings?document_id=${c.id}`);
   expect(saved.attempts.map((a: any) => a.stage)).toEqual(["human", "small"]);
   expect(saved.attempts[0].extraction).toEqual(body.extraction);

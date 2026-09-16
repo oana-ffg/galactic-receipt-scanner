@@ -95,6 +95,14 @@ PYTHON -X utf8 -B -I BATCH_SCRIPT --owner OWNER --verify RUN_ID
 ```
 
 Here `BATCH_SCRIPT` is the checkout's absolute `scripts/receipt_batch.py` path.
+Launch this verification with `login: false` and the same authorized execution
+context as the Python worker. On a Windows host whose profile is protected outside
+the sandbox, include `sandbox_permissions: "require_escalated"` in the `exec_command`
+call; escalation on the earlier worker launch does not carry over to this command.
+If an ordinary sandbox launch fails with `PermissionError` before verification,
+retry this same read-only command once with that authorized context. An explicit
+approval rejection still means stop; never change ACLs or copy credentials to work
+around it. Do not count the document until verification actually succeeds.
 `OWNER` must exactly match the owner used to start the held guard. Scheduled runs
 use `receipt-processing-scheduled`, matching their narrow standing approval; manual
 batches retain their own task owner.
@@ -103,7 +111,6 @@ It reads `.local/processing-host.json`, validates the worker's existing destinat
 checks saved state and emits `verified: true` plus an immutable private verification
 file. Require exit zero and that complete result before counting the document; retain
 the generated file reference instead of manually copying page IDs or PDF hashes.
-
 
 The coordinator uses the prepared Python executable to launch the checkout's absolute
 `scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`.
@@ -218,11 +225,11 @@ direct launch as a configuration failure rather than starting a second process.
 | `context`    | Optional `filters` containing `after_capture`, `date`, `total_minor`, `currency`                                         | Current document, next images, candidate summaries and rejected associations. Use source-supported search values; continue lookahead as needed.                                                                                                                                   |
 | `document`   | `document_id` discovered in the claim/context                                                                            | Complete current document, including donor pages and annotations. Newly discovered pages become retrievable.                                                                                                                                                                      |
 | `previews`   | `capture_ids`; optional `layouts` map keyed by requested IDs, each with `crop` and/or `rotation`                         | Default visual input: detected crops with paper margins, rendered from verified source pixels. Existing non-null saved crops are retained. Open every returned `preview` using your own vision. Lookahead does not consume pages.                                                 |
-| `observe` | `observation`; optional `correction_reason` for a corrected reading | Record the claimed scan independently before neighbor context. See the exact fields in One-document sequence. Local journal only; not an OCR or DB extraction step. |
+| `observe`    | `observation`; optional `correction_reason` for a corrected reading                                                      | Record the claimed scan independently before neighbor context. See the exact fields in One-document sequence. Local journal only; not an OCR or DB extraction step.                                                                                                               |
 | `originals`  | `capture_ids` from claim/context/documents                                                                               | Optional raw-image paths when a crop, grouping or source completeness needs checking; not the default visual input.                                                                                                                                                               |
 | `categories` | None                                                                                                                     | Existing category registry.                                                                                                                                                                                                                                                       |
 | `category`   | `name`, `description`                                                                                                    | Create/reuse a needed private category. Do not invent registry IDs.                                                                                                                                                                                                               |
-| `draft`      | `extraction`, `page_review`; optional `grouping` below                                                                                  | After crop review, freeze Luna's independent reading, grouping and layout. Returns ordered pixel-only PDF page renders; inspect EVERY page before OCR. The initial extraction/layout/image hashes are saved immutably in the database; no OCR or Qwen runs here.                  |
+| `draft`      | `extraction`, `page_review`; optional `grouping` below                                                                   | After crop review, freeze Luna's independent reading, grouping and layout. Returns ordered pixel-only PDF page renders; inspect EVERY page before OCR. The initial extraction/layout/image hashes are saved immutably in the database; no OCR or Qwen runs here.                  |
 | `prepare`    | `capture_ids` for all and only the draft's retained pages                                                                | Only after `draft`: source-hash/crop/rotation-matched PP artifacts plus text/polygons/confidence for comparison and invisible PDF search text. No model download or installation.                                                                                                 |
 | `validate`   | `extraction` using the complete [API contract](processing-api.md#parse)                                                  | Actual shared schema/arithmetic checks. Correct validation errors locally; never change printed digits to force balance.                                                                                                                                                          |
 | `confirm`    | None                                                                                                                     | Pin the exact saved PP artifacts for all frozen pages and return server OCR/math comparisons. This performs no Qwen inference.                                                                                                                                                    |
@@ -323,6 +330,30 @@ IDs must exactly match `page_review.capture_ids`. "One document per Luna" means 
 whole receipt and its supporting pages, not one capture. Do not call an available,
 recognized continuation "awaiting pages" just because it began as a separate record.
 
+Build both fields from one page selection. For example, after inspecting a continuation
+and reading its `document` response, construct the request from those actual objects:
+
+```python
+ordered_ids = [p["captureId"] for p in claimed_document["pages"] + continuation_document["pages"]]
+request = {
+    "op": "draft",
+    "extraction": initial_extraction,
+    "grouping": {
+        "donor_ids": [continuation_document["id"]],
+        "capture_ids": ordered_ids,
+        "evidence": visual_grouping_evidence,
+    },
+    "page_review": {"capture_ids": ordered_ids, "excluded": inspected_exclusions},
+}
+```
+
+The variables above come from this run's responses and your visual assessment; use
+the selected physical order if a source record contains multiple pages. Add a matched
+payment slip's document to the donor list and its pages to the same ordered list.
+Send this request through the Python worker's normal sequential request protocol.
+Writing a transcript containing both pages, or merely saying they belong together,
+does not change membership. The draft result must contain the whole selected list.
+
 After draft succeeds, compare the returned `layouts` capture IDs and order, `pages`,
 and `page_review` with that decision, then open every returned render. A discrepancy
 is a workflow failure needing preserved-state recovery, not an incomplete receipt to
@@ -333,7 +364,6 @@ review/awaiting-pages outcome and the next document.
 For duplicate marking, `page_review.capture_ids` still lists the claimed document's
 unchanged original pages. List inspected pages of the retained duplicate target in
 `excluded`, explaining that they stay in that retained document, outside this PDF.
-
 
 For a visual merge/reordering, `draft.grouping` contains `donor_ids`, ordered
 `capture_ids` and a nonempty `evidence` string (at most 2000 characters). IDs must come

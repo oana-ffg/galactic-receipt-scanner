@@ -451,6 +451,19 @@ export async function processingRoute(
       400,
       "Choose small or large processing stage.",
     );
+    const targeted = input.document_id !== undefined;
+    requireThat(
+      targeted
+        ? input.stage === "large" &&
+            typeof input.document_id === "string" &&
+            input.document_id.length > 0 &&
+            typeof input.revision === "number" &&
+            Number.isSafeInteger(input.revision) &&
+            input.revision >= 0
+        : input.revision === undefined,
+      400,
+      "A targeted review requires stage large, document_id and its current revision.",
+    );
     const captures = await load(),
       docs = await records(env, captures);
     const current = new Set(
@@ -486,7 +499,22 @@ export async function processingRoute(
           ) ||
           a.id.localeCompare(b.id),
       );
-    const d = candidates[0];
+    const d = targeted
+      ? docs.find((doc) => doc.id === input.document_id)
+      : candidates[0];
+    if (targeted) {
+      requireThat(d, 404, "Review document not found.");
+      requireThat(
+        d.revision === input.revision &&
+          !d.mergedInto &&
+          !d.duplicateOf &&
+          d.pages.some((p) => current.has(p.captureId)) &&
+          !!d.processing &&
+          !d.processing.has_human_review,
+        409,
+        "Targeted review requires a current, processed, non-human-reviewed document at the expected revision.",
+      );
+    }
     if (!d) return json({ claim: null, reason: "queue-empty" });
     const token = crypto.randomUUID();
     // Exactly one document lease across both stages. The head predicate rejects stale selection.

@@ -10,9 +10,11 @@ description: "Sort saved receipts with fresh Luna and PP-OCR: match pages, ident
 A bare `$receipt-processing` invocation means **run the saved-receipt workflow now**.
 Default to one batch of up to **10 oldest pending documents in the Luna small stage**.
 An explicit count/stage in the user's request overrides that default. The claim API
-selects the next eligible document; it cannot target an arbitrary document ID. For an
-exact-document request, verify the claimed ID and safely release an unsubmitted claim
-if it differs; report the selection limitation instead of processing another document. Do not
+selects the next eligible document for routine batches. An owner-requested repair of
+a specific processed document uses the large-stage targeted claim with its exact ID
+and current revision; see [the processing API](references/processing-api.md).
+It keeps the normal exclusive lease and rejects stale or human-reviewed targets.
+Do not claim unrelated queued work to reach a named repair. Do not
 end with "skill loaded" or ask which batch/range when none was specified. Announce the
 default and begin connection preparation and worker dispatch. An explicit request to
 explain, inspect or edit this skill is not a processing run.

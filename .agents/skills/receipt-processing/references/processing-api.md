@@ -22,21 +22,21 @@ routine processing.
 Routes below are relative to the configured origin. POST bodies are JSON except PDF
 uploads handled by the client. Never print claim tokens; build query strings in Python.
 
-| Method and route | Request | Response / handling |
-| --- | --- | --- |
-| GET /api/processing/access | none | Version 2 must advertise queueClaims and lunaReassessment for the new Luna flow. |
-| POST /api/processing/claim | `{stage:"small"}` or `{stage:"large"}` | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Stop on null. |
-| POST /api/processing/renew | `{token}` | `{expires}`, epoch milliseconds. |
-| POST /api/processing/release | `{token}` | `{released:true}`. Only for an active claim being abandoned. |
-| GET /api/processing/context?token=â€¦ | Optional after_capture, date, total_minor, currency | `{document,ocr_comparison,independent_parse,previous_images,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`. |
-| GET /api/processing/categories | none | Array of `{id,name,description}`, **no categories wrapper**. |
-| POST /api/processing/categories | `{name,description}` | `{id,name,description}`. Name 1â€“150 characters; description 1â€“2000. |
-| POST /api/processing/draft | `{token,model,extraction}`; small stage also requires frozen `documents,pixel_pdf_sha256,images` | `{saved:true}`; immutable independent checkpoint. |
-| POST /api/processing/confirmation | `token` plus independent Qwen extraction/provenance from the bounded helper | Immutable `{saved:true,sha256,qwen,evidence}`; initial checkpoint and exact-region OCR required. |
-| GET /api/processing/readings?document_id=ID | Claimed document ID for review | Up to 20 latest initial/confirmation/updated records, with models, revisions and timestamps; no claim tokens. Astra must first checkpoint. |
-| POST /api/processing/submit | See Submit below | `{saved:[{id,revision},...],warnings?}`; exact replay may add `replayed:true`. |
-| GET /api/documents/ID | none | `{document,captures}`; read `response["document"]`. |
-| POST /api/processing/pdf-review | `{document_id,revision,sha256,evidence}` | Read the document back and verify its PDF check/hash; see Outputs. |
+| Method and route                            | Request                                                                                          | Response / handling                                                                                                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET /api/processing/access                  | none                                                                                             | Version 2 must advertise queueClaims and lunaReassessment for the new Luna flow.                                                                                 |
+| POST /api/processing/claim                  | `{stage:"small"}` or `{stage:"large"}`                                                           | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Stop on null.                |
+| POST /api/processing/renew                  | `{token}`                                                                                        | `{expires}`, epoch milliseconds.                                                                                                                                 |
+| POST /api/processing/release                | `{token}`                                                                                        | `{released:true}`. Only for an active claim being abandoned.                                                                                                     |
+| GET /api/processing/context?token=â€¦       | Optional after_capture, date, total_minor, currency                                              | `{document,ocr_comparison,independent_parse,previous_images,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`. |
+| GET /api/processing/categories              | none                                                                                             | Array of `{id,name,description}`, **no categories wrapper**.                                                                                                     |
+| POST /api/processing/categories             | `{name,description}`                                                                             | `{id,name,description}`. Name 1â€“150 characters; description 1â€“2000.                                                                                          |
+| POST /api/processing/draft                  | `{token,model,extraction}`; small stage also requires frozen `documents,pixel_pdf_sha256,images` | `{saved:true}`; immutable independent checkpoint.                                                                                                                |
+| POST /api/processing/confirmation           | `token` plus independent Qwen extraction/provenance from the bounded helper                      | Immutable `{saved:true,sha256,qwen,evidence}`; initial checkpoint and exact-region OCR required.                                                                 |
+| GET /api/processing/readings?document_id=ID | Claimed document ID for review                                                                   | Up to 20 latest initial/confirmation/updated records, with models, revisions and timestamps; no claim tokens. Astra must first checkpoint.                       |
+| POST /api/processing/submit                 | See Submit below                                                                                 | `{saved:[{id,revision},...],warnings?}`; exact replay may add `replayed:true`.                                                                                   |
+| GET /api/documents/ID                       | none                                                                                             | `{document,captures}`; read `response["document"]`.                                                                                                              |
+| POST /api/processing/pdf-review             | `{document_id,revision,sha256,evidence}`                                                         | Read the document back and verify its PDF check/hash; see Outputs.                                                                                               |
 
 One renewable global lease prevents overlapping model work and expires after 20 minutes.
 A token assigns ONE document. Claim pages use `captureId`; context `next_images` use
@@ -57,6 +57,14 @@ extracted documents, not every unprocessed scan. Empty results do not establish 
 match. At most 50 candidates are returned; respect truncation and rejected associations,
 and confirm attachments visually.
 
+For an owner-requested repair of a specific processed document, Astra may claim with
+`{stage:"large", document_id, revision}` using the current document ID and revision.
+This can revisit an awaiting-pages result; it never falls back to another queued
+document. Stale, merged, duplicate and human-reviewed targets are rejected, and the
+same exclusive processing lease applies. Routine Luna batches use the normal queue.
+If the repair agent already saw previous readings, explicitly describe the draft and
+final evidence as reconciliation with prior context, not an independent blind review.
+
 Astra must save its draft BEFORE reading context, documents or prior OCR. Before that,
 use originals and categories only. Context then exposes the independent parse, Luna's
 record and OCR disagreements. See [model workers](model-workers.md).
@@ -69,25 +77,25 @@ prices, dates, vendors or categories. All money is signed integer minor units wi
 absolute value at most 100,000,000,000; quantity is a finite number with absolute value
 at most 1,000,000. Never use decimal currency amounts.
 
-| Field | Exact value |
-| --- | --- |
-| type | unknown, receipt, invoice, credit-note, payment-slip, atm, note, other |
-| vendor | null or nonempty string, at most 150 characters |
-| receipt_date | null or real YYYY-MM-DD date |
-| reference | null or nonempty string, at most 200 characters |
-| currency | null or three uppercase letters |
-| has_handwriting, has_payment_slip, confirmed_arithmetic_mismatch | Booleans |
-| payment_status | approved, declined, unknown, not-applicable |
-| card_last_four | null or exactly four digits as a string |
-| line_items | At most 1000 objects with description (nonempty string â‰¤2000), quantity (number or null), unit_price_minor and amount_minor (money or null) |
-| adjustments, payment_adjustments | At most 100 objects each, with description (nonempty string â‰¤2000) and amount_minor (**non-null** money) |
-| total_minor, charged_total_minor, vat_minor | Money or null |
-| tax_basis | gross, net-plus-tax, unknown |
-| completeness | complete, fragment, uncertain |
-| category_id | Existing category UUID or null; copy from the registry |
-| certainty | low, medium, high |
-| uncertainties, broken_reasons | At most 100 nonempty strings each, each â‰¤2000 characters |
-| evidence | Nonempty string, at most 20,000 characters |
+| Field                                                            | Exact value                                                                                                                                   |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| type                                                             | unknown, receipt, invoice, credit-note, payment-slip, atm, note, other                                                                        |
+| vendor                                                           | null or nonempty string, at most 150 characters                                                                                               |
+| receipt_date                                                     | null or real YYYY-MM-DD date                                                                                                                  |
+| reference                                                        | null or nonempty string, at most 200 characters                                                                                               |
+| currency                                                         | null or three uppercase letters                                                                                                               |
+| has_handwriting, has_payment_slip, confirmed_arithmetic_mismatch | Booleans                                                                                                                                      |
+| payment_status                                                   | approved, declined, unknown, not-applicable                                                                                                   |
+| card_last_four                                                   | null or exactly four digits as a string                                                                                                       |
+| line_items                                                       | At most 1000 objects with description (nonempty string â‰¤2000), quantity (number or null), unit_price_minor and amount_minor (money or null) |
+| adjustments, payment_adjustments                                 | At most 100 objects each, with description (nonempty string â‰¤2000) and amount_minor (**non-null** money)                                    |
+| total_minor, charged_total_minor, vat_minor                      | Money or null                                                                                                                                 |
+| tax_basis                                                        | gross, net-plus-tax, unknown                                                                                                                  |
+| completeness                                                     | complete, fragment, uncertain                                                                                                                 |
+| category_id                                                      | Existing category UUID or null; copy from the registry                                                                                        |
+| certainty                                                        | low, medium, high                                                                                                                             |
+| uncertainties, broken_reasons                                    | At most 100 nonempty strings each, each â‰¤2000 characters                                                                                    |
+| evidence                                                         | Nonempty string, at most 20,000 characters                                                                                                    |
 
 `not_invoice` is **server-derived processing state, not an extraction input**.
 The server also derives model confidence summaries, human-review flags and OCR comparison.

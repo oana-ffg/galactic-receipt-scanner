@@ -463,6 +463,8 @@ test("human review edits structured values and detaches a wrong page into the po
     .getByLabel("Review findings", { exact: true })
     .fill("Human checked every synthetic source.");
   await page.getByRole("button", { name: "Accept human review" }).click();
+  // Wait for the saved document to replace the old form before expanding its notes.
+  await expect(page.getByText(/Human reviewed: yes/)).toBeAttached();
   await page
     .getByText("Review notes and document details", { exact: true })
     .click();
