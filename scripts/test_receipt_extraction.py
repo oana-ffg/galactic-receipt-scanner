@@ -1,14 +1,53 @@
 """Synthetic-only tests for immutable local extraction results."""
 import copy
+from contextlib import closing, redirect_stdout
 import importlib.util
+import io
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("extraction", Path(__file__).with_name("receipt_extraction.py"))
 extraction = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extraction)
+
+
+class ConnectionLifecycleTest(unittest.TestCase):
+    def test_initialization_failure_closes_connection(self):
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(extraction.sqlite3, 'connect', return_value=db), \
+                patch.object(Path, 'read_text', return_value='INVALID SQL'):
+            with self.assertRaises(sqlite3.OperationalError):
+                extraction.connect(Path(directory) / 'test.db')
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+                db.execute('SELECT 1')
+
+    def test_cli_closes_connection_on_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'test.db'
+            for command in (['run', 'synthetic-run', 'local', 'synthetic-model', 'test'],
+                            ['pending', 'unknown-run']):
+                with self.subTest(command=command):
+                    db = extraction.connect(path)
+                    self.addCleanup(db.close)
+                    with patch.object(extraction, 'connect', return_value=db), \
+                            patch('sys.argv', ['extraction', '--db', str(path), *command]), \
+                            redirect_stdout(io.StringIO()):
+                        if command[0] == 'pending':
+                            with self.assertRaisesRegex(ValueError, 'Unknown run'):
+                                extraction.main()
+                        else:
+                            extraction.main()
+                    with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+                        db.execute('SELECT 1')
+            with closing(extraction.connect(path)) as db:
+                self.assertIsNotNone(db.execute(
+                    'SELECT 1 FROM extraction_runs WHERE id=?', ('synthetic-run',)).fetchone())
 
 
 class ExtractionTest(unittest.TestCase):

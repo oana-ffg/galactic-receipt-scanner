@@ -81,3 +81,8 @@ resumes verified files and reports missing remote captures without deleting loca
 A partial run is a failure even though successfully verified files remain available.
 Use `--credentials-stdin` with an authorized private provider, or a private connection
 config. Personal scheduler and secret-store configuration belongs outside Git.
+
+This backup command requires a POSIX host (Linux/macOS) and a filesystem supporting
+Unix ownership, private permissions, no-follow file opens and file locking. Native
+Windows is unsupported and is rejected before credentials are read or files written.
+Its filesystem tests run on POSIX; Windows runs the platform-rejection tests instead.

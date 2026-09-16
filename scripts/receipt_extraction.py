@@ -2,6 +2,7 @@
 """Offline, resumable extraction workspace. Makes no network/model calls."""
 
 import argparse
+from contextlib import closing
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -217,6 +218,7 @@ def filename_base(result):
 
 
 def connect(path):
+    """Open an initialized connection; callers must close it after use."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not path.exists():
@@ -226,9 +228,13 @@ def connect(path):
         except FileExistsError:
             pass
     db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys=ON")
-    db.executescript((ROOT / "db/receipt-extraction.sql").read_text())
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        db.executescript((ROOT / "db/receipt-extraction.sql").read_text())
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -337,7 +343,7 @@ def main():
     p = sub.add_parser("pending"); p.add_argument("run"); p.add_argument("--limit", type=int, default=10)
     p = sub.add_parser("export"); p.add_argument("run")
     args = parser.parse_args()
-    with connect(args.db) as db:
+    with closing(connect(args.db)) as db, db:
         if args.command == "sources":
             add_sources(db, json.loads(Path(args.manifest).read_text()))
         elif args.command == "run":

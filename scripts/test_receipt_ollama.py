@@ -1,5 +1,7 @@
 """Synthetic endpoint and transport checks. No external inference calls."""
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import sys
 import unittest
 
@@ -47,7 +49,7 @@ class LineageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             original = root/'original.txt'; original.write_text('Synthetic')
-            with w.connect(root/'test.db') as db:
+            with closing(w.connect(root/'test.db')) as db, db:
                 w.add_sources(db, {'samples':[{'captureId':'synthetic','sha256':w.sha(original.read_bytes()),
                     'original':str(original),'scanned_at':'2026-01-01T00:00:00Z','source_pixels':[10,20]}]})
                 w.add_run(db,'run','local','synthetic-model','test')
@@ -72,16 +74,20 @@ class LineageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             db_path = root/'test.db'
-            with w.connect(db_path): pass
+            db = w.connect(db_path)
+            self.addCleanup(db.close)
             argv = ['client','--endpoint','http://127.0.0.1:11434','--model','synthetic-model',
                     '--db',str(db_path),'--run','test','--output',str(root/'raw'),
                     '--source-id','typo']
-            with patch('sys.argv',argv), patch.object(receipt_ollama,'request',side_effect=[
+            with patch.object(w, 'connect', return_value=db), \
+                    patch('sys.argv',argv), patch.object(receipt_ollama,'request',side_effect=[
                     {'models':[{'name':'synthetic-model','size':10,'digest':'digest'}]},
                     {'capabilities':['vision']}]) as network:
                 with self.assertRaisesRegex(ValueError,'Unknown source selection'):
                     receipt_ollama.main()
                 self.assertEqual(network.call_count,2)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+                db.execute('SELECT 1')
 
 
 if __name__ == "__main__":

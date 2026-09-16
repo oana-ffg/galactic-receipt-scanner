@@ -2,6 +2,7 @@
 """Run a bounded image extraction batch on an existing private Ollama server."""
 import argparse
 import base64
+from contextlib import closing
 import ipaddress
 import json
 from pathlib import Path
@@ -130,7 +131,7 @@ def main():
     config_path = output / "run.json"
     config_hash = workspace.sha(workspace.encoded(config).encode())
     failures = 0
-    with workspace.connect(args.db) as db:
+    with closing(workspace.connect(args.db)) as db, db:
         workspace.add_run(db, args.run, "ollama-local", args.model + "@" + model["digest"], version)
         register_config(db, args.run, config)
         workspace.save_immutable(config_path, config)

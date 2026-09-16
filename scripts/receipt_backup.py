@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Append-only original backup. No model calls and no remote writes."""
+"""Append-only original backup for POSIX hosts. No model calls or remote writes."""
 import argparse
 from datetime import datetime, timezone
-import fcntl
 import json
 import os
 import stat
@@ -11,6 +10,12 @@ import sys
 from urllib.parse import quote
 
 from receipt_api import ClientError, ScannerClient, credentials, write_new_file
+
+
+def require_posix():
+    if os.name != 'posix':
+        raise ClientError('Original backups require a POSIX host (Linux/macOS) and filesystem '
+                          'with Unix ownership, permissions and locking; native Windows is unsupported.')
 
 
 def private_directory(path):
@@ -22,6 +27,9 @@ def private_directory(path):
 
 
 def backup(client, destination):
+    require_posix()
+    import fcntl
+
     root = Path(destination)
     private_directory(root)
     for child in ('snapshots', 'originals'):
@@ -95,6 +103,7 @@ def main():
     parser.add_argument('--credentials-stdin', action='store_true')
     parser.add_argument('--config', default='.local/processing-access.json')
     args = parser.parse_args()
+    require_posix()
     root, mount = Path(args.destination), Path(args.mount_root)
     if (not root.is_absolute() or not mount.is_absolute() or not os.path.ismount(mount)
             or mount.is_symlink() or root.is_symlink() or mount.resolve() not in root.resolve().parents):
