@@ -15,11 +15,14 @@ Reuse coordinator-supplied paths or the repository's ignored
 contains the existing private `client_config` and prepared runtimes. Keep this descriptor
 local to its host; do not commit it or ask the owner to supply paths that it already stores.
 
-Start with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
+The coordinator starts with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
 Its non-secret `origin` identifies the actual request destination. Before dispatching
 fresh processing workers, match it to owner-verified Site metadata or the owner's
 authenticated connection setup and pass that verification and authorized data flow in
 the worker handoff. A credential config alone is not independent proof of ownership.
+This verification belongs to the coordinator. A delegated Luna uses the verified handoff
+and bounded Python script; it does not repeat connection setup, Sites/browser ownership
+checks, protected-profile inspection or key retrieval. Python loads the existing credentials.
 The connection helper creates a private config referring to its protected credential file.
 There is no gopass dependency. `--credentials-stdin` supports an explicitly authorized
 secret provider for optional personal integrations; browser password storage is not

@@ -32,28 +32,21 @@ at `--profile` or omit any executable/argument. If the full standing rule is abs
 report a setup blocker rather than proposing a substitute. An approval rejection still
 stops the batch; changing the proposed prefix does not authorize retrying a denied launch.
 
-Verify the source/destination belongs to the owner through authenticated Sites metadata
-or connection setup. Include that evidence and authorization for original-image reads,
-financial extraction, OCR, PDF uploads and inspection in the worker handoff. The profile
-binds the helper to that exact origin; stdin cannot change destinations, runtimes or paths.
+The coordinator verifies source/destination ownership through authenticated Sites metadata
+or connection setup, and matches the prepared profile's origin and checkout before dispatch.
+Include the verified origin, non-secret ownership evidence, exact Python/script/profile
+paths and authorization for original-image reads, extraction, OCR and PDF writes in every
+fresh Luna handoff. Pass paths and evidence, never credentials or browser tab handles.
 
-In a fresh delegated context, verify destination ownership through authenticated Sites
-metadata yourself before launch; a profile or parent handoff alone may not satisfy the
-execution review. Select only the site ID, live URL, current user's owner role and access
-policy; never print the full metadata response, which can contain access credentials.
-Resolve the site from `.openai/hosting.json` and prefer the Sites connector for this
-read-only check. Do not reuse the parent's browser tab IDs: those handles can be owned
-by another task. Browser access is a fallback only when authenticated metadata is
-unavailable. Complete these checks before requesting the worker launch, rather than
-launching first and collecting the missing evidence after a rejection.
-Read only the prepared profile's non-secret `origin` and `repository` fields and match
-them to that verified site and checkout. Use an authorized read-only execution context
-if the protected profile requires the owner's identity; do not weaken its permissions.
-A denied profile read is not permission to skip this check and launch blindly. Complete
-the authorized read-only identity check or report the unavailable prerequisite before claim.
-The launch justification must name the exact verified origin and the requested scope:
-receipt reads and extraction/OCR/PDF writes back to that same private scanner. These
-checks establish destination identity; they do not grant missing user authorization.
+Luna uses that coordinator handoff to launch the prepared Python script. Do not repeat
+ownership verification, query Sites metadata, open an authentication page, read the
+protected profile separately or provision/fetch API keys. The Python script loads the
+existing credentials and enforces the configured origin, checkout and runtime checks;
+stdin cannot change destinations, runtimes or paths. Use the coordinator's verified
+origin and authorized processing scope in the launch justification, attributing the
+ownership check to the coordinator rather than claiming Luna performed it. If the handoff
+is incomplete, report the missing prerequisite to the coordinator before launch.
+Actual permission failures still follow the stop-on-failure rule below.
 
 Each fresh Luna handles one document and owns its helper session. The coordinator sends
 the assignment and awaits a compact outcome; it never forwards individual requests.
