@@ -64,8 +64,19 @@ absolute paths and exact argument order, `tty: true`, `login: false`, and
 PYTHON -X utf8 -B -I WORKER --profile PROFILE
 ```
 
-On PowerShell, use `&` with each path quoted. The existing allow rule authorizes the
-exact launch; it does not select the execution context when `sandbox_permissions` is
+On PowerShell, when the prepared Python executable path is a literal path without
+whitespace or PowerShell metacharacters, invoke that path directly and single-quote
+the script and profile arguments. Do not prepend `&` or quote the executable in this
+form: the call operator can prevent Codex from lowering the command to the existing
+Python allow rule. The coordinator supplies the exact tested command in the handoff.
+If the executable requires quoting, resolve and test the host's launch form during
+setup; do not add a blanket PowerShell allow rule or make each Luna rediscover it.
+Validate approval matching with an actual `--help` launch (no profile read or claim),
+not solely `codex execpolicy check` on a shell wrapper: that standalone check does not
+perform the runtime's shell-command lowering.
+
+The existing allow rule authorizes the exact Python launch; it does not select the
+execution context when `sandbox_permissions` is
 omitted. Include that field explicitly. A `profile_access_denied` startup response
 means this process could not read the prepared profile and made no claim; report the
 launch configuration failure to the coordinator without weakening profile permissions.
