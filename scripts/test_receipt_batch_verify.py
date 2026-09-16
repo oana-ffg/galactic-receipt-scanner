@@ -145,7 +145,7 @@ class VerificationTests(unittest.TestCase):
         self.client_factory.assert_not_called()
 
     def test_inactive_or_differently_owned_batch_is_rejected(self):
-        for changes in [dict(phase='complete'), dict(phase='blocked'), dict(owner='different-task'), dict(batch_id='invalid')]:
+        for changes in [dict(phase='complete'), dict(owner='different-task'), dict(batch_id='invalid')]:
             self.write(self.work.parent / 'batch-state.json', {
                 'batch_id': 'c' * 32, 'started_at': 100, 'phase': 'active',
                 'owner': 'synthetic-task', **changes,
@@ -154,6 +154,22 @@ class VerificationTests(unittest.TestCase):
                 self.verify()
         self.client_factory.assert_not_called()
         self.assertEqual(list(self.work.glob('verification-*.json')), [])
+
+    def test_blocked_batch_allows_read_only_verification_without_resuming_it(self):
+        path = self.work.parent / 'batch-state.json'
+        batch = json.loads(path.read_text())
+        self.write(path, {**batch, 'phase': 'blocked'})
+        before = path.read_bytes()
+        result = self.verify()
+        self.assertTrue(result['verified'])
+        self.assertEqual(result['batch_phase'], 'blocked')
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_worker_bound_to_another_batch_is_rejected(self):
+        self.state['batch_id'] = 'd' * 32
+        with self.assertRaisesRegex(InputError, 'different batch'):
+            self.verify()
+        self.client_factory.assert_not_called()
 
     def test_path_escape_is_rejected(self):
         with self.assertRaises(InputError):

@@ -26,13 +26,14 @@ def verify_run(repo, run_id, owner):
     batch_id = batch["batch_id"]
     require(isinstance(batch_id, str) and len(batch_id) == 32
             and all(c in "0123456789abcdef" for c in batch_id)
-            and batch["phase"] == "active" and batch["owner"] == owner,
-            "Verification requires the current active batch and its exact owner.")
+            and batch["phase"] in {"active", "blocked"} and batch["owner"] == owner,
+            "Verification requires the current active or blocked batch and its exact owner.")
     work = regular_path(base / run_id)
     state = read_json(regular_path(work / "state.json"))
     require(state["run_id"] == run_id and state["phase"] == "complete" and not state.get("failed"),
             "Worker is failed or unfinished; it cannot count as verified completion.")
     require(state["claim_started"] >= batch["started_at"], "Worker predates the current batch.")
+    require(state.get("batch_id", batch_id) == batch_id, "Worker belongs to a different batch.")
     claim = state["claim"]
     document_id = claim["document"]["id"]
     require(isinstance(document_id, str) and UUID.fullmatch(document_id), "Invalid claimed document ID.")
@@ -75,7 +76,7 @@ def verify_run(repo, run_id, owner):
                 == document["reviewedPdfSha256"] == document["pdf"]["sha256"]
                 and state["pdf"]["pages"] == len(actual),
                 "Final PDF attestation or page count differs.")
-    summary = dict(verified=True, batch_id=batch["batch_id"], run_id=run_id, document_id=document_id,
+    summary = dict(verified=True, batch_id=batch["batch_id"], batch_phase=batch["phase"], run_id=run_id, document_id=document_id,
                    capture_ids=actual, page_count=len(actual), status=document["status"],
                    revision=document["revision"], claim_closed=True, attempt_saved=True,
                    pdf_applicable=applicable, pdf_sha256=pdf_hash, checked_at=time.time())

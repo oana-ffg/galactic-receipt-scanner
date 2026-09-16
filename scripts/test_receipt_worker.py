@@ -204,6 +204,10 @@ class WorkerTests(unittest.TestCase):
             (self.repo / filename).write_bytes(b"synthetic executable fixture; never launched")
         self.profile = dict(repository=str(self.repo), node=str(self.repo / "node.exe"), renderer=str(self.repo / "pdftoppm.exe"),
                             client_config="synthetic-config", origin=self.fake.origin)
+        from receipt_batch import BatchGuard
+        self.batch = BatchGuard(self.repo / '.local' / 'receipt-worker', 'synthetic-task')
+        self.batch.start()
+        self.addCleanup(self.batch.close)
         self.worker = self.make_worker()
 
     def make_worker(self, resume=None):
@@ -235,6 +239,63 @@ class WorkerTests(unittest.TestCase):
         self.send("observe", observation=dict(capture_id=DID, type="receipt", vendor="Synthetic",
             receipt_date=None, currency=None, total_minor=None, card_last_four=None))
         self.send("context")
+
+    def test_stopped_batch_prevents_a_preflighted_worker_from_claiming(self):
+        self.batch.handle(dict(op='block', reason='Synthetic terminal failure'))
+        with patch.object(self.worker, 'post') as post:
+            result = self.worker.handle(dict(op='claim', viewer_checked=True))
+        self.assertIn('Batch is stopped', result['input_error'])
+        self.assertEqual(self.worker.state['phase'], 'ready')
+        post.assert_not_called()
+
+    def test_dead_guard_prevents_claim_even_with_active_state(self):
+        self.batch.close()
+        with patch.object(self.worker, 'post') as post:
+            result = self.worker.handle(dict(op='claim', viewer_checked=True))
+        self.assertIn('coordinator lock is gone', result['input_error'])
+        post.assert_not_called()
+
+    def test_block_and_claim_are_serialized_across_the_remote_request(self):
+        original = self.worker.post
+        def concurrent_stop(endpoint, body):
+            self.assertEqual(endpoint, 'claim')
+            with self.assertRaisesRegex(module.InputError, 'claim is in flight'):
+                self.batch.handle(dict(op='block', reason='Synthetic concurrent stop'))
+            self.assertEqual(json.loads(self.batch.path.read_text())['phase'], 'active')
+            return original(endpoint, body)
+        with patch.object(self.worker, 'post', side_effect=concurrent_stop):
+            self.send('claim', viewer_checked=True)
+        self.assertEqual(self.worker.state['phase'], 'claimed')
+        self.assertEqual(self.batch.handle(dict(op='block', reason='Claim response received'))['phase'], 'blocked')
+
+    def test_in_progress_batch_transition_rejects_claim_before_network(self):
+        with module.acquire_lock(self.worker.work.parent / 'batch-transition.lock'), \
+                patch.object(self.worker, 'post') as post:
+            result = self.worker.handle(dict(op='claim', viewer_checked=True))
+        self.assertIn('Batch transition is in progress', result['input_error'])
+        self.assertEqual(self.worker.state['phase'], 'ready')
+        post.assert_not_called()
+
+    def test_worker_cannot_claim_under_a_different_batch(self):
+        self.batch.save({**self.batch.state, 'batch_id': 'f' * 32})
+        with patch.object(self.worker, 'post') as post:
+            result = self.worker.handle(dict(op='claim', viewer_checked=True))
+        self.assertIn('different batch', result['input_error'])
+        post.assert_not_called()
+
+    def test_existing_claim_can_release_after_batch_stops(self):
+        self.send('claim', viewer_checked=True)
+        self.batch.handle(dict(op='block', reason='Synthetic parent failure'))
+        self.worker.lock.close()
+        self.worker = self.make_worker(resume=self.worker.state['run_id'])
+        self.send('release')
+        self.assertEqual(self.worker.state['phase'], 'released')
+
+    def test_fresh_worker_cannot_start_under_stopped_batch(self):
+        self.worker.lock.close()
+        self.batch.handle(dict(op='block', reason='Synthetic terminal failure'))
+        with self.assertRaisesRegex(module.InputError, 'Batch is stopped'):
+            self.make_worker()
 
     def prepared(self, ids=(DID,), *, grouping=None, value=None, layouts=None):
         self.claimed()
@@ -911,7 +972,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn(("POST", "/api/processing/pdf-review"), self.fake.calls)
 
     def test_exclusive_lock_prevents_two_workers_using_global_lease(self):
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(module.InputError, 'Another worker process'):
             self.make_worker()
 
     def test_lost_claim_response_waits_for_lease_window_then_terminalizes(self):

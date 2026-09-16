@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Hold one local receipt batch across its sequential managed model workers."""
 import argparse
-import errno
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -11,12 +9,9 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from receipt_api import ClientError
+from receipt_locks import LockBusy as BatchBusy, acquire_lock, lock_held
 from receipt_batch_verify import verify_run
 from receipt_worker import InputError, Once, artifact_directory, replace_journal_file, require, write_new_file
-
-
-class BatchBusy(Exception):
-    """Another coordinator holds the batch lock."""
 
 
 class BatchGuard:
@@ -26,29 +21,20 @@ class BatchGuard:
                 and not base.is_symlink() and not base.is_junction(), "Batch directory must not redirect.")
         artifact_directory(base)
         self.base = base
-        self.lock = (base / "batch.lock").open("a+b")
-        try:
-            self.lock.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                if not self.lock.read(1):
-                    self.lock.write(b"0")
-                    self.lock.flush()
-                self.lock.seek(0)
-                msvcrt.locking(self.lock.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            self.lock.close()
-            if error.errno in {errno.EACCES, errno.EAGAIN}:
-                raise BatchBusy() from None
-            raise
+        self.lock = acquire_lock(base / "batch.lock")
         self.path = base / "batch-state.json"
         self.state = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else None
         self.owner = owner
 
     def save(self, state):
+        try:
+            transition = acquire_lock(self.base / "batch-transition.lock")
+        except BatchBusy:
+            raise InputError("A claim is in flight; await its response, then retry the batch transition in this same session.") from None
+        with transition:
+            return self.save_transition(state)
+
+    def save_transition(self, state):
         # Keep every prior state transition; the pointer is only the current summary.
         state = {**state, "updated_at": time.time()}
         data = json.dumps(state).encode()
@@ -62,6 +48,7 @@ class BatchGuard:
     def start(self):
         require(not self.state or self.state["phase"] == "complete",
                 "Previous batch did not finish cleanly. Preserve its state for owner-directed recovery.")
+        self.check_worker_closed()
         return self.save(dict(batch_id=uuid.uuid4().hex, owner=self.owner, phase="active", started_at=time.time()))
 
     def handle(self, request):
@@ -79,6 +66,8 @@ class BatchGuard:
         return self.save({**self.state, "phase": "blocked", "reason": reason})
 
     def check_worker_closed(self):
+        require(not lock_held(self.base / "worker.lock"),
+                "Worker process is still running; await its exit before completing or replacing the batch.")
         worker_pointer = self.base / "active-run.json"
         if worker_pointer.exists():
             run_id = json.loads(worker_pointer.read_text(encoding="utf-8"))["run_id"]

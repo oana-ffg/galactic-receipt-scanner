@@ -131,13 +131,26 @@ does not replace each worker's claim or final verification.
 
 Spawn managed workers **one at a time**, each with `fork_turns: none`: use
 `gpt-5.6-luna` for the hourly small stage and `gpt-6-astra` for the daily large stage.
-Follow the [worker runbook](references/worker-runbook.md) for the coordinator handoff: provide
-verified runtime/config/work paths and the exact call recipes. Pass a bounded source assignment, not
+For Luna, use the [bounded protocol](references/luna-protocol.md) for the handoff;
+the [older worker runbook](references/worker-runbook.md) is for Astra. Provide verified
+runtime/config/work paths and the exact call recipes. Pass a bounded source assignment, not
 conversation history or images. Each worker handles one document. Default batch: 10 documents.
 Retain coordination until the requested count is verified complete, the queue is
 empty/busy, or an actual blocking failure occurs. Progress updates are not a final
 handoff: do not end the task while a worker is active or further assigned documents
 remain. A long-running batch alone is not a stop condition.
+
+Use collaboration messages for parent/subagent progress, not the app's
+`send_message_to_thread` (which starts a new parent turn). A message saying "blocked"
+does not prove the child has stopped. On a failure report, stop dispatching, tell that
+same child to stop further actions, and wait for its terminal result and Python process
+exit/claim state before reporting a stopped batch. Keep the active worker in the
+checkpoint until this is confirmed. Never let a child report terminal failure and then
+continue launching, claiming or recovering in the background.
+Require the guard's `ok: true, phase: blocked` acknowledgement and process exit before
+reporting a stopped batch. If its stop request says a claim is in flight, await that
+same worker's response and retry the stop through the same guard session; a rejected
+stop is not permission to end the parent or close the guard's stdin.
 
 Context pressure is not a stop or handoff condition either. Keep a compact private
 checkpoint in `.local/receipt-worker/batch-BATCH_ID-coordinator.json` with the batch ID,

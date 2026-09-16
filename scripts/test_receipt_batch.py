@@ -124,6 +124,24 @@ class BatchGuardTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self.guard()
 
+    def test_live_worker_prevents_finish_and_resolution_even_with_ready_journal(self):
+        guard = self.guard()
+        state = guard.start()
+        self.worker_state(phase='ready')
+        with module.acquire_lock(self.base / 'worker.lock'):
+            with self.assertRaisesRegex(module.InputError, 'still running'):
+                guard.handle(dict(op='finish'))
+            guard.handle(dict(op='block', reason='Synthetic preflight failure'))
+            with self.assertRaisesRegex(module.InputError, 'still running'):
+                guard.resolve(state['batch_id'], 'Synthetic inspection')
+        self.assertEqual(guard.resolve(state['batch_id'], 'Worker has exited')['phase'], 'complete')
+
+    def test_live_worker_prevents_start_even_without_previous_batch(self):
+        guard = self.guard()
+        with module.acquire_lock(self.base / 'worker.lock'):
+            with self.assertRaisesRegex(module.InputError, 'still running'):
+                guard.start()
+
 
 if __name__ == '__main__':
     unittest.main()

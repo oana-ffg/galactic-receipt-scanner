@@ -41,6 +41,11 @@ In a fresh delegated context, verify destination ownership through authenticated
 metadata yourself before launch; a profile or parent handoff alone may not satisfy the
 execution review. Select only the site ID, live URL, current user's owner role and access
 policy; never print the full metadata response, which can contain access credentials.
+Resolve the site from `.openai/hosting.json` and prefer the Sites connector for this
+read-only check. Do not reuse the parent's browser tab IDs: those handles can be owned
+by another task. Browser access is a fallback only when authenticated metadata is
+unavailable. Complete these checks before requesting the worker launch, rather than
+launching first and collecting the missing evidence after a rejection.
 Read only the prepared profile's non-secret `origin` and `repository` fields and match
 them to that verified site and checkout. Use an authorized read-only execution context
 if the protected profile requires the owner's identity; do not weaken its permissions.
@@ -52,6 +57,12 @@ checks establish destination identity; they do not grant missing user authorizat
 
 Each fresh Luna handles one document and owns its helper session. The coordinator sends
 the assignment and awaits a compact outcome; it never forwards individual requests.
+Use `collaboration.send_message` for progress to the parent, never the app's
+`send_message_to_thread`. A terminal blocker ends this worker: report the exact failed
+stage and whether any Python process or claim exists, close a known safe unsubmitted
+session, and return without further launches or claims. Preserve uncertain operations
+for reconciliation. Do not announce "blocked before claim" and then continue setup or
+retry the launch; the parent may already have stopped the batch on that report.
 Launch from Luna's own shell tool using the provided
 absolute paths and exact argument order, `tty: true`, `login: false`, and
 `sandbox_permissions: "require_escalated"` in the shell tool call:
@@ -107,6 +118,9 @@ around it. Do not count the document until verification actually succeeds.
 use `receipt-processing-scheduled`, matching their narrow standing approval; manual
 batches retain their own task owner.
 This command does not acquire or replace the held guard and does not claim work.
+It can also verify a completed worker from the current blocked batch for authorized
+reconciliation, using that batch's exact owner. This read-only verification does not
+resume the batch or authorize another claim.
 It reads `.local/processing-host.json`, validates the worker's existing destination,
 checks saved state and emits `verified: true` plus an immutable private verification
 file. Require exit zero and that complete result before counting the document; retain
@@ -133,11 +147,26 @@ handoff, state that the coordinator already holds the batch guard; Luna must not
 a second one. Send `{"op":"status"}` to the SAME guard session and require `phase: active`
 before each new worker. If that session died, stop; do not restart the guard or continue
 under an unverified lock. Keep every worker sequential and await its actual completion.
+Python binds each new worker to the active batch and checks its state and live lock
+again immediately before a fresh claim. A stopped batch cannot admit a new claim;
+existing claims can still be safely completed or reconciled in their original session.
+Batch state changes and new claim requests share an OS lock. If a stop returns an
+`input_error` saying a claim is in flight, keep the same guard session, await that
+worker's actual claim response, then repeat the stop. Do not treat lock contention as
+a successful stop, start another guard, or retry the receipt claim.
 
 After the assigned count is verified, or a worker confirms the queue is empty/busy,
 send `{"op":"finish"}` and require `ok: true, phase: complete` before the parent final.
-The script refuses to finish over a failed or unfinished worker journal. On an actual
-worker failure send `{"op":"block","reason":"non-sensitive failure summary"}` and stop.
+The script refuses to finish over a failed, unfinished or still-running worker. On an
+actual worker failure send `{"op":"block","reason":"non-sensitive failure summary"}`
+and require `ok: true, phase: blocked` before treating the guard as stopped. If the
+response says a claim is in flight, await that same worker's response/terminal state,
+then retry `block` through the SAME guard session. Do not close its stdin or end the
+parent on a rejected block. Confirm the guard exits after acknowledging the stop.
+Stop dispatch immediately, but do not confuse an intermediate child message with a
+terminal child result. Confirm the child has stopped and record its Python exit and
+claim state before the parent final. A blocked batch can still have an in-flight
+worker requiring reconciliation; never report "no claim" from an earlier snapshot.
 Unexpected process exit leaves an active/blocked record that prevents automatic restart.
 Never declare an incomplete batch complete merely to release the guard.
 

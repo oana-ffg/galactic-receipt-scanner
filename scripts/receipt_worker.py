@@ -20,6 +20,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
 from receipt_ppocr import PPBackend
+from receipt_locks import LockBusy, acquire_lock, lock_held
 from receipt_api import ScannerClient, ClientError, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
@@ -182,18 +183,10 @@ class Worker:
         base = self.repo / ".local" / "receipt-worker"
         require(all(not p.is_symlink() and not p.is_junction() for p in (self.repo / ".local", base)), "Worker cache must not be a symlink or junction.")
         artifact_directory(base)
-        self.lock = (base / "worker.lock").open("a+b")
-        self.lock.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            if not self.lock.read(1):
-                self.lock.write(b"0")
-                self.lock.flush()
-            self.lock.seek(0)
-            msvcrt.locking(self.lock.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            self.lock = acquire_lock(base / "worker.lock")
+        except LockBusy:
+            raise InputError("Another worker process is still running.") from None
         self.mutex = threading.RLock()
         self.stop_heartbeat = threading.Event()
         pointer = base / "active-run.json"
@@ -214,9 +207,10 @@ class Worker:
             require(self.state.get("confirmation_provider", "qwen") == self.confirmation_provider,
                     "Resume with the original confirmation provider; do not mix workflow evidence.")
         else:
+            batch = self.active_batch(base)
             require(not self.work.exists(), "Worker run already exists.")
             artifact_directory(self.work)
-            self.state = {"run_id": run_id, "origin": self.client.origin, "phase": "ready", "claim": None,
+            self.state = {"run_id": run_id, "batch_id": batch["batch_id"], "origin": self.client.origin, "phase": "ready", "claim": None,
                           "confirmation_provider": self.confirmation_provider,
                           "capture_ids": [], "capture_hashes": {}, "document_ids": [], "sources": {}, "prepared": {}, "sequence": 0}
             self.save("viewer-preflight.png", synthetic_png(), binary=True)
@@ -224,6 +218,17 @@ class Worker:
         temporary = base / ("active-" + uuid.uuid4().hex + ".json")
         write_new_file(temporary, json.dumps({"run_id": run_id}).encode())
         replace_journal_file(temporary, pointer)
+
+    @staticmethod
+    def active_batch(base):
+        path = base / "batch-state.json"
+        require(path.is_file() and not path.is_symlink(), "A held active batch is required before a new claim.")
+        batch = json.loads(path.read_text(encoding="utf-8"))
+        require(isinstance(batch, dict) and isinstance(batch.get("batch_id"), str)
+                and re.fullmatch(r"[0-9a-f]{32}", batch["batch_id"])
+                and batch.get("phase") == "active" and lock_held(base / "batch.lock"),
+                "Batch is stopped or its coordinator lock is gone; do not claim another document.")
+        return batch
 
     def load(self, name):
         return json.loads((self.work / name).read_text(encoding="utf-8"))
@@ -772,17 +777,25 @@ class Worker:
         if op == "claim":
             require(self.state["phase"] == "ready", "One claim only per worker process; start no replacement document.")
             require(message.get("viewer_checked") is True, "Open the synthetic image before claiming.")
-            previous_state = deepcopy(self.state)
-            self.state["phase"] = "claim-uncertain"
-            self.state["claim_started"] = time.time()
-            self.checkpoint_intent(previous_state)
-            result = self.post("claim", {"stage": "small"})
-            self.state["claim"] = result["claim"]
-            self.state["phase"] = "claimed" if result["claim"] else "empty"
-            if result["claim"]:
-                self.discover(result["claim"]["document"])
-            self.record("claim-response", result)
-            return {**clean(result), **self.summary()}
+            try:
+                transition = acquire_lock(self.work.parent / "batch-transition.lock")
+            except LockBusy:
+                raise InputError("Batch transition is in progress; await the coordinator's result before claiming.") from None
+            with transition:
+                batch = self.active_batch(self.work.parent)
+                require(batch["batch_id"] == self.state.get("batch_id"),
+                        "Worker belongs to a different batch; do not claim under a replacement coordinator.")
+                previous_state = deepcopy(self.state)
+                self.state["phase"] = "claim-uncertain"
+                self.state["claim_started"] = time.time()
+                self.checkpoint_intent(previous_state)
+                result = self.post("claim", {"stage": "small"})
+                self.state["claim"] = result["claim"]
+                self.state["phase"] = "claimed" if result["claim"] else "empty"
+                if result["claim"]:
+                    self.discover(result["claim"]["document"])
+                self.record("claim-response", result)
+                return {**clean(result), **self.summary()}
         if op == "document":
             require(self.state["phase"] in {"claimed", "drafted", "submitted", "pdf", "complete"}, "No confirmed document is available.")
             if self.state["phase"] in {"claimed", "drafted"}:
