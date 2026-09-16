@@ -221,6 +221,7 @@ class WorkerTests(unittest.TestCase):
             return {"pages": worker.state["rendered"], "dpi": dpi}
         worker.render = render
         worker.render_file = lambda path, pages, dpi, label: [f"synthetic-{label}-{i + 1}.jpg" for i in range(pages)]
+        worker.render_pages = lambda path, pages, dpi, label, format: [f"synthetic-{label}-{i + 1}.{format}" for i in range(pages)]
         return worker
 
     def send(self, op, **fields):

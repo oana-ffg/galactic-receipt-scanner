@@ -1,5 +1,13 @@
 # Luna worker protocol
 
+**Normal Luna runs use [the short flow](luna-flow.md): begin → inspect → review → finish.**
+This longer reference is for coordinator setup, maintenance and recovery of the
+underlying individual operations. Do not send it as required reading to every Luna.
+Grouped operations preserve the same checkpoints and stop on uncertain writes.
+`finish` attests automatically only after Luna approves every draft page and Python
+verifies identical ordered lossless renders of the final PDF; otherwise it returns
+final render paths and an `attest` template for a real final-page inspection.
+
 Use this interface for Luna on a host with a configured worker profile and standing
 approval. It covers the complete small-stage workflow in one process. Do not use the
 inline Python recipes from the older worker runbook for this path. Astra still uses

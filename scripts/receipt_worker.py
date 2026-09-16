@@ -28,6 +28,7 @@ WINDOWS_REPLACE_ATTEMPTS = 7
 WINDOWS_TRANSIENT_REPLACE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EBUSY}
 WINDOWS_TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
 OPERATIONS = {
+    "begin", "inspect", "review", "finish",
     "status", "claim", "observe", "context", "document", "originals", "previews", "draft", "prepare", "confirm", "assess", "categories",
     "category", "validate", "submit", "pdf", "render", "attest", "renew", "release",
     "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit",
@@ -60,6 +61,9 @@ def validate_request(message):
     if not isinstance(message, dict) or not isinstance(message.get("op"), str) or message["op"] not in OPERATIONS:
         raise ProtocolInputError("Expected a request object with a supported op.")
     required = {
+        "inspect": {"observation": dict},
+        "review": {"extraction": dict, "page_review": dict},
+        "finish": {"extraction": dict, "rationale": str, "layout_evidence": str},
         "document": {"document_id": str},
         "validate": {"extraction": dict},
         "draft": {"extraction": dict, "page_review": dict},
@@ -124,6 +128,15 @@ def clean(value):
     if isinstance(value, list):
         return [clean(v) for v in value]
     return value
+
+
+def extraction_template():
+    """Unfilled model response, never a saved extraction or inferred reading."""
+    return dict(type="unknown", vendor=None, receipt_date=None, reference=None,
+        currency=None, has_handwriting=None, has_payment_slip=None, confirmed_arithmetic_mismatch=False,
+        payment_status="unknown", card_last_four=None, line_items=[], adjustments=[], payment_adjustments=[],
+        total_minor=None, charged_total_minor=None, vat_minor=None, tax_basis="unknown",
+        completeness="uncertain", category_id=None, certainty="low", uncertainties=[], broken_reasons=[], evidence="")
 
 
 def synthetic_png():
@@ -303,13 +316,18 @@ class Worker:
         raise InputError("Capture page was not discovered in this receipt context.")
 
     def render_file(self, path, pages, dpi, label):
+        return self.render_pages(path, pages, dpi, label, "jpeg")
+
+    def render_pages(self, path, pages, dpi, label, format):
         require(dpi in (150, 300), "Rendering supports 150 or 300 dpi.")
+        require(format in {"jpeg", "png"}, "Unsupported page render format.")
         prefix = self.work / (label + "-" + uuid.uuid4().hex)
-        process = subprocess.run([self.renderer, "-r", str(dpi), "-jpeg", path, str(prefix)],
+        process = subprocess.run([self.renderer, "-r", str(dpi), "-" + format, path, str(prefix)],
             capture_output=True, timeout=180, cwd=self.repo, env=self.env)
         if process.returncode:
             raise ClientError("Prepared PDF renderer failed.")
-        paths = sorted(self.work.glob(prefix.name + "-*.jpg"), key=lambda p: int(p.stem.rsplit("-", 1)[1]))
+        suffix = "jpg" if format == "jpeg" else "png"
+        paths = sorted(self.work.glob(prefix.name + "-*." + suffix), key=lambda p: int(p.stem.rsplit("-", 1)[1]))
         require(len(paths) == pages, "PDF rendered page count differs from saved source pages.")
         return [str(p) for p in paths]
 
@@ -510,7 +528,7 @@ class Worker:
         pixel_pdf = self.client.image_pdf(pages, self.work / "draft")
         verify(pixel_pdf["pages"] == len(pages) and pixel_pdf["layouts"] == [layouts[cid] for cid in retained],
                "Frozen pixel layout differs from the reviewed previews.")
-        rendered = self.render_file(pixel_pdf["path"], pixel_pdf["pages"], 300, "draft-page")
+        rendered = self.render_pages(pixel_pdf["path"], pixel_pdf["pages"], 300, "draft-page", "png")
         frozen = {"extraction": extraction, "grouping": deepcopy(message.get("grouping")),
                   "page_review": deepcopy(message["page_review"]),
                   "target": deepcopy(target),
@@ -632,14 +650,7 @@ class Worker:
         pdf = self.state.get("pdf")
         require(pdf is not None, "Generate the PDF before rendering.")
         require(hashlib.sha256(Path(pdf["path"]).read_bytes()).hexdigest() == pdf["sha256"], "Local PDF changed; preserve and reconcile.")
-        prefix = self.work / ("pdf-page-" + uuid.uuid4().hex)
-        process = subprocess.run([self.renderer, "-r", str(dpi), "-png", pdf["path"], str(prefix)],
-            capture_output=True, timeout=180, cwd=self.repo, env=self.env)
-        if process.returncode:
-            raise ClientError("Prepared PDF renderer failed.")
-        paths = sorted(self.work.glob(prefix.name + "-*.png"), key=lambda p: int(p.stem.rsplit("-", 1)[1]))
-        require(len(paths) == pdf["pages"], "PDF rendered page count differs from saved source pages.")
-        self.state["rendered"] = [str(p) for p in paths]
+        self.state["rendered"] = self.render_pages(pdf["path"], pdf["pages"], dpi, "pdf-page", "png")
         self.checkpoint()
         return {"pages": self.state["rendered"], "dpi": dpi, "sha256": pdf["sha256"]}
 
@@ -663,11 +674,142 @@ class Worker:
         self.checkpoint()
         return {"recovered": True, "pdf": intent, **self.render(150)}
 
+    def workflow_step(self, op, **fields):
+        """Run the existing bounded operation, preserving its recovery checkpoints."""
+        self.state["workflow_step"] = op
+        self.checkpoint()
+        started = time.monotonic()
+        result = self.dispatch({"op": op, **fields})
+        self.record("workflow-step", {"op": op, "seconds": round(time.monotonic() - started, 3), "result": result})
+        self.state.pop("workflow_step", None)
+        self.checkpoint()
+        return result
+
+    def begin(self, message):
+        require(set(message) == {"op", "viewer_checked"}, "begin needs only viewer_checked after opening the preflight image.")
+        # A correctable crop error can leave a known claim; never issue a second claim.
+        require(self.state["phase"] in {"ready", "claimed"}, "begin requires a fresh or already confirmed claim.")
+        if self.state["phase"] == "ready":
+            result = self.workflow_step("claim", viewer_checked=message["viewer_checked"])
+            if self.state["phase"] == "empty":
+                return result
+        require(message["viewer_checked"] is True, "Open the preflight image before begin.")
+        cid = self.state["claim"]["document"]["pages"][0]["captureId"]
+        preview = self.state.get("preview_records", {}).get(cid)
+        if preview is None:
+            preview = self.workflow_step("previews", capture_ids=[cid])[0]
+        return {**self.summary(), "claimed_preview": preview, "next": "inspect",
+                "request": {"op": "inspect", "observation": dict(capture_id=cid, type=None,
+                    vendor=None, receipt_date=None, currency=None, total_minor=None, card_last_four=None)}}
+
+    def inspect(self, message):
+        require(set(message) <= {"op", "observation", "correction_reason"}, "Unknown inspect option.")
+        require(self.state["phase"] == "claimed", "Inspect neighbors before freezing the draft.")
+        if self.state.get("claimed_observation") != message["observation"]:
+            self.workflow_step("observe", **{k: v for k, v in message.items() if k != "op"})
+        context = self.workflow_step("context")
+        claimed = self.state["claim"]["document"]
+        ids = [p["captureId"] for p in claimed["pages"]][1:]
+        if message["observation"]["type"] in {"fragment", "payment-slip"}:
+            ids += self.state.get("previous_ids", [])[:1]
+        ids += self.state.get("lookahead_ids", [])[:3]
+        ids = list(dict.fromkeys(cid for cid in ids if cid != claimed["pages"][0]["captureId"]))
+        previews = self.workflow_step("previews", capture_ids=ids) if ids else []
+        categories = self.workflow_step("categories")
+        retained = [p["captureId"] for p in claimed["pages"]]
+        return {"context": context, "previews": previews, "categories": categories,
+                "next": "review", "request": {"op": "review", "extraction": extraction_template(),
+                    "page_review": {"capture_ids": retained, "excluded": []}}}
+
+    def review(self, message):
+        require(set(message) <= {"op", "extraction", "grouping", "category_name", "page_review"}, "Unknown review option.")
+        result = self.workflow_step("draft", **{k: v for k, v in message.items() if k != "op"})
+        if not result.get("drafted"):
+            return result
+        frozen = self.state["draft"]
+        self.workflow_step("prepare", capture_ids=[p["captureId"] for p in frozen["target"]["pages"]])
+        confirmation = self.workflow_step("confirm")
+        return {"draft": result, "confirmation": confirmation,
+                "initial_validation": self.check("validate", extraction=frozen["extraction"]),
+                "next": "finish", "request": {"op": "finish", "extraction": deepcopy(frozen["extraction"]),
+                    "rationale": "", "all_pages_inspected": False,
+                    "layout_evidence": ""}}
+
+    def finish(self, message):
+        allowed = {"op", "extraction", "rationale",
+                   "all_pages_inspected", "layout_evidence", "category_name"}
+        if set(message) - allowed or self.state["phase"] != "drafted" or not self.state.get("confirmation"):
+            raise ProtocolInputError("finish requires the saved draft and its independent confirmation.")
+        frozen = self.state["draft"]
+        if (message.get("all_pages_inspected") is not True
+                or not 0 < len(message["layout_evidence"].strip()) <= 2000):
+            raise ProtocolInputError("Inspect every returned draft page, then provide layout_evidence (1-2000 characters).")
+        # This session has exactly one immutable draft and confirmation. Pin their
+        # hashes internally rather than asking the model to transcribe machine IDs.
+        result = self.workflow_step("assess", confirmation_sha256=self.state["confirmation"]["sha256"],
+            **{k: message[k] for k in ("extraction", "rationale", "category_name") if k in message})
+        if not result.get("assessed"):
+            return result
+        self.state["layout_approval"] = {"sha256": frozen["pixel_pdf"]["sha256"], "evidence": message["layout_evidence"]}
+        self.record("layout-approval", self.state["layout_approval"])
+        self.workflow_step("submit")
+        pdf_result = self.workflow_step("pdf")
+        if self.state["phase"] == "complete":
+            return {**self.summary(), "pdf_applicable": False}
+        proof = self.compare_pdf_pixels()
+        if not proof["identical"]:
+            return {**pdf_result, "needs_pdf_review": True, "next": "attest",
+                    "reason": "Final rendered pixels differ from the approved draft; inspect all final pages before attesting.",
+                    "request": {"op": "attest", "pdf_sha256": self.state["pdf"]["sha256"],
+                                "all_pages_inspected": False, "evidence": ""}}
+        return self.workflow_step("attest", pdf_sha256=self.state["pdf"]["sha256"], all_pages_inspected=True,
+            evidence="Luna inspected every assembled draft page. Python verified identical ordered page renders "
+                     "after adding the OCR layer, and the upload hash/revision. Draft inspection: " + message["layout_evidence"][:1700])
+
+    def compare_pdf_pixels(self):
+        """Fail closed to visual review unless ordered lossless Poppler renders match."""
+        draft, pdf = self.state["draft"]["pixel_pdf"], self.state["pdf"]
+        verify(self.state["layout_approval"]["sha256"] == draft["sha256"]
+               == hashlib.sha256(Path(draft["path"]).read_bytes()).hexdigest(), "Approved draft PDF changed.")
+        verify(pdf["sha256"] == hashlib.sha256(Path(pdf["path"]).read_bytes()).hexdigest(), "Final PDF changed.")
+        verify(pdf["pages"] == draft["pages"] == len(self.state["document"]["pages"]), "Final page count differs from approved draft.")
+        baseline = self.state["draft"]["rendered"]  # The exact 300 dpi PNGs Luna inspected.
+        final = self.state["rendered"]
+        hashes = lambda paths: [hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths]
+        before, after = hashes(baseline), hashes(final)
+        verify(before == [page["sha256"] for page in self.state["draft"]["images"]], "Inspected draft render changed.")
+        verify(len(before) == len(after) == draft["pages"], "Rendered page count differs from the approved draft.")
+        proof = {"draft_sha256": draft["sha256"], "pdf_sha256": pdf["sha256"], "dpi": 300,
+                 "draft_pages": baseline, "final_pages": final, "draft_render_sha256": before,
+                 "final_render_sha256": after, "identical": before == after}
+        self.state["pixel_verification"] = self.record("pixel-verification", proof)
+        self.checkpoint()
+        return proof
+
+    def completion(self):
+        """One durable, content-free handoff; the parent still verifies remote state."""
+        if "completion_file" not in self.state:
+            initial = self.state.get("draft", {}).get("extraction", {})
+            assessed = self.state.get("assessment", {})
+            pdf = self.state.get("pdf")
+            value = {**self.summary(), "batch_id": self.state.get("batch_id"),
+                "initial_confidence": initial.get("certainty"),
+                "updated_confidence": assessed.get("extraction", {}).get("certainty"),
+                "changed_fields": assessed.get("assessment", {}).get("changed_fields", []),
+                "pdf": {k: pdf[k] for k in ("sha256", "revision", "pages", "searchable")} if pdf else None,
+                "pixel_verification_file": self.state.get("pixel_verification"),
+                "initial_file": self.state.get("draft_file"), "updated_file": self.state.get("assessment_file")}
+            self.state["completion_file"] = self.record("completion", value)
+            self.checkpoint()
+        return str(self.work / self.state["completion_file"])
+
     def dispatch(self, message):
         require(isinstance(message, dict) and message.get("op") in OPERATIONS, "Unknown receipt operation.")
         op = message["op"]
         if self.state.get("failed"):
             require(op in {"status", "release", "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit"}, "Worker stopped after failure; owner direction is required to resume.")
+        if op in {"begin", "inspect", "review", "finish"}:
+            return getattr(self, op)(message)
         if op == "status":
             return self.summary()
         if op == "quit":
@@ -939,9 +1081,11 @@ class Worker:
                     layout["crop"] = [0, 0, pixels[0], pixels[1]]
                 rendered = self.render_file(preview["path"], 1, 300, "crop-preview")
                 self.state["layouts"][cid] = layout
+                value = {"captureId": cid, "preview": rendered[0], "layout": layout,
+                         "pixel_pdf_sha256": preview["sha256"]}
+                self.state.setdefault("preview_records", {})[cid] = value
                 self.checkpoint()
-                values.append({"captureId": cid, "preview": rendered[0], "layout": layout,
-                               "pixel_pdf_sha256": preview["sha256"]})
+                values.append(value)
             return values
         if op == "categories":
             return self.client.get("/api/processing/categories")
@@ -1003,7 +1147,7 @@ class Worker:
             self.state["pdf"] = pdf
             self.state["phase"] = "pdf"
             self.checkpoint()
-            return {"pdf": pdf, **self.render(150)}
+            return {"pdf": pdf, **self.render(300 if self.state.get("layout_approval") else 150)}
         if op == "render":
             return self.render(message.get("dpi", 300))
         if op == "attest":
@@ -1081,6 +1225,8 @@ class Worker:
             self.record("input", message)
             validate_request(message)
             result = self.dispatch(message)
+            if self.state["phase"] == "complete":
+                result = {**result, "completion_file": self.completion()}
             self.record("result", result)
             return {"ok": True, "op": op, "result": clean(result), "at": datetime.now(timezone.utc).isoformat()}
         except JournalCheckpointError as error:
@@ -1107,7 +1253,8 @@ class Worker:
             self.state["failed"] = prior_failure
             self.record("reconciliation-failure", {"operation": op, "error": error})
         else:
-            self.state["failed"] = {"operation": op, "error": error}
+            self.state["failed"] = {"operation": op, "error": error,
+                                    "step": self.state.get("workflow_step", op)}
             self.checkpoint()
         return {"ok": False, "blocking": True, "op": op, "error": error, **self.summary()}
 
