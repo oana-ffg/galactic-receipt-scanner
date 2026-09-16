@@ -365,7 +365,11 @@ clears the hold. This never clears uncertain writes or edits historical requests
 Scheduled runs must not acknowledge their own failure to keep processing.
 
 `input_error` means the requested operation was rejected locally; correct the stated
-input without repeating a remote write. A `validate`/`draft` response with validation
+input without repeating a remote write. For `attest`, missing/invalid
+`all_pages_inspected` or inspection `evidence` is an `input_error` before any remote
+operation; after actually inspecting every final PDF page, correct the request in the
+same session. Changed document/PDF bytes or an uncertain write remain blocking.
+A `validate`/`draft` response with validation
 errors and `drafted: false` likewise requires a corrected extraction before freezing.
 
 `blocking: true`, a tool rejection or a process crash stops the entire batch. Report the
@@ -393,8 +397,12 @@ interruptions. It verifies server metadata against the saved local PDF without d
 or regenerating it. If the upload did not persist, `retry-pdf` resends those same saved bytes.
 An uncertain claim can be terminalized only after the maximum lease/request window plus a
 clock margin has elapsed; until then it remains possibly active. None of these operations
-claims a replacement. Reinspect unchanged local PDF
-pages before a renewed attestation when reconciliation reports phase `pdf`.
+claims a replacement. A legacy pre-write `attest` failure held at phase `pdf` can
+also be reconciled on explicit owner-directed resume with a bounded `rationale`.
+Python verifies the unchanged live revision, ordered pages, stored PDF and local
+PDF hash, records the original failure and its resolution, and requires a new render.
+Reinspect every unchanged local PDF page before a renewed attestation when
+reconciliation reports phase `pdf`.
 
 Report claim, submit and completion UTC times, saved document ID/revision/page count,
 status, PDF attestation, initial/final confidence, changed fields, confirmation hash,

@@ -641,6 +641,103 @@ class WorkerTests(unittest.TestCase):
         self.send("attest", pdf_sha256=pdf["pdf"]["sha256"], all_pages_inspected=True,
                   evidence="Synthetic inspection after opening final renders.")
 
+    def test_attestation_input_can_be_corrected_without_stopping_or_writing(self):
+        self.prepared()
+        self.send("submit")
+        pdf = self.send("pdf")["pdf"]
+        request = dict(op="attest", pdf_sha256=pdf["sha256"])
+        invalid = [dict(evidence="Synthetic inspection."),
+                   dict(all_pages_inspected=False, evidence="Synthetic inspection."),
+                   dict(all_pages_inspected=1, evidence="Synthetic inspection."),
+                   dict(all_pages_inspected=True),
+                   dict(all_pages_inspected=True, evidence="  "),
+                   dict(all_pages_inspected=True, evidence="x" * 2001),
+                   dict(all_pages_inspected=True, evidence={})]
+        for fields in invalid:
+            with self.subTest(fields=fields):
+                calls = list(self.fake.calls)
+                result = self.worker.handle({**request, **fields})
+                self.assertIn("input_error", result)
+                self.assertNotIn("blocking", result)
+                self.assertNotIn("failed", self.worker.state)
+                self.assertEqual(self.worker.state["phase"], "pdf")
+                self.assertEqual(self.fake.calls, calls)
+                self.assertFalse(self.fake.documents[DID]["checks"]["pdf"])
+        result = self.send("attest", pdf_sha256=pdf["sha256"], all_pages_inspected=True,
+                           evidence="Synthetic inspection after opening every final render.")
+        self.assertTrue(result["pdf_review_attested"])
+        self.assertEqual(self.fake.calls.count(("POST", "/api/processing/pdf-review")), 1)
+
+    def test_owner_recovers_prewrite_attestation_failure_and_reinspects(self):
+        self.prepared()
+        self.send("submit")
+        self.send("pdf")
+        failure = dict(operation="attest", error="Synthetic pre-write validation failure.")
+        self.worker.state["failed"] = deepcopy(failure)
+        self.worker.checkpoint()
+        run_id = self.worker.state["run_id"]
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        calls = list(self.fake.calls)
+        self.assertIn("input_error", self.worker.handle(dict(op="reconcile")))
+        self.assertEqual(self.worker.state["failed"], failure)
+        self.assertEqual(self.fake.calls, calls)
+        result = self.send("reconcile", rationale="Owner requested repair of the synthetic pre-write failure.")
+        self.assertEqual(result["next"], "render-inspect-attest")
+        self.assertNotIn("failed", self.worker.state)
+        self.assertNotIn("rendered", self.worker.state)
+        self.assertEqual(self.worker.state["phase"], "pdf")
+        self.assertTrue(all(method == "GET" for method, _ in self.fake.calls[len(calls):]))
+        records = [json.loads(p.read_text()) for p in self.worker.work.glob("*failure-resolution*.json")]
+        self.assertTrue(any(record.get("failure") == failure for record in records))
+        self.send("render")
+        self.send("attest", pdf_sha256=self.worker.state["pdf"]["sha256"],
+                  all_pages_inspected=True, evidence="Synthetic pages inspected again after recovery.")
+
+    def test_attestation_recovery_preserves_original_failure_across_read_errors(self):
+        self.prepared()
+        self.send("submit")
+        self.send("pdf")
+        failure = dict(operation="attest", error="Synthetic pre-write failure.")
+        self.worker.state["failed"] = deepcopy(failure)
+        self.worker.checkpoint()
+        run_id = self.worker.state["run_id"]
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        original = deepcopy(self.fake.documents[DID])
+        request = dict(op="reconcile", rationale="Owner requested synthetic recovery.")
+        for fields in ({"pdf": None}, {"pdf": {"sha256": "a" * 64, "revision": original["revision"]}},
+                       {"revision": original["revision"] + 1}, {"pages": []}):
+            with self.subTest(fields=fields):
+                self.fake.documents[DID] = {**deepcopy(original), **fields}
+                result = self.worker.handle(request)
+                self.assertTrue(result["blocking"])
+                self.assertEqual(self.worker.state["failed"], failure)
+        self.fake.documents[DID] = original
+        with patch.object(self.fake, "get", side_effect=ClientError("Synthetic temporary read failure.")):
+            result = self.worker.handle(request)
+        self.assertTrue(result["blocking"])
+        self.assertEqual(self.worker.state["failed"], failure)
+        self.assertNotIn(("POST", "/api/processing/pdf-review"), self.fake.calls)
+        self.assertEqual(self.send("reconcile", rationale=request["rationale"])["next"], "render-inspect-attest")
+
+    def test_prewrite_attestation_recovery_preserves_hold_on_changed_pdf(self):
+        self.prepared()
+        self.send("submit")
+        self.send("pdf")
+        self.worker.state["failed"] = dict(operation="attest", error="Synthetic pre-write failure.")
+        self.worker.checkpoint()
+        run_id = self.worker.state["run_id"]
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        Path(self.worker.state["pdf"]["path"]).write_bytes(b"changed synthetic bytes")
+        calls = list(self.fake.calls)
+        result = self.worker.handle(dict(op="reconcile", rationale="Owner requested synthetic recovery."))
+        self.assertTrue(result["blocking"])
+        self.assertIn("failed", self.worker.state)
+        self.assertFalse(self.fake.documents[DID]["checks"]["pdf"])
+        self.assertTrue(all(method == "GET" for method, _ in self.fake.calls[len(calls):]))
+
     def test_pp_confirmation_never_calls_qwen_and_preserves_reassessment(self):
         self.worker.confirmation_provider = "ppocr"
         with patch.object(module.receipt_qwen, "extract", side_effect=AssertionError("Qwen must not run")):

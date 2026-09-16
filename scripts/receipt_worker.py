@@ -700,6 +700,27 @@ class Worker:
                 self.state.pop("failed", None)
                 self.checkpoint()
                 return self.summary()
+            if self.state["phase"] == "pdf" and self.state.get("failed"):
+                failure = deepcopy(self.state["failed"])
+                rationale = message.get("rationale")
+                if failure.get("operation") != "attest" or not isinstance(rationale, str) or not 0 < len(rationale.strip()) <= 2000:
+                    raise ProtocolInputError("Owner-directed recovery of a pre-write attestation failure requires a rationale.")
+                doc, pdf = self.state["document"], self.state["pdf"]
+                current = self.get_document(doc["id"])
+                verify(current["revision"] == doc["revision"] == pdf["revision"]
+                       and current["pages"] == doc["pages"] and len(current["pages"]) == pdf["pages"],
+                       "Document changed before attestation recovery.")
+                stored_pdf = current.get("pdf")
+                verify(isinstance(stored_pdf, dict) and stored_pdf.get("sha256") == pdf["sha256"]
+                       and stored_pdf.get("revision") == pdf["revision"],
+                       "Stored PDF changed before attestation recovery.")
+                verify(hashlib.sha256(Path(pdf["path"]).read_bytes()).hexdigest() == pdf["sha256"],
+                       "Local PDF changed before attestation recovery.")
+                self.record("failure-resolution", {"failure": failure, "rationale": rationale})
+                self.state.pop("failed")
+                self.state.pop("rendered", None)
+                self.checkpoint()
+                return {**self.summary(), "next": "render-inspect-attest"}
             if self.state["phase"] == "draft-uncertain":
                 claim = self.state["claim"]
                 require(time.time() * 1000 >= claim["expires"] + 210000,
@@ -977,8 +998,9 @@ class Worker:
             if message["pdf_sha256"] != self.state["pdf"]["sha256"]:
                 raise ProtocolInputError("Inspect the actual final PDF renders and supply their pdf_sha256.")
             evidence = message.get("evidence")
-            require(message.get("all_pages_inspected") is True and isinstance(evidence, str)
-                    and 0 < len(evidence.strip()) <= 2000, "Record the actual inspection of every PDF page.")
+            if not (message.get("all_pages_inspected") is True and isinstance(evidence, str)
+                    and 0 < len(evidence.strip()) <= 2000):
+                raise ProtocolInputError("attest requires all_pages_inspected: true and evidence describing the actual inspection of every PDF page (1-2000 characters).")
             pdf, doc = self.state["pdf"], self.state["document"]
             current = self.get_document(doc["id"])
             require(current["revision"] == doc["revision"] and current["pdf"]["sha256"] == pdf["sha256"], "Stored PDF changed; reconcile before attesting.")
@@ -1041,6 +1063,7 @@ class Worker:
 
     def handle(self, message):
         op = message.get("op") if isinstance(message, dict) else None
+        prior_failure = deepcopy(self.state.get("failed")) if op == "reconcile" else None
         try:
             self.record("input", message)
             validate_request(message)
@@ -1050,7 +1073,7 @@ class Worker:
         except JournalCheckpointError as error:
             diagnostic = error.diagnostic()
             # The journal could not record the failure, but this process must still stop.
-            self.state["failed"] = {"operation": op, "error": diagnostic}
+            self.state["failed"] = prior_failure or {"operation": op, "error": diagnostic}
             return {"ok": False, "blocking": True, "op": op, "error": diagnostic, **self.summary()}
         except ProtocolInputError as error:
             return {"ok": False, "input_error": str(error), "op": op}
@@ -1058,15 +1081,21 @@ class Worker:
             # If a write was already attempted, this is a workflow failure, not an editable input.
             if self.state["phase"] not in {"draft-uncertain", "confirmation-uncertain", "submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:
                 return {"ok": False, "input_error": str(error), "op": op}
-            return self.failure(op, str(error))
+            return self.failure(op, str(error), prior_failure)
         except ClientError as error:
-            return self.failure(op, str(error))
+            return self.failure(op, str(error), prior_failure)
         except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
-            return self.failure(op, "Receipt operation failed; private journal retained. No replacement claim allowed.")
+            return self.failure(op, "Receipt operation failed; private journal retained. No replacement claim allowed.", prior_failure)
 
-    def failure(self, op, error):
-        self.state["failed"] = {"operation": op, "error": error}
-        self.checkpoint()
+    def failure(self, op, error, prior_failure=None):
+        if op == "reconcile" and prior_failure:
+            # A failed recovery must not replace the failure needed for the next
+            # owner-directed attempt; retain the new diagnostic separately.
+            self.state["failed"] = prior_failure
+            self.record("reconciliation-failure", {"operation": op, "error": error})
+        else:
+            self.state["failed"] = {"operation": op, "error": error}
+            self.checkpoint()
         return {"ok": False, "blocking": True, "op": op, "error": error, **self.summary()}
 
     def heartbeat(self):
