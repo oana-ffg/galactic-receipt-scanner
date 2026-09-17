@@ -22,9 +22,9 @@ ownership, reimbursement or bank allocation. In existing extraction `evidence` n
 write Category with supporting items and, below high certainty, Confidence with specific
 uncertain fields and reasons. Refresh reassessed notes without rewriting the initial reading.
 
-1. Claim the small stage. Preview the first claimed page alone, inspect its crop and
+1. Claim the small stage. Read the first claimed page's PP text/coordinates alone and
    record `observe` with its own identifying values before retrieving context or other
-   pages. Then inspect the next available image and possible matches through the bounded
+   pages. Then read the next available scan's OCR and possible matches through the bounded
    protocol. Use raw originals only when uncertain. Confirm paper margins and save
    crop/rotation with the final page layout.
    Continue only while pages belong together; leave the
@@ -33,7 +33,7 @@ uncertain fields and reasons. Refresh reassessed notes without rewriting the ini
 2. Classify each page and the document. A receipt may also have an attached payment slip.
    Card details printed on a main receipt do not imply a separate attached slip. Detect
    handwriting presence only; no handwritten transcription. Preserve prior annotations.
-3. Extract financial fields independently from crop pixels before reading OCR: vendor/date/reference/currency,
+3. Extract financial fields from PP text/positions, opening crops when useful: vendor/date/reference/currency,
    printed quantities, unit prices, line amounts, adjustments, purchase and charged totals,
    VAT and tax basis. Unknown values are null; do not invent quantity 1 or unit prices
    simply because they can be inferred. Included VAT and informational savings are not
@@ -48,9 +48,10 @@ uncertain fields and reasons. Refresh reassessed notes without rewriting the ini
 5. Assign ONE whole-document category using existing descriptions; add a new private
    category with a distinct name and description only when none fits. This is a purchase
    category, not an ownership/account allocation decision.
-6. Use `draft` to persist the independent reading and frozen image-only PDF before
-   PP or external arithmetic. Prepare every retained region, then `confirm`.
-   This pins independent PP artifacts and returns ordinary OCR/math evidence, without Qwen.
+6. Use the four-request [short flow](luna-flow.md) to persist the OCR-assisted reading
+   and frozen image-only PDF. Python ensures matching PP for every retained region and confirms it.
+   This pins PP artifacts and returns ordinary OCR/math evidence, without Qwen.
+   The initial and final Luna readings share PP input; agreement is not independent corroboration.
    In this SAME Luna context, inspect disputed pixels, assess the findings and call
    `assess` with the complete revised extraction and rationale. Preserve initial values;
    corrections only belong in the separate reassessed reading. Accept or reject each

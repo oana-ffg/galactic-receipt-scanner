@@ -26,29 +26,35 @@ request through that same session with `write_stdin`: `JSON.stringify(request) +
 Await the actual response; poll that same session if the tool yields. Never resend a
 request just because it is still running. Never write a sequence of future requests.
 
-## Four requests, three visual decisions
+## Four requests: OCR first, images when useful
 
 1. **`{"op":"begin","viewer_checked":true}`** claims one document and returns its
-   first crop plus an `inspect` request template. Open only `claimed_preview.preview`.
-   Fill the short observation from this scan alone: type (`receipt`, `payment-slip`,
+   PP reading as `claimed_ocr`, an optional crop path, and an `inspect` request template.
+   Read only this scan's PP text and line coordinates first. Fill the short observation
+   from this scan alone: type (`receipt`, `payment-slip`,
    `fragment`, `other`), vendor, ISO date, currency, total in integer minor units and
    four card digits. Unknown values are null. This protects the claimed scan's identity
    from a neighboring transaction. A card slip without products is `payment-slip`.
+   Open `claimed_preview.preview` only if OCR/positioning is insufficient; do not perform
+   a separate visual transcription by default. Python reuses the nightly job's matching
+   PP artifacts or prepares a missing scan with the configured engine.
 
 2. **Send the filled `inspect` request.** Python records the observation and returns
-   the remaining claimed pages, up to three next crops, the preceding crop for a slip
-   or fragment, context, category descriptions and a `review` template. Open every
-   returned preview. Decide the ordered page membership and initial extraction using
-   your own vision. Review original crops by default, not the full camera photos.
+   PP text/coordinates for remaining claimed pages, up to three following scans, the
+   preceding scan for a slip or fragment, context, categories and a `review` template.
+   Read every returned OCR record. Decide page membership and extraction from that
+   evidence. Images are optional tools for ambiguity, positions, damage, handwriting,
+   unusual layouts or duplicate coverage. Use the crop first; raw photos remain available.
    Use the optional operations below if more evidence or a crop correction is needed.
 
 3. **Send `review` with `extraction`, `page_review`, optional `grouping` and optional
    `category_name`.** Python validates and saves the immutable initial reading/layout,
-   builds the assembled draft, prepares PP for every retained page, and saves independent
-   PP confirmation. It returns all draft render paths, confirmation/text/discrepancies,
+   builds the assembled draft, and pins the exact PP artifacts already read for every
+   retained page as confirmation. It returns all draft render paths, confirmation/text/discrepancies,
    arithmetic and a `finish` template. Open **every** `draft.rendered` page and check
-   its membership/order, crop, rotation and legibility. Read the PP findings and reassess
-   the values. PP receives pixels, not your initial extraction. Do not install OCR or
+   its membership/order, crop, rotation, handwriting and legibility. Read the findings
+   and reassess the values. This is a math/layout check of an OCR-assisted extraction,
+   not an independent Luna-versus-PP benchmark. PP receives pixels, not your extraction. Do not install OCR or
    invoke Qwen, Mistral or paid APIs.
 
 4. **Send the filled `finish` request.** Python binds it to this session's one immutable
@@ -83,6 +89,9 @@ evidence deliberately require your decision. Field rules:
 - `receipt_date`: real YYYY-MM-DD or null; never substitute scan time. `currency`:
   three uppercase letters or null. `card_last_four`: four digits as text or null.
 - `has_handwriting`, `has_payment_slip`, `confirmed_arithmetic_mismatch`: booleans.
+  PP cannot prove handwriting is absent. If no image has been checked, the initial
+  handwriting flag is provisional: explicitly note that handwriting has not yet been
+  visually checked. Resolve it when inspecting the assembled draft, before finish.
   A confirmed arithmetic mismatch needs a complete source and a checked discrepancy;
   omitted/deferred financial detail does not establish one.
 - `payment_status`: approved, declined, unknown, not-applicable. `tax_basis`: gross,
@@ -107,28 +116,29 @@ For supermarkets read [the four basket categories](supermarket-classification.md
 
 ## Grouping
 
-Apply the collection-specific scanning conventions in the parent's handoff. Inspect
-the next available crop even if this receipt looks complete; it may be a continuation,
+Apply the collection-specific scanning conventions in the parent's handoff. Read
+the next available scan's OCR even if this receipt looks complete; it may be a continuation,
 slip or duplicate. Continue through matching sections to an inspected unrelated/ambiguous
 boundary. If every image in a lookahead window is retained, request the next context
 window and inspect its boundary, or confirm there are no further scans. For a slip or
 fragment, inspect the immediately preceding scan too (normally supplied by inspect).
 
 `page_review.capture_ids` is the complete ordered capture list for this document.
-`page_review.excluded` contains `{capture_id, reason}` for **every other preview/raw
-source retrieved**, explaining why it stays outside this document. Build both from
+`page_review.excluded` contains `{capture_id, reason}` for **every other source whose
+OCR, preview or raw image was retrieved**, explaining why it stays outside this document. Build both from
 one selection. Viewing or transcribing a continuation does not attach it.
 
 To attach pages, include `grouping: {donor_ids, capture_ids, evidence}` in review:
 donor_ids are document IDs from context, capture_ids is the same ordered list as
 page_review. Python reads current donor records and preserves their original metadata;
 you need not make a separate document call unless the returned context is insufficient.
-Inspect all retained crops. Do not mark an available recognized continuation as missing.
+Read all retained scans' OCR and inspect crops when useful. Do not mark an available recognized continuation as missing.
 Membership and completeness are separate: unique overlapping text must be retained.
 
 Duplicates require visual coverage of the same transaction, not just equal vendor/date/
 amount. Prefer the clearer scan; keep unique backs/annotations. To mark the claimed
-document redundant, use `grouping: {duplicate_of: retained_document_id, evidence}`.
+document redundant, open both documents' images and use
+`grouping: {duplicate_of: retained_document_id, evidence, visual_duplicate_checked: true}`.
 Keep its original page list in page_review; exclude the retained target's inspected
 pages because they remain in that other document. Never transfer unrelated slip values
 onto the claimed scan. Ambiguous matches remain separate and flagged for review.
@@ -139,13 +149,15 @@ Initial layout and extraction are immutable; finish saves updated values separat
 
 ## Optional requests (only when needed)
 
+- `{"op":"ocr","capture_ids":[...]}`: PP text, line confidence and original-pixel
+  boxes for more discovered scans. Use this after fetching another context window.
 - `{"op":"previews","capture_ids":[...]}`: more discovered crops. To change a crop
   before review, add `layouts: {capture_id: {crop: [left,top,right,bottom], rotation: 0}}`.
   Bounds are original pixels; rotations are 0/90/180/270. Explicit crop:null selects
   the full original. Open returned paths; no generative cleanup or clipped paper edges.
 - `{"op":"originals","capture_ids":[...]}`: raw images for an uncertain crop/identity.
 - `{"op":"context","filters":{"after_capture":"last lookahead ID"}}`: next chronological
-  window; then request previews for the needed IDs. Optional date/total_minor/currency
+  window; then request OCR for the needed IDs. Optional date/total_minor/currency
   filters search candidates instead; they do not replace chronological boundary checks.
 - `{"op":"document","document_id":"discovered ID"}`: extra metadata for a candidate.
 - `{"op":"category","name":"...","description":"..."}`: a justified new category.

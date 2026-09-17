@@ -2,13 +2,43 @@
 import base64
 import hashlib
 import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from receipt_api import matches_prepared_ocr
-from receipt_ppocr import artifact, original_point
+from receipt_ppocr import artifact, original_point, PPBackend
 
 
 class PPTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('RECEIPT_PP_SMOKE_PROFILE'), 'Opt-in installed-runtime OCR smoke')
+    def test_installed_runtime_reads_synthetic_crop(self):
+        from PIL import Image, ImageDraw, ImageFont
+        profile = Path(os.environ['RECEIPT_PP_SMOKE_PROFILE']).resolve()
+        settings = json.loads(profile.read_text(encoding='utf-8'))['ppocr']
+        backend = PPBackend(profile, settings)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'receipt.png'
+            image = Image.new('RGB', (600, 300), 'white')
+            draw = ImageDraw.Draw(image)
+            font = ImageFont.load_default(size=35)
+            draw.text((25, 30), 'SYNTHETIC SHOP', font=font, fill='black')
+            draw.text((25, 100), 'TOTAL DKK 12.34', font=font, fill='black')
+            image.save(path)
+            source = dict(path=str(path), capture_id='synthetic', sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                          crop=[10, 10, 590, 290], rotation=0)
+            manifest, output = root / 'source.json', root / 'ocr.json'
+            manifest.write_text(json.dumps(source))
+            backend.run(manifest, output)
+            value = json.loads(output.read_text(encoding='utf-8'))
+            self.assertIn('SYNTHETIC', value['text'])
+            self.assertIn('12.34', value['text'])
+            self.assertEqual(value['source']['sha256'], source['sha256'])
+            self.assertEqual(value['provenance']['engine'], 'PP-OCRv6')
+
     @unittest.skipUnless(importlib.util.find_spec('pymupdf'), 'Prepared PDF test runtime is required')
     def test_invisible_unicode_text_stays_in_original_crop_for_every_rotation(self):
         import pymupdf

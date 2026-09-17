@@ -72,30 +72,31 @@ reassessment while preserving the initial reading. Heavier financial/model check
 run only on the owner's later selected documents; do not automatically drain every
 deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
 
-1. Luna inspects **detected document crops by default**, using the saved outline with a
-   paper margin. It groups related pages/slips and extracts their printed fields with its
-   own vision. Raw originals are available on request when the crop, completeness or
-   association is uncertain; do not feed full camera photos by default. Preserve original
-   bytes and record the chosen crop/rotation against their source hashes.
+1. Luna starts with **PP-OCRv6 text and line coordinates**, including chronological
+   neighbours, to group related pages/slips and extract values. The separate
+   [nightly OCR skill](../receipt-ocr-nightly/SKILL.md) prepares scans in advance; Python
+   reuses matching artifacts or prepares a missing scan with the existing runtime.
+   Source crops and raw originals are optional when ambiguity, positioning or other
+   visual evidence would help. No independent visual transcription is required by default.
 2. Finalize the ordered document layout and save Luna's first extraction plus an
-   **image-only PDF before ordinary OCR**. Supply the required `page_review` and explicit
+   **image-only PDF assembled from the selected scans**. Supply the required `page_review` and explicit
    `grouping` for donor pages per the Luna protocol; merely viewing them does not attach
-   them. Inspect all retained pages and verify the returned page IDs/order. This fixes which
+   them. Inspect the assembled PDF and verify the returned page IDs/order. This fixes which
    pixels belong to the document before later comparison; a single first-page preview
    is insufficient for a multipage document.
-3. Persist the initial Luna reading and frozen layout in the database. Prepare the
-   already configured local **PP-OCRv6** on every retained source crop with its saved
-   rotation. These are the same source pixels as the finalized image-only PDF; no raw
-   camera background or earlier model values are supplied to PP.
+3. Persist the initial OCR-assisted Luna reading and frozen layout in the database.
+   Ensure every retained page has PP matching that exact crop/rotation. A changed crop
+   needs matching OCR; unrelated source text must never substitute for it.
 4. Save PP text, text polygons, confidence and model/source provenance as immutable OCR
    artifacts. `confirm` pins those exact artifacts in the database and returns ordinary
    OCR/math evidence to the **same Luna worker**, with no Qwen call. PP is text recognition,
    not an independent vendor/category reasoning model. Its confidence is not a calibrated
    probability. Luna checks the PP text against the visible header, date and grouping.
-5. Luna reopens the relevant pixels and assesses the findings. It may correct its
+5. Luna checks the assembled PDF and arithmetic, using other images when helpful. It may correct its
    extraction, retain its original answer, or leave uncertainty. It must explain why;
    model agreement or balanced arithmetic alone is not proof. Save the updated full
    extraction and rationale separately, preserving the original Luna and PP records.
+   These two readings share PP input; do not report their agreement as independent OCR corroboration.
 6. Submit the reassessed reading, then generate/upload the searchable PDF with
    PP's invisible search text in the same frozen layout. Python compares ordered lossless
    renders against the visually approved draft and attests exact matches. If the renders
@@ -243,12 +244,12 @@ host's credential access and managed model spawning have been verified.
 
 Read [worker instructions](references/model-workers.md) and the
 [processing contract](references/processing-api.md). Keep unprocessed, awaiting-page,
-Astra-review, human-review and broken states distinct. **Each Luna/Astra worker must use
-its own built-in vision to inspect the verified originals and extract their contents.**
-Do not substitute OCR output or another model for that visual reading.
+Astra-review, human-review and broken states distinct. **Luna reads PP first and opens
+source images when useful; Astra's independent review still starts from original pixels.**
+Luna checks the assembled PDF for layout/handwriting before final submission.
 
 Reuse the already prepared local PP-OCRv6 runtime through the existing client for
-independent text evidence and searchable PDF text. Processing workers must not
+OCR text evidence and searchable PDF text. Processing workers must not
 install or download OCR packages, engines or models, or add another OCR pipeline. If the
 prepared runtime is missing or broken, report the setup failure to the coordinator.
 The ordinary OCR pass still runs before model submission; its output is unverified

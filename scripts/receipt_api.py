@@ -211,9 +211,12 @@ class ScannerClient:
             raise ClientError("Original hash/size verification failed; existing files were preserved.")
         if not cached:
             write_new_file(target, body)
+        outline = meta.get("manual_outline")
+        if outline and outline.get("source_sha256") != sha:
+            raise ClientError("Manual outline does not match the original checksum.")
         return {"capture_id": capture_id, "path": str(target.absolute()), "sha256": sha,
                 "bytes": size, "scanned_at": meta.get("created_at"), "cached": cached,
-                "quad": ((meta.get("metadata") or {}).get("quality") or {}).get("quad")}
+                "quad": outline["quad"] if outline else ((meta.get("metadata") or {}).get("quality") or {}).get("quad")}
 
 
     def image_pdf(self, pages, directory):

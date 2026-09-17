@@ -18,6 +18,8 @@ class WorkflowTests(unittest.TestCase):
         self.worker.confirmation_provider = "ppocr"
         begun = self.send("begin", viewer_checked=True)
         self.assertEqual(begun["claimed_preview"]["captureId"], fixtures.DID)
+        self.assertEqual(begun["claimed_ocr"]["capture_id"], fixtures.DID)
+        self.assertTrue(begun["images_optional"])
         request = begun["request"]
         request["observation"].update(type="receipt", vendor="Synthetic Shop")
         packet = self.worker.handle(request)
@@ -69,9 +71,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("Synthetic Shop", json.dumps(completion))
         self.assertTrue(self.fake.documents[fixtures.DID]["checks"]["pdf"])
         steps = [json.loads(p.read_text())["op"] for p in sorted(self.worker.work.glob("*-workflow-step.json"))]
-        self.assertLess(steps.index("draft"), steps.index("prepare"))
+        self.assertNotIn("prepare", steps)
+        self.assertLess(steps.index("ocr"), steps.index("draft"))
+        self.assertEqual(self.worker.state['draft']['input_mode'], 'ppocr-first')
+        self.assertIn('not an independent visual OCR reading', self.fake.initial_draft['extraction']['evidence'])
         self.assertLess(steps.index("confirm"), steps.index("assess"))
         self.assertEqual(self.fake.pdf_calls, 1)
+
+    def test_confirmation_reuses_exact_initial_ocr_without_refetch(self):
+        original_prepare = self.fake.prepare
+        calls = []
+        def prepare(*args, **kwargs):
+            calls.append(args[0])
+            return original_prepare(*args, **kwargs)
+        self.fake.prepare = prepare
+        self.start_review()
+        for item in self.worker.state['draft']['ocr_inputs']:
+            self.assertEqual(calls.count(item['capture_id']), 1)
+            self.assertEqual(self.worker.state['prepared'][item['capture_id']]['ocr_sha256'], item['ocr_sha256'])
 
     def test_changed_final_pixels_require_real_final_visual_attestation(self):
         finish = self.start_review()
@@ -148,17 +165,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(result["blocking"])
         self.assertFalse(self.fake.documents[fixtures.DID]["checks"]["pdf"])
 
-    def test_begin_exposes_only_claimed_image_before_independent_observation(self):
+    def test_begin_exposes_only_claimed_ocr_before_neighbor_observation(self):
         self.fake.next_images = [{"id": fixtures.OTHER, "sha256": self.fake.documents[fixtures.OTHER]["pages"][0]["sha256"],
                                   "document_id": fixtures.OTHER}]
         begun = self.send("begin", viewer_checked=True)
         self.assertEqual(list(self.worker.state["sources"]), [fixtures.DID])
+        self.assertEqual(begun['claimed_ocr']['source_sha256'], self.fake.documents[fixtures.DID]['pages'][0]['sha256'])
+        self.assertNotIn('text_only_pdf_layers', begun['claimed_ocr'])
         self.assertFalse(any("context?" in path for _, path in self.fake.calls))
         request = begun["request"]
         request["observation"]["type"] = "receipt"
         packet = self.worker.handle(request)
         self.assertTrue(packet["ok"], packet)
         self.assertEqual([p["captureId"] for p in packet["result"]["previews"]], [fixtures.OTHER])
+        self.assertEqual([p['capture_id'] for p in packet['result']['ocr']], [fixtures.OTHER])
         review = packet["result"]["request"]
         review["extraction"] = fixtures.extraction()
         result = self.worker.handle(review)
@@ -204,6 +224,65 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(repeated["claimed_preview"], corrected)
         self.assertEqual(self.worker.state["layouts"][fixtures.DID]["crop"], [2, 3, 8, 17])
         self.assertEqual(sum(path.endswith("/claim") for _, path in self.fake.calls), 1)
+
+    def test_ocr_first_duplicate_requires_explicit_visual_confirmation(self):
+        self.fake.next_images = [{"id": fixtures.OTHER, "sha256": self.fake.documents[fixtures.OTHER]["pages"][0]["sha256"],
+                                  "document_id": fixtures.OTHER}]
+        begun = self.send('begin', viewer_checked=True)
+        request = begun['request']
+        request['observation']['type'] = 'receipt'
+        packet = self.worker.handle(request)['result']
+        review = packet['request']
+        review['extraction'] = fixtures.extraction()
+        review['page_review']['excluded'] = [dict(capture_id=fixtures.OTHER, reason='Canonical scan stays in its own document.')]
+        review['grouping'] = dict(duplicate_of=fixtures.OTHER, evidence='Synthetic complete visual coverage.')
+        for value in (None, False):
+            if value is not None:
+                review['grouping']['visual_duplicate_checked'] = value
+            rejected = self.worker.handle(review)
+            self.assertIn('visual_duplicate_checked', rejected['input_error'])
+            self.assertFalse(self.worker.state.get('draft_saved'))
+        review['grouping']['visual_duplicate_checked'] = True
+        self.assertTrue(self.worker.handle(review)['result']['draft']['drafted'])
+
+    def test_ocr_request_validation_is_correctable(self):
+        result = self.worker.handle({'op': 'ocr'})
+        self.assertIn('input_error', result)
+        self.assertNotIn('failed', self.worker.state)
+
+    def test_changed_crop_requires_new_ocr_before_initial_draft(self):
+        begun = self.send('begin', viewer_checked=True)
+        observation = begun['request']
+        observation['observation']['type'] = 'receipt'
+        packet = self.worker.handle(observation)['result']
+        self.send('previews', capture_ids=[fixtures.DID], layouts={fixtures.DID: {'crop': [2, 3, 8, 17]}})
+        review = packet['request']
+        review['extraction'] = fixtures.extraction()
+        self.assertIn('Read ocr', self.worker.handle(review)['input_error'])
+        self.assertFalse(self.worker.state.get('draft_saved'))
+        reading = self.send('ocr', capture_ids=[fixtures.DID])[0]
+        self.assertTrue(self.worker.handle(review)['result']['draft']['drafted'])
+        pinned = self.worker.state['draft']['ocr_inputs'][0]
+        self.assertEqual(pinned['ocr_sha256'], reading['ocr_sha256'])
+        self.assertEqual(pinned['layout']['crop'], [2, 3, 8, 17])
+
+    def test_non_string_evidence_is_correctable_before_provenance_injection(self):
+        begun = self.send('begin', viewer_checked=True)
+        observation = begun['request']
+        observation['observation']['type'] = 'receipt'
+        review = self.worker.handle(observation)['result']['request']
+        review['extraction'] = fixtures.extraction()
+        review['extraction']['evidence'] = None
+        original_check = self.worker.check
+        self.worker.check = lambda operation, **values: (
+            {'errors': ['Source evidence is required'], 'arithmetic': {}}
+            if operation == 'validate' and not isinstance(values['extraction'].get('evidence'), str)
+            else original_check(operation, **values))
+        result = self.worker.handle(review)
+        self.assertFalse(result['result']['drafted'])
+        self.assertNotIn('failed', self.worker.state)
+        review['extraction']['evidence'] = 'Category: Synthetic shop. Confidence: clear PP text.'
+        self.assertTrue(self.worker.handle(review)['result']['draft']['drafted'])
 
     def test_new_extraction_template_has_all_fields_but_no_fabricated_observations(self):
         template = module.extraction_template()

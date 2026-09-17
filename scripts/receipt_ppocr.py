@@ -24,6 +24,9 @@ class PPBackend:
                 self.python.is_symlink() or self.python.is_junction() or self.python.name.lower() not in {'python', 'python.exe', 'python3'}):
             raise ClientError('PP OCR needs a prepared absolute Python executable.')
         self.script = str(Path(__file__).resolve())
+        self.timeout = settings.get('timeout_seconds', 600)
+        if type(self.timeout) is not int or not 60 <= self.timeout <= 7200:
+            raise ClientError('PP timeout_seconds must be an integer from 60 to 7200.')
 
     def call(self, arguments, timeout):
         result = subprocess.run([str(self.python), '-X', 'utf8', '-B', '-I', self.script,
@@ -40,7 +43,7 @@ class PPBackend:
         self.call(['--check'], 120)
 
     def run(self, manifest, output):
-        self.call(['--source', str(manifest), '--output', str(output)], 600)
+        self.call(['--source', str(manifest), '--output', str(output)], self.timeout)
 
 
 def original_point(x, y, width, height, rotation):
