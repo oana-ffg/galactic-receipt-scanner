@@ -54,7 +54,11 @@ test("generated photographs cover real paper texture, creases, fingers and blur"
                 : resolve(data.quality);
             detector.onerror = (e) => reject(new Error(e.message));
             detector.postMessage(
-              { id: 1, bitmap, full: kind === "native-resolution" },
+              {
+                id: 1,
+                bitmap,
+                full: kind === "native-resolution" || kind === "blurred",
+              },
               [bitmap],
             );
           });
@@ -73,6 +77,7 @@ test("generated photographs cover real paper texture, creases, fingers and blur"
   // Partial fingers can evade landmarks; paper/obstruction checks must still reject.
   expect(result.hand.empty).toBe(false);
   expect(result.blurred.ok).toBe(false);
+  expect(result.blurred.blur?.category).toBe("likely-blurry");
   expect(result["native-resolution"].ok).toBe(true);
   expect(
     Math.min(...result["native-resolution"].receiptPixels!),

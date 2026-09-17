@@ -20,6 +20,7 @@ type Event =
   | "camera.frames"
   | "camera.settings"
   | "camera.photo"
+  | "camera.blur"
   | "camera.error"
   | "vision"
   | "preview.peer"
@@ -222,6 +223,9 @@ export function recordScanState(state: ScanState) {
     focus: q.focus,
     contrast: q.contrast,
     sharpness: q.sharpness,
+    blurScore: q.blur?.score,
+    blurCategory: q.blur?.category,
+    blurVersion: q.blur?.version,
     photoMs: state.timings?.photoMs,
     checksMs: state.timings?.checksMs,
     saveMs: state.timings?.saveMs,

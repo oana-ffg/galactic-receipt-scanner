@@ -1,3 +1,4 @@
+import { blurDescription } from "./blur-quality";
 import { inspectImage } from "./image-viewer";
 import { CapturePreviews } from "./capture-previews";
 import { edgeOverlay } from "./paper-overlay";
@@ -145,6 +146,8 @@ export class CaptureLibrary {
         ? `${capture.metadata.sourcePixels?.join(" × ") ?? ""} source · ${capture.outputs.pdf ? "PDF ready" : "PDF later"} · OCR ${capture.ocr_status}`
         : (capture.metadata.quality?.reason ??
           "Original retained. Retry this receipt.");
+    if (capture.metadata.quality?.blur)
+      detail.textContent += ` · ${blurDescription(capture.metadata.quality.blur)}`;
     info.append(title, identity, detail);
     const links = document.createElement("div");
     links.className = "file-links";
@@ -193,6 +196,8 @@ export class CaptureLibrary {
       : "Selected photo";
     const details = document.createElement("p");
     details.textContent = `${new Date(capture.created_at).toLocaleTimeString()} · ${capture.metadata.sourcePixels?.join(" × ") ?? ""} · ${capture.status === "accepted" ? "Saved" : "Needs attention"}`;
+    if (capture.metadata.quality?.blur)
+      details.textContent += ` · ${blurDescription(capture.metadata.quality.blur)}`;
     const stage = document.createElement("div");
     stage.className = "saved-image";
     const img = document.createElement("img");

@@ -581,6 +581,11 @@ export class PhoneCamera {
         checksMs: performance.now() - checksStarted,
       };
       capture.quality = result.quality;
+      diagnostics.record("camera.blur", {
+        score: capture.quality.blur?.score,
+        category: capture.quality.blur?.category,
+        version: capture.quality.blur?.version,
+      });
       await timing.measure("qualityPersistMs", () => savePending(capture));
       await this.upload(capture, timing);
     } catch (error) {

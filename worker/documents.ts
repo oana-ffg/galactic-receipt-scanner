@@ -293,6 +293,18 @@ export async function documentRoute(
         JSON.stringify(JSON.parse(f.payload).pages) === JSON.stringify(d.pages),
     );
     const state = documentReasons(d);
+    if (!d.checks.visual && !d.mergedInto && !d.duplicateOf) {
+      for (const [index, page] of d.pages.entries()) {
+        const blur = captures.find((c) => c.id === page.captureId)?.metadata
+          .quality?.blur;
+        if (blur?.category === "uncertain") {
+          state.reasons.push(
+            `Page ${index + 1}: borderline blur flagged at capture (${blur.score?.toFixed(3)}). Inspect the original text during review.`,
+          );
+          if (state.status === "ready") state.status = "review";
+        }
+      }
+    }
     function requireProcessing(reason: string) {
       state.reasons.push(reason);
       if (state.status === "ready") state.status = "processing";

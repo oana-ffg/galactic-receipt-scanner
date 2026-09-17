@@ -269,6 +269,17 @@ test("quality checks distinguish faint and dim text from blank, noisy and blurre
   expect(results["glare-after-removal"].empty).toBe(true);
   expect(results["clutter-after-removal"].empty).toBe(true);
   expect(results.blurred.reason).toContain("blurred");
+  expect(results.bright.blur).toMatchObject({
+    version: "crete-1",
+    region: "document-bounds",
+    filterSize: 11,
+    fineBelow: 0.3,
+    blurryAbove: 0.38,
+  });
+  expect(Math.max(...results.bright.blur!.pixels)).toBe(600);
+  expect(results.blurred.blur!.category).toBe("likely-blurry");
+  expect(results.blurred.blur!.score).toBeGreaterThan(0.38);
+  expect(results.bright.blur!.score).toBeLessThan(results.blurred.blur!.score!);
   for (const kind of ["empty", "lit-empty"])
     expect(results[kind].empty, kind).toBe(true);
 });

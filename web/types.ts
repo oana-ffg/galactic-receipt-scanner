@@ -59,10 +59,12 @@ export interface Quality {
   /** No outline, substantially darker old paper area, near the empty cutoff. */
   emptyUncertain?: boolean;
   motion?: number;
+  /** Legacy diagnostics retained on older captures. */
   focus?: number;
   contrast?: number;
   inkFraction?: number;
   sharpness?: number;
+  blur?: import("./blur-quality").BlurMeasurement;
   noiseFloor?: number;
   glare?: boolean;
   receiptPixels?: number[];

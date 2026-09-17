@@ -5,6 +5,7 @@ import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
 import type { Quality } from "./types";
 import { measurePrint } from "./print-quality";
+import { measureCapturedBlur } from "./blur-image";
 import { HandChecks, type PreviewChecks } from "./hand-checks";
 import {
   enclosePaperContour,
@@ -422,12 +423,8 @@ function analyze(
         new cv.Rect(inset, inset, cg.cols - 2 * inset, cg.rows - 2 * inset),
       ),
     );
-    const lap = use(new cv.Mat()),
-      mean = use(new cv.Mat()),
-      std = use(new cv.Mat());
+    const lap = use(new cv.Mat());
     cv.Laplacian(interior, lap, cv.CV_64F);
-    cv.meanStdDev(lap, mean, std);
-    q.focus = std.data64F[0] ** 2;
     if (!full) {
       // Compare aligned paper interiors, not the desk or automatic exposure.
       const mini = use(new cv.Mat());
@@ -467,11 +464,6 @@ function analyze(
     if (print.inkFraction < 0.004) {
       q.reason =
         "Writing is too faint to check reliably. Add even light or move the phone closer.";
-      return q;
-    }
-    if (print.sharpness < 0.2) {
-      q.reason =
-        "Text edges look blurred. Hold steady briefly or adjust the phone height.";
       return q;
     }
     if (full) {
@@ -544,6 +536,25 @@ async function process(
     outputs,
     !full && !outputs && preview?.removal === true && !preview.capture,
   );
+  // Preview geometry/motion checks are cheap readiness evidence. Score the
+  // actual captured bitmap before accepting; never score its 800px preview.
+  if (full || outputs) {
+    quality.blur = measureCapturedBlur(cv, bitmap, quality.quad);
+    if (quality.ok) {
+      if (quality.blur.category === "likely-blurry") {
+        quality.ok = false;
+        quality.reason =
+          "The captured text looks blurred. Hold steady or adjust the phone height, then retake.";
+      } else if (quality.blur.category === "unavailable") {
+        quality.ok = false;
+        quality.reason =
+          "Could not check captured-image blur. Retake this photo.";
+      } else if (quality.blur.category === "uncertain") {
+        quality.reason =
+          "Image checks passed; borderline blur flagged for later review.";
+      }
+    }
+  }
   if (quality.removalDiagnostics)
     Object.assign(quality.removalDiagnostics, {
       naturalEmpty: quality.empty,

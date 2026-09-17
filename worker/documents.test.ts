@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
+import type { Quality } from "../web/types";
 let mf: Awaited<ReturnType<typeof runtime>>;
 beforeAll(async () => {
   mf = await runtime();
@@ -25,7 +26,7 @@ async function request(
     },
   });
 }
-async function capture() {
+async function capture(quality: Partial<Quality> = {}) {
   const id = crypto.randomUUID();
   const r = await request(
     `/api/captures/${id}`,
@@ -35,7 +36,7 @@ async function capture() {
       "X-Capture-Status": "accepted",
       "X-Capture-Metadata": JSON.stringify({
         sourcePixels: [1400, 2200],
-        quality: { ok: true, receiptPixels: [1400, 2200] },
+        quality: { ok: true, receiptPixels: [1400, 2200], ...quality },
       }),
     },
   );
@@ -338,4 +339,40 @@ it("pins visual approval to a stored PDF hash and requires review after regenera
   expect(changed.document.reasons.join(" ")).toContain(
     "visually reviewed version",
   );
+});
+
+it("preserves a nonblocking blur flag and shows it until visual review", async () => {
+  const blur: NonNullable<Quality["blur"]> = {
+    version: "crete-1",
+    score: 0.35,
+    category: "uncertain",
+    region: "document-bounds",
+    sourceBounds: [0, 0, 1400, 2200],
+    pixels: [382, 600],
+    filterSize: 11,
+    fineBelow: 0.3,
+    blurryAbove: 0.38,
+  };
+  const c = await capture({ blur });
+  expect(c.status).toBe("accepted");
+  const original = await (await request(`/api/captures/${c.id}`)).json();
+  expect(original.metadata.quality.blur).toEqual(blur);
+  const listed = await (await request("/api/documents")).json();
+  const view = listed.documents.find((d: any) => d.id === c.id);
+  expect(view.reasons.join(" ")).toContain(
+    "borderline blur flagged at capture (0.350)",
+  );
+  const d = newDocument(original);
+  d.checks.visual = true;
+  d.evidence = "Synthetic original visually checked for blur.";
+  const saved = await save([d]);
+  expect(saved.status, await saved.text()).toBe(200);
+  const reviewed = await (await request("/api/documents")).json();
+  expect(
+    reviewed.documents.find((v: any) => v.id === c.id).reasons.join(" "),
+  ).not.toContain("borderline blur");
+  expect(
+    (await (await request(`/api/captures/${c.id}`)).json()).metadata.quality
+      .blur,
+  ).toEqual(blur);
 });
