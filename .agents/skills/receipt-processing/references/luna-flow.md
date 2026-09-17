@@ -37,7 +37,7 @@ request just because it is still running. Never write a sequence of future reque
    from a neighboring transaction. A card slip without products is `payment-slip`.
    Open `claimed_preview.preview` only if OCR/positioning is insufficient; do not perform
    a separate visual transcription by default. Python reuses the nightly job's matching
-   PP artifacts or prepares a missing scan with the configured engine.
+   PP artifacts. If one is missing, follow the Sol OCR handoff below; Luna does not run PP.
 
 2. **Send the filled `inspect` request.** Python records the observation and returns
    PP text/coordinates for remaining claimed pages, up to three following scans, the
@@ -165,6 +165,33 @@ Initial layout and extraction are immutable; finish saves updated values separat
   misreading only after reopening the claimed crop alone. Never copy a neighbor's values.
 
 ## Errors
+
+### Missing PP: delegate the full OCR catch-up to Sol
+
+`ocr_required: true, blocking: false` is an expected wait, not a failed receipt or batch.
+Keep the exact request that returned it and the live Python session. Its automatic
+heartbeat keeps the claim renewed. Tell the parent you are waiting for OCR; do not
+release the claim, quit, start another worker, or send the next document request.
+
+Spawn one fresh **`gpt-5.6-sol` subagent**, `fork_turns: none`, to run
+[receipt-ocr-nightly](../../receipt-ocr-nightly/SKILL.md). Pass the returned absolute
+`request_file`, repository path, parent's verified origin/ownership and authorized scope,
+and existing runtime/profile discovery information. The assignment is to run that skill's
+`--request` catch-up for **all current eligible scans through now**, including today's scans,
+and fulfill the request's exact source/crop/rotation. Sol must repair recoverable PP/setup
+issues and retry; it must not acquire a receipt batch guard, claim/group receipts, or touch
+Luna's active Python process. Credentials remain in the protected connection.
+
+Await Sol's terminal result. If a nightly OCR process already holds the OCR lock, Sol
+waits for it to finish and reruns its catch-up; it never starts a competing inference job.
+On success, resend the **same original request** to the **same Python session**. Python
+rechecks the saved artifact; do not take Sol's narrative as proof or continue with missing
+OCR. If other unrelated scans remain permanently unreadable, Sol must report those and
+verify `required_ocr.verified: true`; Luna may retry its own request while those scans remain
+retryable. A failed Sol subagent, denied approval, or unresolved required scan is a real
+blocker: notify the parent and follow the stop rule below. Do not spawn repeated replacement
+Sol agents for an unchanged failure. A later new missing scan/layout can trigger another
+catch-up; already matching artifacts are reused.
 
 `input_error` or validation with `drafted:false`/`assessed:false` is a correctable request
 mistake. Correct that same request in the same session; do not proceed past an unsaved

@@ -14,6 +14,35 @@ class WorkflowTests(unittest.TestCase):
     make_worker = fixtures.WorkerTests.make_worker
     send = fixtures.WorkerTests.send
 
+    def test_missing_ocr_waits_then_retries_same_claim(self):
+        prepare = self.fake.prepare
+        def missing(cid, directory, **kwargs):
+            self.assertFalse(kwargs['allow_inference'])
+            raise module.OCRRequired(self.fake.origin, dict(capture_id=cid,
+                sha256=self.fake.documents[cid]['pages'][0]['sha256'], crop=kwargs['crop'], rotation=kwargs['rotation']))
+        self.fake.prepare = missing
+        waiting = self.worker.handle({'op': 'begin', 'viewer_checked': True})
+        self.assertTrue(waiting['ocr_required'])
+        self.assertFalse(waiting['blocking'])
+        self.assertEqual(self.worker.state['phase'], 'claimed')
+        self.assertNotIn('failed', self.worker.state)
+        self.assertEqual(json.loads(Path(waiting['request_file']).read_text())['capture_id'], fixtures.DID)
+        self.fake.prepare = prepare
+        self.assertIn('claimed_ocr', self.send('begin', viewer_checked=True))
+        self.assertEqual(self.fake.calls.count(('POST', '/api/processing/claim')), 1)
+
+    def test_renewal_failure_while_waiting_for_ocr_stays_blocking_on_retry(self):
+        with patch.object(self.fake, 'prepare', side_effect=module.OCRRequired(self.fake.origin,
+                dict(capture_id=fixtures.DID, sha256='a' * 64, crop=None, rotation=0))):
+            self.assertTrue(self.worker.handle({'op': 'begin', 'viewer_checked': True})['ocr_required'])
+        self.worker.failure('renew', 'Synthetic automatic claim renewal failure.')
+        original_failure = dict(self.worker.state['failed'])
+        retried = self.worker.handle({'op': 'begin', 'viewer_checked': True})
+        self.assertTrue(retried['blocking'])
+        self.assertNotIn('input_error', retried)
+        self.assertEqual(self.worker.state['failed'], original_failure)
+        self.assertEqual(self.fake.calls.count(('POST', '/api/processing/claim')), 1)
+
     def start_review(self):
         self.worker.confirmation_provider = "ppocr"
         begun = self.send("begin", viewer_checked=True)

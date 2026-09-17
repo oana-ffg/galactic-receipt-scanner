@@ -157,7 +157,7 @@ class FakeScanner:
         return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     pages=len(pages), layouts=layouts, searchable=False)
 
-    def prepare(self, cid, directory, *, crop=None, rotation=0):
+    def prepare(self, cid, directory, *, crop=None, rotation=0, allow_inference=True):
         result = self.original(cid, directory)
         ocr = Path(directory) / (cid + ".json")
         ocr.write_text(json.dumps({"text": "Synthetic text", "lines": [], "text_only_pdf_layers": [{"base64": "must-not-escape"}]}))

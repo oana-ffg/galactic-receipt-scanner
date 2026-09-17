@@ -8,9 +8,11 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from contextlib import redirect_stdout
 
 from receipt_api import ClientError, ScannerClient
-from receipt_ocr_nightly import CachedBackend, day_window, drain, fingerprint, inventory
+import receipt_ocr_nightly as nightly
+from receipt_ocr_nightly import CachedBackend, day_window, drain, fingerprint, inventory, read_requirement, prepare_requirement
 from receipt_ppocr_setup import install_models, MODELS, check_node
 
 
@@ -24,6 +26,61 @@ def result():
 
 
 class NightlyTests(unittest.TestCase):
+    def test_request_cli_catches_full_backlog_and_does_not_continue_after_access_loss(self):
+        requirement = dict(origin='https://synthetic.example', capture_id='00000000-0000-4000-8000-000000000001',
+                           source_sha256='a' * 64, crop=None, rotation=0)
+        request = self.root / 'request.json'
+        request.write_text(json.dumps(requirement))
+        self.client.origin = requirement['origin']
+        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts']}
+        scans = [capture('older', '2026-01-01T00:00:00Z'), capture('recent')]
+        for blocked in (False, True):
+            summary = dict(complete=not blocked, selected=2, verified=0, reused=0, retired=0,
+                           failures={}, remaining=2 if blocked else 0)
+            if blocked:
+                summary['blocked'] = 'authorization'
+            with self.subTest(blocked=blocked), patch.object(nightly, 'REPO', self.root), \
+                    patch.object(nightly.os, 'chdir'), patch.object(nightly, 'discover', return_value=('config', 'profile')), \
+                    patch.object(nightly, 'credentials', return_value={}), \
+                    patch.object(nightly, 'ScannerClient', return_value=self.client), \
+                    patch.object(nightly, 'ensure_profile', return_value='profile'), \
+                    patch.object(nightly, 'inventory', return_value=scans) as listed, \
+                    patch.object(nightly, 'drain', return_value=summary) as drained, \
+                    patch.object(nightly, 'prepare_requirement', return_value={'verified': True}) as required, \
+                    patch('sys.argv', ['receipt_ocr_nightly.py', '--request', str(request)]), redirect_stdout(io.StringIO()):
+                before = datetime.now(timezone.utc)
+                self.assertEqual(nightly.main(), 1 if blocked else 0)
+                self.assertEqual(drained.call_args.args[1], scans)
+                self.assertGreaterEqual(listed.call_args.args[1], before)
+                if blocked:
+                    required.assert_not_called()
+                else:
+                    required.assert_called_once_with(self.client, requirement, drained.call_args.args[2])
+
+    def test_luna_requirement_matches_origin_source_and_exact_layout(self):
+        value = dict(origin='https://synthetic.example', capture_id='00000000-0000-4000-8000-000000000001',
+                     source_sha256='a' * 64, crop=[1, 2, 50, 90], rotation=90)
+        request = self.root / 'request.json'
+        request.write_text(json.dumps(value))
+        self.assertEqual(read_requirement(request, value['origin']), value)
+        with self.assertRaises(ClientError):
+            read_requirement(request, 'https://another.example')
+        self.client.original.return_value = dict(sha256=value['source_sha256'])
+        self.client.prepare.return_value = dict(sha256=value['source_sha256'], ocr_sha256='b' * 64)
+        self.assertTrue(prepare_requirement(self.client, value, self.root)['verified'])
+        self.client.prepare.assert_called_once_with(value['capture_id'], self.root / 'required', crop=value['crop'], rotation=90)
+        self.client.prepare.reset_mock()
+        self.client.original.return_value = dict(sha256='c' * 64)
+        with self.assertRaisesRegex(ClientError, 'source hash changed'):
+            prepare_requirement(self.client, value, self.root)
+        self.client.prepare.assert_not_called()
+
+    def test_catchup_inventory_includes_today_without_future_scans(self):
+        now = datetime(2026, 9, 17, 15, tzinfo=timezone.utc)
+        self.client.get.return_value = dict(captures=[capture('old', '2026-09-16T12:00:00Z'),
+            capture('today', '2026-09-17T14:00:00Z'), capture('future', '2026-09-17T16:00:00Z')], next=None)
+        self.assertEqual([c['id'] for c in inventory(self.client, now)], ['old', 'today'])
+
     def test_unsupported_node_is_rejected_before_publishing_a_profile(self):
         with patch('receipt_ppocr_setup.subprocess.run', return_value=Mock(returncode=0, stdout='v20.19.0\n')):
             with self.assertRaisesRegex(ClientError, 'Node 22.18'):

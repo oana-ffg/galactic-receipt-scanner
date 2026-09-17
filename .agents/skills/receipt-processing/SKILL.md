@@ -75,7 +75,10 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
 1. Luna starts with **PP-OCRv6 text and line coordinates**, including chronological
    neighbours, to group related pages/slips and extract values. The separate
    [nightly OCR skill](../receipt-ocr-nightly/SKILL.md) prepares scans in advance; Python
-   reuses matching artifacts or prepares a missing scan with the existing runtime.
+   reuses matching artifacts. Missing PP returns a nonblocking `ocr_required` response:
+   Luna delegates the OCR skill to a fresh **Sol subagent** for all current scans, including
+   today, then retries the same request with the same claim. Sol handles installation,
+   repairs and retries; Luna does not run PP inference itself. See the short flow's handoff.
    Source crops and raw originals are optional when ambiguity, positioning or other
    visual evidence would help. No independent visual transcription is required by default.
 2. Finalize the ordered document layout and save Luna's first extraction plus an
@@ -109,6 +112,11 @@ must already have a PP-OCRv6 profile and prepared PP/PDF runtimes;
 preflight must advertise `confirmation_provider: ppocr` before claiming. Missing PP
 is a setup blocker, not permission to install a model, run Qwen, use a paid/cloud API
 or silently skip confirmation. CPU/GPU device is chosen in the prepared host profile.
+If the coordinator discovers missing/broken PP setup before launching Luna, delegate
+the OCR skill's setup/repair to Sol first, then verify the prepared launch configuration.
+An existing worker waiting on `ocr_required` keeps its session and claim while Sol works;
+this expected wait is not a worker failure and does not block the batch guard. Actual
+Sol failures and approval rejections still use the stop-on-worker-failure rule.
 This local-host flow is not yet verified in cloud Work.
 
 For a full-flow test, use the next unprocessed small-stage documents so saved values

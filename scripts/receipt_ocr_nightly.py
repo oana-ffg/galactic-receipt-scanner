@@ -12,7 +12,7 @@ import time
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from receipt_api import ClientError, ScannerClient, artifact_directory, credentials, matches_prepared_ocr, write_new_file
+from receipt_api import ClientError, ScannerClient, SHA, UUID, artifact_directory, credentials, matches_prepared_ocr, write_new_file
 from receipt_locks import acquire_lock, LockBusy
 from receipt_ppocr_setup import REPO, discover, ensure_profile
 
@@ -101,6 +101,33 @@ def is_access_failure(error):
     return isinstance(error, ClientError) and ('HTTP 401' in str(error) or 'HTTP 403' in str(error))
 
 
+def read_requirement(path, origin):
+    value = json.loads(Path(path).read_text(encoding='utf-8'))
+    if (not isinstance(value, dict) or set(value) != {'origin', 'capture_id', 'source_sha256', 'crop', 'rotation'}
+            or value['origin'] != origin or not isinstance(value['capture_id'], str)
+            or not UUID.fullmatch(value['capture_id']) or not isinstance(value['source_sha256'], str)
+            or not SHA.fullmatch(value['source_sha256']) or type(value['rotation']) is not int
+            or value['rotation'] not in (0, 90, 180, 270)):
+        raise ClientError('Invalid or differently scoped OCR request.')
+    crop = value['crop']
+    if crop is not None and (not isinstance(crop, list) or len(crop) != 4
+            or any(type(v) is not int for v in crop) or not (0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3])):
+        raise ClientError('Invalid requested OCR crop.')
+    return value
+
+
+def prepare_requirement(client, value, root):
+    """Also fulfill Luna's exact region, which may differ from the standard scan outline."""
+    cid = value['capture_id']
+    original = client.original(cid, root / 'originals')
+    if original['sha256'] != value['source_sha256']:
+        raise ClientError('Requested OCR source hash changed; preserve the Luna claim for review.')
+    prepared = client.prepare(cid, root / 'required', crop=value['crop'], rotation=value['rotation'])
+    if prepared['sha256'] != value['source_sha256']:
+        raise ClientError('Prepared OCR source does not match the Luna request.')
+    return dict(capture_id=cid, ocr_sha256=prepared['ocr_sha256'], verified=True)
+
+
 def drain(client, captures, root, state, *, attempts=3, sleep=time.sleep, emit=print):
     """Try every scan before retrying individual failures; an access loss blocks further writes."""
     pending = captures
@@ -171,13 +198,17 @@ def main():
     parser.add_argument('--cpu', action='store_true', help='Install/use CPU even when a GPU profile is configured')
     parser.add_argument('--node')
     parser.add_argument('--inventory-only', action='store_true', help='Read-only inventory; no runtime installation or OCR')
+    parser.add_argument('--request', help='Worker OCR request file: catch up all current scans through now, then this exact layout')
     parser.add_argument('--limit', type=int, help='Explicit diagnostic subset only; omitted for normal unlimited runs')
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
+    if args.request and (args.date or args.limit or args.inventory_only):
+        parser.error('--request requires the full current backlog, without date, limit or inventory-only')
     os.chdir(REPO)
     config, profile = discover(args.config, args.worker_profile)
     client = ScannerClient(credentials(config))
+    requirement = read_requirement(args.request, client.origin) if args.request else None
     access = client.get('/api/processing/access')
     if 'save_ocr_artifacts' not in access.get('capabilities', []):
         raise ClientError('Processing access was not confirmed.')
@@ -192,10 +223,13 @@ def main():
         from receipt_ppocr_setup import run_logged
         run_logged([sys.executable, '-m', 'pip', 'install', 'tzdata>=2025.2,<2027'], setup_root, 'install-timezones')
         tz = ZoneInfo(args.timezone)
-    day = args.date or (datetime.now(tz).date() - timedelta(days=1))
+    now = datetime.now(tz)
+    day = args.date or (now.date() if requirement else now.date() - timedelta(days=1))
     start, end = day_window(day, args.timezone)
+    if requirement:
+        end = now.astimezone(timezone.utc)
     captures = inventory(client, end)
-    summary = dict(scan_day=day.isoformat(), timezone=args.timezone, eligible=len(captures),
+    summary = dict(scan_day=day.isoformat(), timezone=args.timezone, cutoff=end.isoformat(), eligible=len(captures),
                    scanned_that_day=sum(utc(c['created_at']) >= start for c in captures),
                    older_backlog_checked=sum(utc(c['created_at']) < start for c in captures))
     print(json.dumps(dict(event='inventory', **summary)), flush=True)
@@ -215,6 +249,15 @@ def main():
         # Save the immutable snapshot before starting; an interrupted run remains diagnosable.
         write_new_file(root / ('inventory-' + os.urandom(6).hex() + '.json'), json.dumps(captures).encode())
         result = drain(client, selected, root, state)
+        if requirement:
+            result['required_ocr'] = dict(verified=False, capture_id=requirement['capture_id'])
+            if not result.get('blocked'):
+                try:
+                    result['required_ocr'] = prepare_requirement(client, requirement, root)
+                except (ClientError, OSError, ValueError, subprocess.SubprocessError) as error:
+                    result['required_ocr']['error'] = str(error) if isinstance(error, ClientError) else type(error).__name__
+            if not result['required_ocr']['verified']:
+                result['complete'] = False
         result.update(summary)
         result['limited'] = args.limit is not None and len(selected) < len(captures)
         if result['limited']:

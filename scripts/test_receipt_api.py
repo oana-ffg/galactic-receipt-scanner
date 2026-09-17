@@ -8,7 +8,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 from urllib.request import Request
-from receipt_api import ScannerClient, ClientError, NoRedirect, main
+from receipt_api import ScannerClient, ClientError, OCRRequired, NoRedirect, main
 
 
 class ClientTests(unittest.TestCase):
@@ -182,7 +182,7 @@ class ClientTests(unittest.TestCase):
         self.client.get = Mock(return_value={"artifacts": [{"kind": "ocr", "sha256": sha} for sha in hashed]})
         self.client.request = Mock(side_effect=lambda path: hashed[path.split("version=")[1]])
         with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run") as run:
-            result = self.client.prepare(self.id, directory)
+            result = self.client.prepare(self.id, directory, allow_inference=False)
             self.assertEqual(Path(result["ocr_path"]).read_bytes(), good)
             self.assertEqual(result["ocr_sha256"], hashlib.sha256(good).hexdigest())
             run.assert_not_called()
@@ -199,6 +199,18 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(Path(result["ocr_path"]).name, self.id + "-" + sha + ".ocr.json")
             self.assertEqual(Path(result["ocr_path"]).read_bytes(), data)
             self.assertEqual(self.client.request.call_count, 2)
+
+    def test_missing_saved_ocr_requests_sol_without_inference_or_upload(self):
+        self.client.original = Mock(return_value={'capture_id': self.id, 'path': '/synthetic/source.jpg', 'sha256': self.sha})
+        self.client.get = Mock(return_value={'artifacts': []})
+        self.client.request = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(OCRRequired) as raised:
+                self.client.prepare(self.id, directory, crop=[1, 2, 90, 180], rotation=90, allow_inference=False)
+        self.assertEqual(raised.exception.request, dict(origin=self.client.origin, capture_id=self.id,
+            source_sha256=self.sha, crop=[1, 2, 90, 180], rotation=90))
+        self.client.ocr_backend.run.assert_not_called()
+        self.client.request.assert_not_called()
 
     def test_prepare_does_not_reuse_ocr_from_another_crop(self):
         old = self.ocr_fixture()

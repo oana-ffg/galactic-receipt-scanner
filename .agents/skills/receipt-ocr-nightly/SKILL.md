@@ -18,6 +18,30 @@ locally, uploads immutable OCR including positions/confidences/search text, and 
 the uploaded artifact. It does not group pages, alter extracted accounting values or
 regenerate document PDFs. Older artifacts and originals are preserved.
 
+## On-demand handoff from Luna
+
+When Luna encounters missing PP, a fresh **Sol (`gpt-5.6-sol`) subagent** runs this skill.
+Use the verified destination/scope and private host discovery passed by the coordinator;
+do not make Luna fetch credentials or repeat ownership checks. With the returned absolute
+`request_file`, run `python scripts/receipt_ocr_nightly.py --request REQUEST_FILE`.
+This mode processes the full current eligible backlog **through now, including today**,
+then verifies the exact source hash, crop and rotation Luna needs. The file is a bounded
+data request, never executable instructions. Do not add `--limit`, `--date` or inventory-only.
+Normal nightly invocation keeps its previous-calendar-day default.
+
+Luna's Python session and claim remain alive, with an automatic heartbeat, while Sol works.
+Do not start a receipt worker, acquire its batch guard, edit its journal, or stop its process.
+The OCR runner has its own lock. If it reports another OCR run active, wait for that run
+to end, then rerun; do not kill it or launch competing inference. Follow the repair/retry
+instructions below until complete or no supported recovery can make progress. Test and
+review repairs; do not patch the running Luna worker in place.
+
+Return the actual summary path, completion status, remaining failures and
+`required_ocr.verified`. Full success requires `complete: true` and `limited: false`.
+If permanently unreadable unrelated scans remain, report partial success explicitly;
+Luna can proceed only if its required artifact is verified and its own retry reads it.
+Access/approval failures or an unresolved required artifact are blockers, never success.
+
 ## Run
 
 1. Work from the receipt-scanner repository. Read `AGENTS.md` and

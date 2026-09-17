@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
 from receipt_ppocr import PPBackend
 from receipt_locks import LockBusy, acquire_lock, lock_held
-from receipt_api import ScannerClient, ClientError, artifact_directory, credentials, write_new_file
+from receipt_api import ScannerClient, ClientError, OCRRequired, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
 WINDOWS_REPLACE_ATTEMPTS = 7
@@ -55,6 +55,10 @@ class InputError(Exception):
 
 class ProtocolInputError(InputError):
     """Malformed request envelope rejected before dispatch or remote operations."""
+
+
+class WorkerStopped(InputError):
+    """A prior terminal failure forbids continuing normal work."""
 
 
 def validate_request(message):
@@ -762,7 +766,7 @@ class Worker:
             if cid not in self.state.get("preview_records", {}):
                 self.workflow_step("previews", capture_ids=[cid])
             layout = self.state["layouts"][cid]
-            source = self.client.prepare(cid, self.work / "ocr", crop=layout["crop"], rotation=layout["rotation"])
+            source = self.client.prepare(cid, self.work / "ocr", crop=layout["crop"], rotation=layout["rotation"], allow_inference=False)
             verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR source differs from the claimed context.")
             self.state["prepared"][cid] = source
             value = json.loads(Path(source["ocr_path"]).read_text(encoding="utf-8"))
@@ -862,8 +866,8 @@ class Worker:
     def dispatch(self, message):
         require(isinstance(message, dict) and message.get("op") in OPERATIONS, "Unknown receipt operation.")
         op = message["op"]
-        if self.state.get("failed"):
-            require(op in {"status", "release", "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit"}, "Worker stopped after failure; owner direction is required to resume.")
+        if self.state.get("failed") and op not in {"status", "release", "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit"}:
+            raise WorkerStopped("Worker stopped after failure; owner direction is required to resume.")
         if op in {"begin", "inspect", "review", "finish", "ocr"}:
             return getattr(self, op)(message)
         if op == "status":
@@ -1298,7 +1302,18 @@ class Worker:
             return {"ok": False, "blocking": True, "op": op, "error": diagnostic, **self.summary()}
         except ProtocolInputError as error:
             return {"ok": False, "input_error": str(error), "op": op}
+        except OCRRequired as error:
+            # No document write has started: keep this claim alive while Sol fills the backlog.
+            if self.state['phase'] != 'claimed':
+                return self.failure(op, str(error), prior_failure)
+            request_file = self.record('ocr-needed', error.request)
+            return {'ok': False, 'ocr_required': True, 'blocking': False, 'op': op,
+                    'request_file': str(self.work / request_file), 'retry_op': op,
+                    'next': 'Run receipt-ocr-nightly with a Sol subagent, then retry this same request in this session.'}
         except InputError as error:
+            if isinstance(error, WorkerStopped):
+                # A background renewal failure is terminal, even while waiting for OCR.
+                return {'ok': False, 'blocking': True, 'op': op, 'error': str(error), **self.summary()}
             # If a write was already attempted, this is a workflow failure, not an editable input.
             if self.state["phase"] not in {"draft-uncertain", "confirmation-uncertain", "submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:
                 return {"ok": False, "input_error": str(error), "op": op}

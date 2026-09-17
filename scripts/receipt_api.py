@@ -23,6 +23,15 @@ class ClientError(Exception):
     pass
 
 
+class OCRRequired(ClientError):
+    """No saved PP artifact matches the verified source and requested layout."""
+
+    def __init__(self, origin, source):
+        super().__init__('Matching saved PP OCR is required.')
+        self.request = dict(origin=origin, capture_id=source['capture_id'],
+                            source_sha256=source['sha256'], crop=source['crop'], rotation=source['rotation'])
+
+
 def matches_ocr_region(value, crop):
     if crop is AUTO_CROP:
         return True
@@ -246,7 +255,7 @@ class ScannerClient:
             raise ClientError("Could not resolve source dimensions and detected OCR region.")
         return json.loads(output.read_text(encoding="utf-8"))["crop"]
 
-    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0):
+    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0, allow_inference=True):
         """Verify an original and reuse or run prepared PP OCR, returning references."""
         if self.ocr_backend is None or self.ocr_backend.engine != "PP-OCRv6":
             raise ClientError("Configure PP-OCRv6 before processing; Tesseract is not a fallback.")
@@ -278,6 +287,8 @@ class ScannerClient:
                 continue
             if matches_prepared_ocr(value, capture_id, original["sha256"], crop, self.ocr_backend, rotation):
                 return {**original, "ocr_path": str(destination.absolute()), "ocr_sha256": sha}
+        if not allow_inference:
+            raise OCRRequired(self.origin, original)
         run = root / (capture_id + "-" + os.urandom(8).hex())
         manifest = run.with_suffix(".source.json")
         output = run.with_suffix(".ocr.json")
