@@ -125,6 +125,12 @@ totals are broken. Every decision has revision history. Give Work/Codex the proj
 [receipt-processing skill](.agents/skills/receipt-processing/SKILL.md) to process a batch.
 No external OCR or model API subscription is required.
 
+To ask Codex to investigate a parsing mistake, select the receipt and choose
+**Copy for Codex**. Paste into your task and describe what looks wrong. The copied
+prompt identifies the saved document revision and source pages; **Receipt link**
+reopens that document's current saved view, even if the default filters hide it.
+These links still require owner access. Unsaved form edits are not included.
+
 D1 stores metadata, hashes, artifact revisions and the current capture-station state.
 R2 stores originals (`raw/`), crops (`image/`), PDFs (`pdf/`) and unverified extraction
 artifacts (`ocr/`). A direct WebRTC video/data connection is attempted between owner-authenticated devices, using only host ICE candidates and no external STUN/TURN service. One dashboard can hold that connection; additional viewers and dashboards with stalled video request a short fallback lease. Network isolation can prevent a direct connection. The same-origin private preview remains the fallback over the Internet. The `preview/latest` object is overwritten as fallback frames arrive; a stale

@@ -20,6 +20,7 @@ import {
 } from "./documents";
 import { messageOf } from "./errors";
 import { inspectImage } from "./image-viewer";
+import { receiptHandoff } from "./receipt-handoff";
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -52,7 +53,7 @@ export async function mountReview(app: HTMLElement) {
   app.innerHTML =
     '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
-  let selected: string | null = null;
+  let selected = new URL(location.href).searchParams.get("document");
   let categories: PurchaseCategory[] = [];
   let busy = false;
   let disposeDetail = () => {};
@@ -65,6 +66,9 @@ export async function mountReview(app: HTMLElement) {
     app.querySelector<HTMLSelectElement>("#review-confidence")!;
   const model = app.querySelector<HTMLSelectElement>("#review-model")!;
   const human = app.querySelector<HTMLSelectElement>("#review-human")!;
+  if (selected) {
+    confidence.value = model.value = human.value = "all";
+  }
   const setMessage = (text: string) => {
     message.textContent = text;
   };
@@ -91,6 +95,12 @@ export async function mountReview(app: HTMLElement) {
     if (selected) {
       const d = catalog.documents.find((d) => d.id === selected);
       if (d) renderDetail(d);
+      else {
+        disposeDetail();
+        detail.replaceChildren(
+          el("p", "The linked document was not found in this instance."),
+        );
+      }
     }
   }
   function renderList() {
@@ -147,6 +157,9 @@ export async function mountReview(app: HTMLElement) {
         if (busy) return;
         setMessage("");
         selected = d.id;
+        const url = new URL(location.href);
+        url.searchParams.set("document", d.id);
+        history.replaceState(null, "", url);
         renderList();
         renderDetail(d);
         detail
@@ -163,6 +176,9 @@ export async function mountReview(app: HTMLElement) {
     disposeDetail();
     detail.replaceChildren();
     detail.append(el("h2", doc.filename ?? "Identify this document"));
+    detail.append(
+      receiptHandoff(catalog.documents.find((saved) => saved.id === doc.id)!),
+    );
     const reasons = el("ul", undefined, `review-reasons ${doc.status}`);
     for (const reason of doc.reasons) reasons.append(el("li", reason));
     const sourceWarnings = el("details");
