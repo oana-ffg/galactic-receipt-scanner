@@ -14,6 +14,8 @@ it("shows verbatim OCR candidates without repairing faded dates or merging total
         createdAt: "2026-01-10",
         sameRegion: true,
         sha256: "synthetic",
+        confidence: null,
+        lines: [],
       },
     ],
   };

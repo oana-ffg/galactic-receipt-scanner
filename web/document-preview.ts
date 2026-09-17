@@ -4,6 +4,7 @@ import type { ReviewOcr, ReviewOcrSource } from "./review-ocr";
 import type { Capture } from "./types";
 import { detectedReceiptCrop } from "./receipt-crop";
 import { messageOf } from "./errors";
+import { formatOcrConfidence } from "./ocr-confidence";
 
 /** Display-only crop. Originals and stored derivatives are never modified. */
 export function documentPreview(
@@ -181,7 +182,7 @@ export function documentPreview(
         };
         stage.append(renderedOverlay.element);
       }
-      overlayMessage.textContent = `${engine!.engine} · saved OCR on the scan. Amber = low or unknown OCR confidence.${positioned.skipped ? ` ${positioned.skipped} invalid text boxes omitted.` : ""}${ocrErrors ? " Some OCR loads failed; retry above." : ""}`;
+      overlayMessage.textContent = `${engine!.engine} · Page OCR confidence: ${formatOcrConfidence(reading!.confidence)}${engine!.engine === "PP-OCRv6" ? " (mean of lines)" : ""}. Amber = below 85% or unknown. See each line’s score in Compare readings → OCR text. Scores are not proof of correct text.${!reading!.sameRegion ? " Different or unknown OCR crop/rotation." : ""}${positioned.skipped ? ` ${positioned.skipped} invalid text boxes omitted.` : ""}${ocrErrors ? " Some OCR loads failed; retry above." : ""}`;
     };
     content.append(toolbar, status, viewport);
     const fit = () => {

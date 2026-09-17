@@ -1,3 +1,5 @@
+import { ocrConfidence, formatOcrConfidence } from "./ocr-confidence";
+
 export type OcrBox = [number, number, number, number];
 export interface PositionedOcr {
   pixels: [number, number];
@@ -58,12 +60,7 @@ export function positionedOcr(value: unknown): PositionedOcr | null {
       result.items.push({
         text: item.text,
         box: box as OcrBox,
-        confidence:
-          finite(item.confidence) &&
-          item.confidence >= 0 &&
-          item.confidence <= 100
-            ? item.confidence
-            : null,
+        confidence: ocrConfidence(item.confidence),
       });
     }
   }
@@ -136,7 +133,7 @@ export function ocrOverlay(ocr: PositionedOcr, crop: OcrBox, rotation: number) {
     text.setAttribute("transform", `rotate(${angle} ${cx} ${cy})`);
     text.textContent = item.text;
     const title = document.createElementNS(ns, "title");
-    title.textContent = `${item.text}${item.confidence === null ? " · OCR confidence unavailable" : ` · OCR confidence ${item.confidence.toFixed(0)}%`}`;
+    title.textContent = `${item.text} · OCR confidence: ${formatOcrConfidence(item.confidence)}`;
     group.append(title, rect, text);
     svg.append(group);
   }

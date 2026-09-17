@@ -8,6 +8,7 @@ import {
   type ReviewOcr,
 } from "./review-ocr";
 import type { reviewValues, SavedReading } from "./review-values";
+import { formatOcrConfidence } from "./ocr-confidence";
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
   const node = document.createElement(tag);
@@ -134,6 +135,13 @@ export function reviewComparison(
         heading.append(
           el("small", "Includes a different or unknown crop/rotation"),
         );
+      for (const page of column.ocr?.pages ?? [])
+        heading.append(
+          el(
+            "small",
+            `Page ${page.number} OCR confidence: ${formatOcrConfidence(page.confidence)}`,
+          ),
+        );
       header.append(heading);
     }
     head.append(header);
@@ -239,7 +247,13 @@ export function reviewComparison(
     }
     lines.append(lists);
     const transcript = el("details");
-    transcript.append(el("summary", "OCR text"));
+    transcript.append(
+      el("summary", "OCR text"),
+      el(
+        "p",
+        "OCR confidence measures text recognition, not verified accuracy. PP-OCRv6 page confidence is the mean of its line scores. Amber marks scores below 85% or unavailable scores.",
+      ),
+    );
     const searchLabel = el("label", "Find in OCR text"),
       search = el("input");
     search.type = "search";
@@ -259,14 +273,48 @@ export function reviewComparison(
               `${new Date(page.createdAt).toLocaleString()} · ${page.sameRegion ? "Current crop" : "Different or unknown crop/rotation"} · checksum verified`,
             ),
           );
-          const rows = page.text
-            .split("\n")
-            .filter((line) =>
-              line.toLowerCase().includes(search.value.toLowerCase()),
-            );
           group.append(
-            el("pre", rows.length ? rows.join("\n") : "No matching text."),
+            el(
+              "p",
+              `Page OCR confidence: ${formatOcrConfidence(page.confidence)}`,
+            ),
           );
+          const rows = page.lines.filter((line) =>
+            line.text.toLowerCase().includes(search.value.toLowerCase()),
+          );
+          if (rows.length) {
+            const table = el("table");
+            table.className = "ocr-confidence-table";
+            table.append(
+              el(
+                "caption",
+                `${o.engine} · Page ${page.number} line confidence`,
+              ),
+            );
+            const head = el("thead"),
+              header = el("tr"),
+              body = el("tbody");
+            for (const label of ["Recognized text", "Confidence"]) {
+              const cell = el("th", label);
+              cell.scope = "col";
+              header.append(cell);
+            }
+            head.append(header);
+            for (const line of rows) {
+              const row = el("tr");
+              row.classList.toggle(
+                "ocr-uncertain",
+                line.confidence === null || line.confidence < 85,
+              );
+              row.append(
+                el("td", line.text),
+                el("td", formatOcrConfidence(line.confidence)),
+              );
+              body.append(row);
+            }
+            table.append(head, body);
+            group.append(table);
+          } else group.append(el("p", "No matching text."));
           results.append(group);
         }
     };

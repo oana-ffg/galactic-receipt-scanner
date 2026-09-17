@@ -994,6 +994,17 @@ header {
   margin: 0 0 0.65rem;
   white-space: pre-wrap;
 }
+.ocr-confidence-table th:last-child {
+  width: 7rem;
+}
+.ocr-confidence-table td:first-child {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ocr-confidence-table .ocr-uncertain {
+  background: #34250b;
+  color: #ffdc88;
+}
 .ocr-overlay-toggle {
   display: flex;
   align-items: center;

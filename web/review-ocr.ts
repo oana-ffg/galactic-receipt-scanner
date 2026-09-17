@@ -3,6 +3,7 @@ import { positionedOcr, type PositionedOcr } from "./ocr-overlay";
 import { sha256 } from "./checksum";
 import { messageOf } from "./errors";
 import type { DocumentView } from "./documents";
+import { ocrConfidence, ocrTranscript } from "./ocr-confidence";
 
 export interface ReviewOcr {
   engine: string;
@@ -12,6 +13,8 @@ export interface ReviewOcr {
     createdAt: string;
     sameRegion: boolean;
     sha256: string;
+    confidence: number | null;
+    lines: ReturnType<typeof ocrTranscript>;
     positioned?: PositionedOcr | null;
   }[];
 }
@@ -91,6 +94,10 @@ export async function readReviewOcr(doc: DocumentView, signal?: AbortSignal) {
           createdAt: artifact.created_at,
           sameRegion,
           sha256: artifact.sha256,
+          confidence: value.text.trim()
+            ? ocrConfidence(value.confidence)
+            : null,
+          lines: ocrTranscript(value.text, value.lines),
           positioned: positionedOcr(value),
         });
       } catch (error) {

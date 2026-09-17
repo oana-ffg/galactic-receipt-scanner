@@ -175,10 +175,15 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       region: { left: 0, top: 0, width: 800, height: 2000 },
       coordinates: "original image pixels; top-left origin",
     },
-    provenance: { engine: "Synthetic OCR engine" },
+    provenance: { engine: "PP-OCRv6" },
+    confidence: 64.25,
     lines: [
+      { text: "SYNTHETIC OCR SHOP", confidence: 99 },
+      { text: "Synthetic item 12,00", confidence: 88 },
+      { text: "TOTAL 12,00", confidence: 0 },
       {
-        text: "X8-01-2026",
+        text: "X8-01-2026 18:58",
+        confidence: 70,
         box: { x0: 80, y0: 200, x1: 200, y1: 240 },
         words: [
           {
@@ -335,8 +340,11 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   failOcr = false;
   await comparison.getByRole("button", { name: "Retry loading OCR" }).click();
   await expect(
-    comparison.getByRole("columnheader", { name: /Synthetic OCR engine/ }),
+    comparison.getByRole("columnheader", { name: /PP-OCRv6/ }),
   ).toBeVisible();
+  await expect(
+    comparison.getByRole("columnheader", { name: /PP-OCRv6/ }),
+  ).toContainText("Page 2 OCR confidence: 64.3%");
   await expect(
     comparison.getByRole("columnheader", { name: /future-reviewer/ }),
   ).toBeVisible();
@@ -380,12 +388,23 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     path: "test-results/model-comparison-synthetic.png",
   });
   await comparison.getByText("OCR text", { exact: true }).click();
+  const confidenceTable = comparison.getByRole("table", {
+    name: "PP-OCRv6 · Page 2 line confidence",
+  });
+  await expect(
+    confidenceTable.getByRole("row").filter({ hasText: "TOTAL 12,00" }),
+  ).toHaveText("TOTAL 12,000.0%");
+  await expect(confidenceTable.locator("tbody tr.ocr-uncertain")).toHaveCount(
+    2,
+  );
   await comparison
     .getByRole("searchbox", { name: "Find in OCR text" })
     .fill("X8");
-  await expect(comparison.locator(".ocr-transcript pre")).toHaveText(
+  await expect(confidenceTable.locator("tbody td").first()).toHaveText(
     "X8-01-2026 18:58",
   );
+  await expect(confidenceTable.locator("tbody td").last()).toHaveText("70.0%");
+  await page.screenshot({ path: "test-results/ocr-confidence-synthetic.png" });
   await comparison.getByText("OCR text", { exact: true }).click();
   await comparison
     .getByText("Compare line items and adjustments", { exact: true })
@@ -412,13 +431,16 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     page.getByRole("img", { name: "Cropped scan 2 of 2" }),
   ).toBeVisible();
   await expect(overlay).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Receipt preview", exact: true }),
+  ).toContainText("Page OCR confidence: 64.3% (mean of lines)");
   await expect(overlay).toHaveAttribute("viewBox", "0 0 656 1616");
   await expect(overlay.locator("text")).toHaveText(["X8-01-2026", "UNSCORED"]);
   await expect(overlay.locator("rect").first()).toHaveAttribute("x", "8");
   await expect(overlay.locator("rect").first()).toHaveAttribute("y", "8");
   await expect(overlay.locator("g.ocr-uncertain")).toHaveCount(2);
   await expect(overlay.locator("title").last()).toContainText(
-    "OCR confidence unavailable",
+    "OCR confidence: Unavailable",
   );
   await page
     .getByRole("button", { name: "Previous scan", exact: true })
