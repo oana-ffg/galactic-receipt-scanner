@@ -5,6 +5,9 @@ description: "Sort saved receipts with fresh Luna and PP-OCR: match pages, ident
 
 # Receipt processing
 
+For second-pass visual review of low/medium-confidence results, use the separate
+[receipt-verification skill](../receipt-verification/SKILL.md), with fresh Astra subagents.
+
 ## Start when invoked
 
 A bare `$receipt-processing` invocation means **run the saved-receipt workflow now**.
