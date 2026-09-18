@@ -1,5 +1,6 @@
 import copy
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,19 @@ from receipt_worker import InputError
 
 
 class VerificationTests(unittest.TestCase):
+    def test_ocr_first_saved_pdf_verifies_without_claiming_visual_attestation(self):
+        data = b'%PDF-synthetic-structural'
+        digest = hashlib.sha256(data).hexdigest()
+        path = self.work / 'final.pdf'
+        path.write_bytes(data)
+        self.state.update(input_mode='ppocr-first', pdf_validation='source-layout-and-upload', layout_approval=dict(visual=False))
+        self.state['pdf'] = dict(path=str(path), sha256=digest, revision=4, pages=1)
+        self.document.update(revision=4, checks=dict(pdf=False), reviewedPdfSha256=None, pdf=dict(sha256=digest, revision=4))
+        self.state['document'] = copy.deepcopy(self.document)
+        self.assertEqual(self.verify()['pdf_validation'], 'source-layout-and-upload')
+        path.write_bytes(b'corrupted')
+        with self.assertRaisesRegex(InputError, 'changed after upload'):
+            self.verify()
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

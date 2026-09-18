@@ -20,23 +20,24 @@ command; omit `prefix_rule`. Do not broaden permissions or retry an approval rej
 On PowerShell preserve the supplied literal executable form, without adding `&`.
 Return and retain the **full tool result**, including its `session_id`.
 
-Require `ready: true` and `confirmation_provider: ppocr`. Open `viewer_preflight`:
-it is a small green square testing local viewer access before a claim. Then send each
+Require `ready: true` and `confirmation_provider: ppocr`. Send each
 request through that same session with `write_stdin`: `JSON.stringify(request) + "\n"`.
 Await the actual response; poll that same session if the tool yields. Never resend a
 request just because it is still running. Never write a sequence of future requests.
 
 ## Four requests: OCR first, images when useful
 
-1. **`{"op":"begin","viewer_checked":true}`** claims one document and returns its
-   PP reading as `claimed_ocr`, an optional crop path, and an `inspect` request template.
+1. **`{"op":"begin"}`** claims one document and returns its
+   saved PP reading as `claimed_ocr` and an `inspect` request template.
    Read only this scan's PP text and line coordinates first. Fill the short observation
    from this scan alone: type (`receipt`, `payment-slip`,
    `fragment`, `other`), vendor, ISO date, currency, total in integer minor units and
    four card digits. Unknown values are null. This protects the claimed scan's identity
    from a neighboring transaction. A card slip without products is `payment-slip`.
-   Open `claimed_preview.preview` only if OCR/positioning is insufficient; do not perform
-   a separate visual transcription by default. Python reuses the nightly job's matching
+   Images are optional throughout this first pass. Use the returned `image_request`
+   only for a concrete concern: ambiguous grouping, conflicting/unreadable text,
+   suspected damage, or duplicate coverage. No default viewer preflight or visual
+   transcription is needed. Python reuses the nightly job's matching
    PP artifacts. If one is missing, follow the Sol OCR handoff below; Luna does not run PP.
 
 2. **Send the filled `inspect` request.** Python records the observation and returns
@@ -47,31 +48,40 @@ request just because it is still running. Never write a sequence of future reque
    unusual layouts or duplicate coverage. Use the crop first; raw photos remain available.
    Use the optional operations below if more evidence or a crop correction is needed.
 
-3. **Send `review` with `extraction`, `page_review`, optional `grouping` and optional
-   `category_name`.** Python validates and saves the immutable initial reading/layout,
+3. **Send `review` with `extraction`, `page_review`, `grouping_evidence` and optional
+   `category_name`.** Set the single ordered `page_review.capture_ids` list to the pages
+   that belong together. Python derives donor IDs and preserves the other documents.
+   Fill the returned exclusion rows with specific reasons; remove a row if you retain
+   that page instead. Context summaries alone are not inspected OCR/images and do not
+   need exclusion rows. Python validates and saves the immutable initial reading/layout,
    builds the assembled draft, and pins the exact PP artifacts already read for every
    retained page as confirmation. It returns all draft render paths, confirmation/text/discrepancies,
-   arithmetic and a `finish` template. Open **every** `draft.rendered` page and check
-   its membership/order, crop, rotation, handwriting and legibility. Read the findings
-   and reassess the values. This is a math/layout check of an OCR-assisted extraction,
+   arithmetic and a `finish` template. Read the findings and reassess the values.
+   Draft images are available if something is suspicious; do not open them routinely.
+   This is a math/layout check of an OCR-assisted extraction,
    not an independent Luna-versus-PP benchmark. PP receives pixels, not your extraction. Do not install OCR or
    invoke Qwen, Mistral or paid APIs.
 
 4. **Send the filled `finish` request.** Python binds it to this session's one immutable
-   draft and confirmation; do not copy hashes into the request. Set `all_pages_inspected: true`
-   only after opening all draft pages; describe
-   that inspection in `layout_evidence`. Supply the full updated extraction and rationale,
+   draft and confirmation; do not copy hashes into the request. Normally leave
+   `all_pages_inspected: false` and explain OCR-based page matching in `layout_evidence`.
+   Set it true only if you actually inspected every draft page for a concrete concern.
+   Supply the full updated extraction and rationale,
    even when unchanged. Python saves the separate reassessment, submits, verifies saved
-   grouping, builds/uploads the searchable PDF and checks the server's hash/revision.
-   It compares ordered lossless renders of that final local PDF with the inspected
-   draft. Exact matches allow automatic attestation; no second visual pass is needed.
+   grouping, builds/uploads the searchable PDF and checks source hashes, exact ordered
+   layout and the server's hash/revision. A normal OCR-first completion is successful
+   with `pdf_review_attested: false`; it does not require another image or Astra pass.
+   It leaves visual-review flags unset rather than claiming that anyone inspected pixels.
+   Only when you opted into full draft inspection does Python compare final renders
+   and attest exact matches as visually reviewed.
    If `needs_pdf_review: true`, open **every** returned final `pages` image and fill the
    returned `attest` request instead. A mismatch is never automatically approved.
 
 Normal completion returns `phase: complete` and `completion_file`. Wait for this same
 Python process to exit zero; it exits automatically. Return only the completion-file
 path, run ID and compact operational outcome to the parent. It independently verifies
-the live saved state. Do not send receipt text or images to the parent.
+the live saved state through its batch guard. **Do not run receipt_batch.py, verify the
+batch, or inspect the coordinator's protected profile.** Do not send receipt text or images to the parent.
 
 ## Extraction and category decisions
 
@@ -88,10 +98,10 @@ evidence deliberately require your decision. Field rules:
 - `type`: unknown, receipt, invoice, credit-note, payment-slip, atm, note, other.
 - `receipt_date`: real YYYY-MM-DD or null; never substitute scan time. `currency`:
   three uppercase letters or null. `card_last_four`: four digits as text or null.
-- `has_handwriting`, `has_payment_slip`, `confirmed_arithmetic_mismatch`: booleans.
-  PP cannot prove handwriting is absent. If no image has been checked, the initial
-  handwriting flag is provisional: explicitly note that handwriting has not yet been
-  visually checked. Resolve it when inspecting the assembled draft, before finish.
+- `has_handwriting`: null unless assessed visually; true/false only with image evidence.
+  PP alone cannot prove handwriting absent. Null is a valid completed first pass and
+  does not require opening images. `has_payment_slip` and `confirmed_arithmetic_mismatch`
+  are booleans.
   A confirmed arithmetic mismatch needs a complete source and a checked discrepancy;
   omitted/deferred financial detail does not establish one.
 - `payment_status`: approved, declined, unknown, not-applicable. `tax_basis`: gross,
@@ -128,10 +138,9 @@ fragment, inspect the immediately preceding scan too (normally supplied by inspe
 OCR, preview or raw image was retrieved**, explaining why it stays outside this document. Build both from
 one selection. Viewing or transcribing a continuation does not attach it.
 
-To attach pages, include `grouping: {donor_ids, capture_ids, evidence}` in review:
-donor_ids are document IDs from context, capture_ids is the same ordered list as
-page_review. Python reads current donor records and preserves their original metadata;
-you need not make a separate document call unless the returned context is insufficient.
+To attach pages, use the single `page_review.capture_ids` list and explain why in
+`grouping_evidence`. Do not construct donor IDs or a second page list. Python reads
+current donor records and preserves residual pages and metadata.
 Read all retained scans' OCR and inspect crops when useful. Do not mark an available recognized continuation as missing.
 Membership and completeness are separate: unique overlapping text must be retained.
 
@@ -195,7 +204,10 @@ catch-up; already matching artifacts are reused.
 
 `input_error` or validation with `drafted:false`/`assessed:false` is a correctable request
 mistake. Correct that same request in the same session; do not proceed past an unsaved
-step. A missing crop requires originals then explicit preview bounds before retrying.
+step. For review errors, use `required_exclusion_ids` and `context_only_ids` from the
+response. Each exclusion is one capture, even when two belong to the same other receipt.
+Never merge an unrelated source just to satisfy a validator. Never stop solely because
+an editable request was rejected. A missing crop requires originals then explicit preview bounds before retrying.
 `begin` reuses its known claim if crop preparation needed correction.
 
 `blocking:true`, an approval rejection, a crash or lost process session stops the batch.

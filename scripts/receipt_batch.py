@@ -45,11 +45,14 @@ class BatchGuard:
         self.state = state
         return state
 
-    def start(self):
+    def start(self, count=10, workflow="luna"):
+        require(type(count) is int and 1 <= count <= 1000, "Batch count must be between 1 and 1000.")
+        require(workflow in {"luna", "astra"}, "Unknown batch workflow.")
         require(not self.state or self.state["phase"] == "complete",
                 "Previous batch did not finish cleanly. Preserve its state for owner-directed recovery.")
         self.check_worker_closed()
-        return self.save(dict(batch_id=uuid.uuid4().hex, owner=self.owner, phase="active", started_at=time.time()))
+        return self.save(dict(batch_id=uuid.uuid4().hex, owner=self.owner, phase="active", started_at=time.time(),
+                              requested_count=count, workflow=workflow, verified_runs={}, completed_count=0))
 
     def handle(self, request):
         require(isinstance(request, dict), "Expected a batch request object.")
@@ -57,10 +60,38 @@ class BatchGuard:
         if op == "status":
             return self.state
         require(self.state and self.state["phase"] == "active", "No active batch to finish.")
+        if op == "verify":
+            require(self.state.get("workflow", "luna") == "luna", "Astra uses its independent verification protocol.")
+            self.check_worker_closed()
+            proof = verify_run(self.base.parent.parent, request.get("run_id"), self.owner)
+            runs = dict(self.state.get("verified_runs", {}))
+            require(not any(p["document_id"] == proof["document_id"] and rid != proof["run_id"]
+                            for rid, p in runs.items()), "Do not count the same document twice in one batch.")
+            runs[proof["run_id"]] = proof
+            state = self.save({**self.state, "verified_runs": runs, "completed_count": len(runs)})
+            return {**state, "verification": proof, "next": "finish" if len(runs) >= state["requested_count"] else "dispatch"}
         if op == "finish":
             self.check_worker_closed()
-            return self.save({**self.state, "phase": "complete"})
-        require(op == "block", "Expected status, finish, or block.")
+            if self.state.get("workflow") == "astra":
+                # Astra's API-based workers have a separate, independently checked
+                # completion protocol; they do not produce bounded Luna journals.
+                return self.save({**self.state, "phase": "complete", "stop_reason": "external-astra-verification"})
+            pointer = self.base / "active-run.json"
+            worker = None
+            if pointer.exists():
+                run = json.loads(pointer.read_text(encoding="utf-8"))["run_id"]
+                worker = json.loads((self.base / run / "state.json").read_text(encoding="utf-8"))
+            runs = self.state.get("verified_runs", {})
+            # Only an actual claim response from this batch establishes exhaustion.
+            exhausted = bool(worker and worker.get("batch_id") == self.state["batch_id"]
+                             and worker["phase"] == "empty" and worker.get("claim") is None
+                             and worker.get("claim_started", 0) >= self.state["started_at"])
+            if worker and worker.get("batch_id") == self.state["batch_id"] and worker["phase"] == "complete":
+                require(worker["run_id"] in runs, "Verify the last completed worker through this guard before finishing.")
+            require(len(runs) >= self.state.get("requested_count", 10) or exhausted,
+                    "Batch target not reached. Dispatch the next worker; only a recorded empty/busy claim can finish early.")
+            return self.save({**self.state, "phase": "complete", "stop_reason": "queue-empty-or-busy" if exhausted else "target-reached"})
+        require(op == "block", "Expected status, verify, finish, or block.")
         reason = request.get("reason")
         require(isinstance(reason, str) and 0 < len(reason.strip()) <= 2000, "A non-sensitive failure reason is required.")
         return self.save({**self.state, "phase": "blocked", "reason": reason})
@@ -93,6 +124,8 @@ def main():
     parser.add_argument("--resolve", action=Once)
     parser.add_argument("--reason", action=Once)
     parser.add_argument("--verify", action=Once)
+    parser.add_argument("--count", type=int, action=Once)
+    parser.add_argument("--workflow", choices=("luna", "astra"), action=Once)
     args = parser.parse_args()
     # The scheduled owner's standing approval covers processing, never recovery.
     require(not args.resolve or args.owner != "receipt-processing-scheduled",
@@ -114,7 +147,7 @@ def main():
             return
         require(args.reason is None, "--reason requires --resolve.")
         try:
-            result = guard.start()
+            result = guard.start(args.count if args.count is not None else 10, args.workflow or "luna")
         except InputError as error:
             print(json.dumps(dict(blocking=True, error=str(error), previous=guard.state)), flush=True)
             return
@@ -122,7 +155,7 @@ def main():
         for line in sys.stdin:
             try:
                 result = guard.handle(json.loads(line))
-                print(json.dumps(dict(ok=True, **result)), flush=True)
+                print(json.dumps(dict(ok=True, **{k: v for k, v in result.items() if k != "verified_runs"})), flush=True)
                 if result["phase"] != "active":
                     return
             except (InputError, ValueError) as error:

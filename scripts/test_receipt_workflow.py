@@ -14,6 +14,78 @@ class WorkflowTests(unittest.TestCase):
     make_worker = fixtures.WorkerTests.make_worker
     send = fixtures.WorkerTests.send
 
+    def test_ocr_first_finishes_without_viewing_or_attesting_pdf(self):
+        finish = self.start_review()
+        finish.update(all_pages_inspected=False, layout_evidence='Ordered PP source records checked; no visual review.')
+        with patch.object(self.worker, 'render', side_effect=AssertionError('No final render needed')):
+            result = self.worker.handle(finish)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['result']['phase'], 'complete')
+        self.assertFalse(result['result']['pdf_review_attested'])
+        self.assertFalse(self.fake.documents[fixtures.DID]['checks']['pdf'])
+        self.assertNotIn(('POST', '/api/processing/pdf-review'), self.fake.calls)
+        self.assertIsNone(json.loads(self.fake.submit_bytes[0])['extraction']['has_handwriting'])
+
+    def test_lost_ocr_first_pdf_ack_recovers_without_visual_review_or_reupload(self):
+        finish = self.start_review()
+        finish['all_pages_inspected'] = False
+        self.fake.lost_pdf = True
+        self.assertTrue(self.worker.handle(finish)['blocking'])
+        self.worker.lock.close()
+        self.worker = self.make_worker(self.worker.state['run_id'])
+        with patch.object(self.worker, 'render', side_effect=AssertionError('Recovery must not require vision')):
+            result = self.worker.handle(dict(op='retry-pdf'))
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['result']['phase'], 'complete')
+        self.assertEqual(self.fake.pdf_calls, 1)
+        self.assertEqual(self.fake.pdf_uploads, [])
+        self.assertIn('completion_file', result['result'])
+
+    def test_unrelated_preview_does_not_prove_retained_handwriting_absent(self):
+        finish = self.start_review()
+        self.worker.state['preview_records'] = {fixtures.OTHER: {'preview': 'unrelated.jpg'}}
+        finish.update(all_pages_inspected=False)
+        finish['extraction']['has_handwriting'] = False
+        self.assertIn('has_handwriting null', self.worker.handle(finish)['input_error'])
+        self.assertEqual(self.fake.submit_bytes, [])
+
+    def test_ocr_first_reads_neighbours_without_previews_or_pp_preflight(self):
+        self.fake.next_images = [dict(id=fixtures.OTHER, sha256=self.fake.documents[fixtures.OTHER]['pages'][0]['sha256'], document_id=fixtures.OTHER)]
+        with patch.object(self.worker, 'render_file', side_effect=AssertionError('No previews')):
+            begun = self.send('begin')
+            begun['request']['observation']['type'] = 'receipt'
+            result = self.worker.handle(begun['request'])
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(self.worker.state['sources'], {})
+        self.assertEqual(result['result']['request']['page_review']['excluded'], [dict(capture_id=fixtures.OTHER, reason='')])
+
+    def test_grouping_is_derived_from_one_ordered_capture_list(self):
+        self.fake.next_images = [dict(id=fixtures.OTHER, sha256=self.fake.documents[fixtures.OTHER]['pages'][0]['sha256'], document_id=fixtures.OTHER)]
+        begun = self.send('begin')
+        begun['request']['observation']['type'] = 'receipt'
+        request = self.worker.handle(begun['request'])['result']['request']
+        self.send('context', filters={'after_capture': fixtures.OTHER})
+        request.update(extraction=fixtures.extraction(), grouping_evidence='Synthetic complementary second page.',
+                       page_review=dict(capture_ids=[fixtures.DID, fixtures.OTHER], excluded=[]))
+        result = self.worker.handle(request)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(self.worker.state['draft']['grouping']['donor_ids'], [fixtures.OTHER])
+        self.assertEqual(result['result']['draft']['pages'], 2)
+
+    def test_context_only_exclusion_returns_exact_repair_without_merging(self):
+        begun = self.send('begin')
+        begun['request']['observation']['type'] = 'receipt'
+        request = self.worker.handle(begun['request'])['result']['request']
+        request['extraction'] = fixtures.extraction()
+        request['page_review']['excluded'] = [dict(capture_id=fixtures.OTHER, reason='Context only.')]
+        result = self.worker.handle(request)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['required_exclusion_ids'], [])
+        self.assertIn(fixtures.OTHER, result['context_only_ids'])
+        request['page_review']['excluded'] = []
+        self.assertTrue(self.worker.handle(request)['ok'])
+        self.assertEqual(len(self.worker.state['draft']['target']['pages']), 1)
+
     def test_missing_ocr_waits_then_retries_same_claim(self):
         prepare = self.fake.prepare
         def missing(cid, directory, **kwargs):
@@ -46,7 +118,7 @@ class WorkflowTests(unittest.TestCase):
     def start_review(self):
         self.worker.confirmation_provider = "ppocr"
         begun = self.send("begin", viewer_checked=True)
-        self.assertEqual(begun["claimed_preview"]["captureId"], fixtures.DID)
+        self.assertEqual(begun["image_request"]["capture_ids"], [fixtures.DID])
         self.assertEqual(begun["claimed_ocr"]["capture_id"], fixtures.DID)
         self.assertTrue(begun["images_optional"])
         request = begun["request"]
@@ -136,7 +208,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_missing_inspection_or_caller_hash_overrides_do_not_submit(self):
         finish = self.start_review()
-        for changes in ({"all_pages_inspected": False}, {"draft_sha256": "0"*64}, {"layout_evidence": ""},
+        for changes in ({"all_pages_inspected": None}, {"draft_sha256": "0"*64}, {"layout_evidence": ""},
                         {"confirmation_sha256": "0"*64}):
             with self.subTest(changes=changes):
                 result = self.worker.handle({**finish, **changes})
@@ -198,7 +270,7 @@ class WorkflowTests(unittest.TestCase):
         self.fake.next_images = [{"id": fixtures.OTHER, "sha256": self.fake.documents[fixtures.OTHER]["pages"][0]["sha256"],
                                   "document_id": fixtures.OTHER}]
         begun = self.send("begin", viewer_checked=True)
-        self.assertEqual(list(self.worker.state["sources"]), [fixtures.DID])
+        self.assertEqual(list(self.worker.state["sources"]), [])
         self.assertEqual(begun['claimed_ocr']['source_sha256'], self.fake.documents[fixtures.DID]['pages'][0]['sha256'])
         self.assertNotIn('text_only_pdf_layers', begun['claimed_ocr'])
         self.assertFalse(any("context?" in path for _, path in self.fake.calls))
@@ -206,7 +278,7 @@ class WorkflowTests(unittest.TestCase):
         request["observation"]["type"] = "receipt"
         packet = self.worker.handle(request)
         self.assertTrue(packet["ok"], packet)
-        self.assertEqual([p["captureId"] for p in packet["result"]["previews"]], [fixtures.OTHER])
+        self.assertNotIn('previews', packet['result'])
         self.assertEqual([p['capture_id'] for p in packet['result']['ocr']], [fixtures.OTHER])
         review = packet["result"]["request"]
         review["extraction"] = fixtures.extraction()
@@ -215,7 +287,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(self.worker.state.get("draft_saved"))
 
     def test_begin_crop_retry_never_claims_again(self):
-        with patch.object(self.worker, "render_file", side_effect=module.InputError("Synthetic layout needs correction")):
+        with patch.object(self.fake, "saved_ocr", side_effect=module.InputError("Synthetic layout needs correction")):
             result = self.worker.handle(dict(op="begin", viewer_checked=True))
         self.assertIn("input_error", result)
         self.assertEqual(self.worker.state["phase"], "claimed")
@@ -250,7 +322,7 @@ class WorkflowTests(unittest.TestCase):
         self.send("begin", viewer_checked=True)
         corrected = self.send("previews", capture_ids=[fixtures.DID], layouts={fixtures.DID: {"crop": [2, 3, 8, 17]}})[0]
         repeated = self.send("begin", viewer_checked=True)
-        self.assertEqual(repeated["claimed_preview"], corrected)
+        self.assertEqual(repeated["claimed_ocr"]["layout"], corrected['layout'])
         self.assertEqual(self.worker.state["layouts"][fixtures.DID]["crop"], [2, 3, 8, 17])
         self.assertEqual(sum(path.endswith("/claim") for _, path in self.fake.calls), 1)
 
@@ -272,6 +344,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn('visual_duplicate_checked', rejected['input_error'])
             self.assertFalse(self.worker.state.get('draft_saved'))
         review['grouping']['visual_duplicate_checked'] = True
+        self.send('previews', capture_ids=[fixtures.DID, fixtures.OTHER])
+        self.send('ocr', capture_ids=[fixtures.DID, fixtures.OTHER])
         self.assertTrue(self.worker.handle(review)['result']['draft']['drafted'])
 
     def test_ocr_request_validation_is_correctable(self):

@@ -28,9 +28,10 @@ class BatchGuardTests(unittest.TestCase):
 
     def test_second_coordinator_is_busy_until_first_finishes(self):
         first = self.guard()
-        first.start()
+        state = first.start()
         with self.assertRaises(module.BatchBusy):
             self.guard()
+        self.worker_state(phase='empty', claim=None, batch_id=state['batch_id'], claim_started=state['started_at'] + 1)
         first.handle(dict(op='finish'))
         first.close()
         self.assertEqual(self.guard().start()['phase'], 'active')
@@ -141,6 +142,55 @@ class BatchGuardTests(unittest.TestCase):
         with module.acquire_lock(self.base / 'worker.lock'):
             with self.assertRaisesRegex(module.InputError, 'still running'):
                 guard.start()
+
+    def test_finish_rejects_seven_of_ten_even_after_clean_worker_exit(self):
+        guard = self.guard()
+        state = guard.start()
+        for index in range(7):
+            run = f'{index:032x}'
+            with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id=run, document_id=f'doc-{index}')):
+                result = guard.handle(dict(op='verify', run_id=run))
+            self.assertEqual(result['next'], 'dispatch')
+        with self.assertRaisesRegex(module.InputError, 'target not reached'):
+            guard.handle(dict(op='finish'))
+        self.assertEqual(guard.state['phase'], 'active')
+        for index in range(7, 10):
+            run = f'{index:032x}'
+            with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id=run, document_id=f'doc-{index}')):
+                result = guard.handle(dict(op='verify', run_id=run))
+        self.assertEqual(result['next'], 'finish')
+        self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'target-reached')
+
+    def test_verification_is_idempotent_and_different_run_cannot_double_count_document(self):
+        guard = self.guard()
+        guard.start(1)
+        with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id='a'*32, document_id='same-document')):
+            guard.handle(dict(op='verify', run_id='a'*32))
+            self.assertEqual(guard.handle(dict(op='verify', run_id='a'*32))['completed_count'], 1)
+        with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id='b'*32, document_id='same-document')):
+            with self.assertRaisesRegex(module.InputError, 'same document twice'):
+                guard.handle(dict(op='verify', run_id='b'*32))
+
+    def test_previous_empty_or_released_claim_is_not_exhaustion(self):
+        guard = self.guard()
+        state = guard.start()
+        for fields in [dict(phase='released', batch_id=state['batch_id']),
+                       dict(phase='empty', batch_id='old-batch'),
+                       dict(phase='empty', batch_id=state['batch_id'], claim_started=0)]:
+            self.worker_state(claim=None, **fields)
+            with self.assertRaisesRegex(module.InputError, 'target not reached'):
+                guard.handle(dict(op='finish'))
+
+    def test_current_queue_exhaustion_finishes_early_with_reason(self):
+        guard = self.guard()
+        state = guard.start()
+        self.worker_state(phase='empty', claim=None, batch_id=state['batch_id'], claim_started=state['started_at'] + 1)
+        self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'queue-empty-or-busy')
+
+    def test_astra_retains_its_separate_verification_workflow(self):
+        guard = self.guard()
+        guard.start(workflow='astra')
+        self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'external-astra-verification')
 
 
 if __name__ == '__main__':

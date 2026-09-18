@@ -114,6 +114,21 @@ async function category() {
 async function claim(stage = "small") {
   return (await ok("/api/processing/claim", { stage }, true)).claim;
 }
+it("preserves unassessed handwriting on an OCR-first saved receipt", async () => {
+  const c = await capture(),
+    lease = await claim();
+  const e = { ...extraction(), has_handwriting: null };
+  expect(extractionErrors(e)).toEqual([]);
+  await ok(
+    "/api/processing/submit",
+    { token: lease.token, model: "gpt-5.6-luna", extraction: e },
+    true,
+  );
+  const saved = (await ok(`/api/documents/${c.id}`)).document;
+  expect(saved.handwriting).toBe("unchecked");
+  expect(saved.processing.extraction.has_handwriting).toBeNull();
+  expect(saved.processing.has_handwriting).toBeNull();
+});
 it("exposes only token-scoped checkpoint status while preserving blind reading protection", async () => {
   const c = await capture(),
     lease = await claim();

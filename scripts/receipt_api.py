@@ -255,6 +255,48 @@ class ScannerClient:
             raise ClientError("Could not resolve source dimensions and detected OCR region.")
         return json.loads(output.read_text(encoding="utf-8"))["crop"]
 
+    def saved_ocr(self, capture_id, directory, *, crop=AUTO_CROP, rotation=0):
+        """Read source/layout-pinned saved PP without image retrieval or model startup."""
+        if not UUID.fullmatch(capture_id) or rotation not in (0, 90, 180, 270):
+            raise ClientError("Invalid OCR source or rotation.")
+        meta = self.get("/api/captures/" + capture_id)
+        sha = meta.get("sha256", "")
+        if meta.get("id") != capture_id or not SHA.fullmatch(sha):
+            raise ClientError("Invalid OCR source metadata.")
+        outline = meta.get("manual_outline")
+        if outline and outline.get("source_sha256") != sha:
+            raise ClientError("Manual outline does not match the source checksum.")
+        quad = outline["quad"] if outline else ((meta.get("metadata") or {}).get("quality") or {}).get("quad")
+        root = Path(directory)
+        artifact_directory(root)
+        for artifact in meta.get("artifacts", []):
+            digest = artifact.get("sha256", "")
+            if artifact.get("kind") != "ocr" or not SHA.fullmatch(digest):
+                continue
+            pinned = self.file(f"/api/files/{capture_id}/ocr?version={digest}", digest, root / (capture_id + "-" + digest + ".ocr.json"))
+            try:
+                value = json.loads(Path(pinned["path"]).read_text(encoding="utf-8"))
+            except (ValueError, UnicodeError):
+                continue
+            if not matches_prepared_ocr(value, capture_id, sha, AUTO_CROP, self.ocr_backend, rotation):
+                continue
+            geometry = dict(pixels=value["source"].get("pixels"), quad=quad)
+            if crop is not AUTO_CROP:
+                geometry["crop"] = crop
+            result = subprocess.run([self.node, "scripts/receipt_layout.mjs"], input=json.dumps(geometry),
+                                    text=True, encoding="utf-8", capture_output=True, timeout=30)
+            if result.returncode:
+                raise ClientError("Saved OCR has invalid source dimensions or crop.")
+            layout = json.loads(result.stdout)
+            if matches_ocr_region(value, layout["crop"]):
+                return dict(capture_id=capture_id, sha256=sha, crop=layout["crop"], pixels=layout["pixels"],
+                            rotation=rotation, ocr_path=pinned["path"], ocr_sha256=digest)
+        # A missing artifact needs a precise source/layout request for the OCR job.
+        source = self.original(capture_id, root / "originals", metadata=meta)
+        source["crop"] = self.source_region(source, root) if crop is AUTO_CROP else crop
+        source["rotation"] = rotation
+        raise OCRRequired(self.origin, source)
+
     def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0, allow_inference=True):
         """Verify an original and reuse or run prepared PP OCR, returning references."""
         if self.ocr_backend is None or self.ocr_backend.engine != "PP-OCRv6":
@@ -306,7 +348,7 @@ class ScannerClient:
         pinned = self.file(f"/api/files/{capture_id}/ocr?version={sha}", sha, root / (capture_id + "-" + sha + ".ocr.json"))
         return {**original, "ocr_path": pinned["path"], "ocr_sha256": sha}
 
-    def pdf(self, document_id, directory=".local/receipt-api", before_upload=None):
+    def pdf(self, document_id, directory=".local/receipt-api", before_upload=None, *, prepared=None):
         if not UUID.fullmatch(document_id):
             raise ClientError("Invalid document ID.")
         document = self.get("/api/documents/" + document_id)["document"]
@@ -315,7 +357,12 @@ class ScannerClient:
         root = Path(directory)
         pages = []
         for page in document["pages"]:
-            source = self.prepare(page["captureId"], directory, crop=page["crop"], rotation=page["rotation"])
+            source = (prepared or {}).get(page["captureId"])
+            if source is None:
+                source = self.prepare(page["captureId"], directory, crop=page["crop"], rotation=page["rotation"])
+            elif (source.get("crop") != page["crop"] or source.get("rotation") != page["rotation"]
+                  or hashlib.sha256(Path(source["ocr_path"]).read_bytes()).hexdigest() != source["ocr_sha256"]):
+                raise ClientError("Prepared OCR differs from the frozen source/layout.")
             if source["sha256"] != page["sha256"]:
                 raise ClientError("Document source hash mismatch.")
             pages.append({**page, "path": source["path"], "ocr_path": source["ocr_path"]})
@@ -327,6 +374,12 @@ class ScannerClient:
             raise ClientError("Searchable PDF generation failed; retain its sources and inspect the local layout/runtime.")
         data = output.read_bytes()
         sha = hashlib.sha256(data).hexdigest()
+        generated = json.loads(process.stdout)
+        if (generated["sha256"] != sha or generated["pages"] != len(pages)
+                or generated["layouts"] != [{"captureId": p["captureId"], "sha256": p["sha256"],
+                    "pixels": generated["layouts"][i]["pixels"], "crop": p["crop"], "rotation": p["rotation"]}
+                    for i, p in enumerate(pages)]):
+            raise ClientError("Generated PDF differs from the saved ordered source layout.")
         if before_upload is not None:
             before_upload({"path": str(output.absolute()), "sha256": sha, "revision": document["revision"],
                            "filename": document["filename"], "pages": len(pages), "searchable": True})

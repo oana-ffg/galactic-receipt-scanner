@@ -85,11 +85,10 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
    Source crops and raw originals are optional when ambiguity, positioning or other
    visual evidence would help. No independent visual transcription is required by default.
 2. Finalize the ordered document layout and save Luna's first extraction plus an
-   **image-only PDF assembled from the selected scans**. Supply the required `page_review` and explicit
-   `grouping` for donor pages per the Luna protocol; merely viewing them does not attach
-   them. Inspect the assembled PDF and verify the returned page IDs/order. This fixes which
-   pixels belong to the document before later comparison; a single first-page preview
-   is insufficient for a multipage document.
+   **image-only PDF assembled from the selected scans**. Supply one ordered
+   `page_review.capture_ids` list and `grouping_evidence`; Python derives donor IDs.
+   Verify the returned page IDs/order against the OCR-based selection. Images are optional
+   for concrete ambiguity throughout Luna's first pass, including the assembled PDF.
 3. Persist the initial OCR-assisted Luna reading and frozen layout in the database.
    Ensure every retained page has PP matching that exact crop/rotation. A changed crop
    needs matching OCR; unrelated source text must never substitute for it.
@@ -97,21 +96,23 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
    artifacts. `confirm` pins those exact artifacts in the database and returns ordinary
    OCR/math evidence to the **same Luna worker**, with no Qwen call. PP is text recognition,
    not an independent vendor/category reasoning model. Its confidence is not a calibrated
-   probability. Luna checks the PP text against the visible header, date and grouping.
-5. Luna checks the assembled PDF and arithmetic, using other images when helpful. It may correct its
+   probability. Luna checks source-specific PP text, date, category and grouping.
+5. Luna checks the arithmetic and OCR findings, using images only when helpful. It may correct its
    extraction, retain its original answer, or leave uncertainty. It must explain why;
    model agreement or balanced arithmetic alone is not proof. Save the updated full
    extraction and rationale separately, preserving the original Luna and PP records.
    These two readings share PP input; do not report their agreement as independent OCR corroboration.
 6. Submit the reassessed reading, then generate/upload the searchable PDF with
-   PP's invisible search text in the same frozen layout. Python compares ordered lossless
-   renders against the visually approved draft and attests exact matches. If the renders
-   differ, Luna must inspect the final PDF pages before attestation. Saved review flags still let
+   PP's invisible search text in the same frozen layout. Python validates source hashes,
+   ordered layout and the upload hash/revision. Routine completion does not claim visual
+   review or require a later visual pass. `has_handwriting: null` honestly means unchecked.
+   If Luna voluntarily inspected all draft pages, the existing pixel-comparison/attestation
+   path remains available. Saved review flags still let
    the coordinator continue the next document; actual execution failures stop the batch.
 
 Use [Luna's short flow](references/luna-flow.md) for normal processing; the detailed
 [protocol](references/luna-protocol.md) covers coordinator setup and maintenance. The host
-must already have a PP-OCRv6 profile and prepared PP/PDF runtimes;
+must have a PP-OCRv6 profile and prepared PDF runtimes;
 preflight must advertise `confirmation_provider: ppocr` before claiming. Missing PP
 is a setup blocker, not permission to install a model, run Qwen, use a paid/cloud API
 or silently skip confirmation. CPU/GPU device is chosen in the prepared host profile.
@@ -194,25 +195,31 @@ reading before viewing neighbors. This keeps the claimed scan's amount/card iden
 separate from candidate receipts. Same merchant and date do not make different payment
 amounts or card transactions duplicates. Preserve uncertain matches for review.
 
-Before counting each worker, run the documented Python `receipt_batch.py --verify
-RUN_ID` command and require `verified: true`. It checks actual journal paths, the live
-saved attempt and closed claim, page order/layout and PDF attestation. Store the
+Before counting each worker, send `{"op":"verify","run_id":"ACTUAL_RUN_ID"}` through
+the **same live batch guard session** and require `verification.verified: true`.
+The guard records the unique verified run and returns `completed_count`, `requested_count`
+and `next: dispatch` or `finish`. Follow that next action. It checks journal paths, the live
+saved attempt and closed claim, page order/layout and the PDF upload or visual attestation. Store the
 returned verification-file reference in the coordinator checkpoint. Do not transcribe
 page IDs, hashes or sequence filenames into a hand-written verification summary;
 the generated proof contains those values. A missing file, command error or partial
 output is a failure to verify, never evidence of success.
 
 Luna returns a generated `completion_file` with compact metadata and journal references.
-Use the read-only `--verify` result above as the authoritative completion check; it verifies
+Use the guard's generated verification above as the authoritative completion check; it verifies
 no active claim or failure, intended page order/layout against the saved document, and
-PDF attestation (or inapplicability). Do not separately search journals or reconstruct those
+PDF integrity with honest visual-review status (or inapplicability). Do not separately search journals or reconstruct those
 checks by hand after successful verification. Count saved review dispositions as
 completed work, but report retained pages separately from worker count; fragments are
 not proof of distinct complete receipts. Do not count a worker's narrative alone.
 Return only source/document IDs, saved artifact references, status and concrete failures.
 Do not load worker images into the parent context.
 
-Each Luna worker launches and owns its bounded Python helper, sends requests directly
+Only the parent verifies batches; Luna must not launch receipt_batch.py or repeat that check.
+The guard rejects `finish` before its requested count unless a worker in this batch
+actually returned an empty/busy claim. A cleanly closed claim alone is not batch completion.
+
+Each Luna worker launches and owns its bounded Python script, sends requests directly
 through its own `write_stdin` session, reads actual responses and opens the returned
 images. The coordinator dispatches documents and receives outcomes; it does not relay
 individual commands, write readiness markers or own the worker's process. Assign the
@@ -257,7 +264,7 @@ Read [worker instructions](references/model-workers.md) and the
 [processing contract](references/processing-api.md). Keep unprocessed, awaiting-page,
 Astra-review, human-review and broken states distinct. **Luna reads PP first and opens
 source images when useful; Astra's independent review still starts from original pixels.**
-Luna checks the assembled PDF for layout/handwriting before final submission.
+Luna uses images only for a concrete ambiguity; PP-first submission needs no visual pass.
 
 Reuse the already prepared local PP-OCRv6 runtime through the existing client for
 OCR text evidence and searchable PDF text. Processing workers must not
@@ -354,7 +361,7 @@ informational discounts, subtotals or payment fees twice. Never change a digit t
 An extraction mismatch first needs another reading; a mismatch confirmed against a complete
 source is broken. Arithmetic passing does not establish correct dates or transcription.
 
-Record `has_handwriting` as a boolean after inspection; leave unresolved presence explicit.
+Record `has_handwriting` as a boolean after visual inspection, or null when unchecked.
 Do not transcribe handwriting. Legacy document `handwriting` maps to present/absent and can
 have no annotations. Preserve existing annotations. Presence alone is not an extraction failure.
 
@@ -367,12 +374,12 @@ Use `scripts/receipt_pdf.mjs` with verified originals and ordinary OCR artifacts
 searchable image PDFs. Text is invisible and may be inaccurate; never redraw or replace
 visible receipt text with model output. Unknown date/vendor remains unresolved.
 
-Default detected crops need visually verified original-pixel bounds with paper margin, retaining faint
-text and handwriting. No generative cleanup. Compare the upload response's server-computed
-hash and revision with the generated PDF. Inspect every assembled draft page; Python
-may attest a final PDF whose ordered lossless renders exactly match that approved draft.
-If the renders differ, inspect every final page before PDF review. A comparison runtime
-failure or changed/missing approved baseline stops the run for reconciliation.
+Use the saved detected crop and source-matched PP by default. Review crop bounds visually
+only for a concrete concern; preserve paper margins, faint text and handwriting when adjusting.
+No generative cleanup. Compare the server-computed upload hash/revision with the generated PDF.
+Routine OCR-first completion verifies source/layout integrity without asserting visual review.
+For an explicitly visual pass, inspect every draft page; Python may attest identical final
+renders. A mismatch on that visual path requires inspecting the final pages instead.
 Do not download it again during normal processing. For an
 existing artifact without a verified local copy, or an explicit retrieval-path check,
 download the pinned PDF and verify its hash. Save failures with recovery actions.

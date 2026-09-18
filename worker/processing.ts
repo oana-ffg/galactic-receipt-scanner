@@ -144,7 +144,12 @@ function applyExtraction(
   d.vendor = e.vendor;
   d.receiptDate = e.receipt_date;
   d.reference = e.reference;
-  d.handwriting = e.has_handwriting ? "present" : "absent";
+  d.handwriting =
+    e.has_handwriting === null
+      ? "unchecked"
+      : e.has_handwriting
+        ? "present"
+        : "absent";
   d.invoice = null;
   d.uncertainties = [...e.uncertainties];
   d.broken = [...e.broken_reasons];

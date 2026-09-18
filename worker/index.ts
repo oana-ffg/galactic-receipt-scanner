@@ -266,6 +266,7 @@ async function route(
       queueClaims: true,
       lunaReassessment: true,
       ppocrConfirmation: true,
+      ocrFirstOptionalVision: true,
       categories: true,
       independentReview: true,
     });

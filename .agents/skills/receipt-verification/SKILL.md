@@ -28,6 +28,8 @@ named re-review. Creating or invoking this skill does not create a schedule or r
    Use the owner's subscription-backed managed agents; no paid inference APIs.
 2. Hold the existing receipt batch guard for the whole batch using
    [batch coordination](../receipt-processing/references/luna-protocol.md#batch-coordination).
+   Append `--workflow astra` when launching this guard: Astra uses the independent
+   verification protocol below rather than the bounded Luna completion counter.
    Keep its live session ID and an ignored coordinator checkpoint. Respect busy/blocked
    state; do not clear an earlier blocked batch merely to start verification. This guard
    serializes Astra with Luna on this host; the server also enforces a global claim.

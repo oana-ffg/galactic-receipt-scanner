@@ -4,9 +4,9 @@
 This longer reference is for coordinator setup, maintenance and recovery of the
 underlying individual operations. Do not send it as required reading to every Luna.
 Grouped operations preserve the same checkpoints and stop on uncertain writes.
-`finish` attests automatically only after Luna approves every draft page and Python
-verifies identical ordered lossless renders of the final PDF; otherwise it returns
-final render paths and an `attest` template for a real final-page inspection.
+OCR-first `finish` normally completes with source/layout/upload checks and no visual
+attestation. Images are optional for a concrete ambiguity. If Luna elects to inspect
+every draft page, the existing identical-render attestation path remains available.
 
 Use this interface for Luna on a host with a configured worker profile and standing
 approval. It covers the complete small-stage workflow in one process. Do not use the
@@ -101,46 +101,34 @@ Use `quit` for early closure or an older still-running helper. A terminal result
 does not authorize starting the next worker while its process is still running.
 
 The helper prints one ready response after checking access, prepared dependencies and
-the renderer, reassessment API and prepared PP runtime/models. Require the ready response
+the renderer and reassessment API. Saved-PP consumers do not load OCR models. Require the ready response
 to advertise `confirmation_provider: ppocr`; a legacy Qwen profile needs setup before
-this first-pass workflow. Open its `viewer_preflight` image with native `view_image` before claiming.
-The expected image is a small green square. This verifies local viewer access; no receipt
-is claimed during preflight. All artifacts live under the repository's ignored
+this first-pass workflow. OCR-first begin needs no image-viewer preflight. The synthetic
+viewer image remains available for visual workflows. All artifacts live under the repository's ignored
 `.local/receipt-worker/RUN_ID`, using inherited Windows workspace permissions.
 
 ## Batch coordination
 
-After each worker completes, the coordinator verifies it with a separate read-only
-command using the same prepared executable and exact batch-script prefix:
+After each Luna worker completes and exits, send this request through the held batch
+guard's own `write_stdin` session:
 
 ```text
-PYTHON -X utf8 -B -I BATCH_SCRIPT --owner OWNER --verify RUN_ID
+{"op":"verify","run_id":"ACTUAL_RUN_ID"}
 ```
 
-Here `BATCH_SCRIPT` is the checkout's absolute `scripts/receipt_batch.py` path.
-Launch this verification with `login: false` and the same authorized execution
-context as the Python worker. On a Windows host whose profile is protected outside
-the sandbox, include `sandbox_permissions: "require_escalated"` in the `exec_command`
-call; escalation on the earlier worker launch does not carry over to this command.
-If an ordinary sandbox launch fails with `PermissionError` before verification,
-retry this same read-only command once with that authorized context. An explicit
-approval rejection still means stop; never change ACLs or copy credentials to work
-around it. Do not count the document until verification actually succeeds.
-`OWNER` must exactly match the owner used to start the held guard. Scheduled runs
-use `receipt-processing-scheduled`, matching their narrow standing approval; manual
-batches retain their own task owner.
-This command does not acquire or replace the held guard and does not claim work.
-It can also verify a completed worker from the current blocked batch for authorized
-reconciliation, using that batch's exact owner. This read-only verification does not
-resume the batch or authorize another claim.
-It reads `.local/processing-host.json`, validates the worker's existing destination,
-checks saved state and emits `verified: true` plus an immutable private verification
-file. Require exit zero and that complete result before counting the document; retain
-the generated file reference instead of manually copying page IDs or PDF hashes.
+Require `verification.verified: true`. The guard verifies live saved state, records
+the unique completion and returns counts plus `next: dispatch` or `finish`. It rejects
+early finish unless this batch's worker actually received an empty/busy claim.
+The standalone `--verify RUN_ID` command remains a read-only recovery diagnostic; it
+does not increment a live guard's count. Luna must not launch either verification path.
 
 The coordinator uses the prepared Python executable to launch the checkout's absolute
-`scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`.
-This local script reads no credentials and holds one OS lock until the batch finishes.
+`scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`,
+and the authorized `sandbox_permissions: require_escalated` context for its protected
+profile reads during verification. Scheduled runs use `receipt-processing-scheduled`.
+Default count is 10; append `--count N` for an explicitly different count. The guard
+loads credentials only inside its verification operation, never into model output.
+It holds one OS lock until the batch finishes.
 It is separate from Luna's `receipt_worker.py` process. Request the authorized execution
 context for the fixed script where needed; do not weaken permissions or bypass rejection.
 
@@ -169,7 +157,7 @@ a successful stop, start another guard, or retry the receipt claim.
 
 After the assigned count is verified, or a worker confirms the queue is empty/busy,
 send `{"op":"finish"}` and require `ok: true, phase: complete` before the parent final.
-The script refuses to finish over a failed, unfinished or still-running worker. On an
+The script refuses to finish early or over a failed, unfinished or still-running worker. On an
 actual worker failure send `{"op":"block","reason":"non-sensitive failure summary"}`
 and require `ok: true, phase: blocked` before treating the guard as stopped. If the
 response says a claim is in flight, await that same worker's response/terminal state,
@@ -271,7 +259,7 @@ direct launch as a configuration failure rather than starting a second process.
 | `originals`  | `capture_ids` from claim/context/documents                                                                               | Optional raw-image paths when a crop, grouping or source completeness needs checking; not the default visual input.                                                                                                                                                               |
 | `categories` | None                                                                                                                     | Existing category registry.                                                                                                                                                                                                                                                       |
 | `category`   | `name`, `description`                                                                                                    | Create/reuse a needed private category. Do not invent registry IDs.                                                                                                                                                                                                               |
-| `draft`      | `extraction`, `page_review`; optional `grouping` below                                                                   | Freeze the initial extraction, grouping and layout. In OCR-first mode this records the exact already-read PP artifact hashes. Returns assembled pixel-only PDF renders; inspect every page before finish.                                                                         |
+| `draft`      | `extraction`, `page_review`; optional `grouping` below | Freeze the initial extraction, grouping and layout with exact already-read PP artifact hashes. OCR-first render viewing is optional for a concrete concern; an explicitly visual-first run inspects every page. |
 | `prepare`    | `capture_ids` for all and only the draft's retained pages                                                                | Legacy visual-first maintenance only, after draft. Normal OCR-first review reuses its already-pinned PP evidence without fetching a different artifact.                                                                                                                           |
 | `validate`   | `extraction` using the complete [API contract](processing-api.md#parse)                                                  | Actual shared schema/arithmetic checks. Correct validation errors locally; never change printed digits to force balance.                                                                                                                                                          |
 | `confirm`    | None                                                                                                                     | Pin the exact saved PP artifacts for all frozen pages and return server OCR/math comparisons. This performs no Qwen inference.                                                                                                                                                    |
@@ -406,7 +394,8 @@ Writing a transcript containing both pages, or merely saying they belong togethe
 does not change membership. The draft result must contain the whole selected list.
 
 After draft succeeds, compare the returned `layouts` capture IDs and order, `pages`,
-and `page_review` with that decision, then open every returned render. A discrepancy
+and `page_review` with that decision. OCR-first runs open renders only if needed to resolve a
+concrete ambiguity; explicit visual-first runs inspect every page. A discrepancy
 is a workflow failure needing preserved-state recovery, not an incomplete receipt to
 submit. Do not discard dates/totals or rewrite the explanation to accommodate a page
 you accidentally omitted. Truly missing or ambiguous sources still permit a saved

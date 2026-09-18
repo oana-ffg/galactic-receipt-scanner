@@ -1,4 +1,5 @@
 """Produce compact receipt completion evidence from journals and live readback."""
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -66,20 +67,33 @@ def verify_run(repo, run_id, owner):
     require(intended == frozen == actual and document["pages"] == state["document"]["pages"],
             "Intended, journal and saved page order or layout differ.")
     applicable = bool(document.get("filename") and not document.get("duplicateOf") and not document.get("mergedInto"))
+    structural = (state.get("input_mode") == "ppocr-first"
+                  and state.get("pdf_validation") == "source-layout-and-upload"
+                  and state.get("layout_approval", {}).get("visual") is False)
     require(document["revision"] == state["document"]["revision"]
-            == saved[0]["revision"] + int(applicable),
+            == saved[0]["revision"] + int(applicable and not structural),
             "Saved document revision differs from the completed worker and PDF attestation.")
     pdf_hash = None
     if applicable:
         pdf_hash = state["pdf"]["sha256"]
-        require(document["checks"]["pdf"] is True and pdf_hash
-                == document["reviewedPdfSha256"] == document["pdf"]["sha256"]
+        require(pdf_hash == document["pdf"]["sha256"]
                 and state["pdf"]["pages"] == len(actual),
                 "Final PDF attestation or page count differs.")
+        if structural:
+            require(document["checks"]["pdf"] is False and document["reviewedPdfSha256"] is None
+                    and document["pdf"]["revision"] == state["pdf"]["revision"] == document["revision"],
+                    "OCR-first PDF must preserve the distinction between an upload and visual review.")
+            require(hashlib.sha256(regular_path(Path(state["pdf"]["path"])).read_bytes()).hexdigest() == pdf_hash,
+                    "Generated PDF changed after upload.")
+        else:
+            require(document["checks"]["pdf"] is True and document["reviewedPdfSha256"] == pdf_hash,
+                    "Final PDF visual attestation differs.")
     summary = dict(verified=True, batch_id=batch["batch_id"], batch_phase=batch["phase"], run_id=run_id, document_id=document_id,
                    capture_ids=actual, page_count=len(actual), status=document["status"],
                    revision=document["revision"], claim_closed=True, attempt_saved=True,
-                   pdf_applicable=applicable, pdf_sha256=pdf_hash, checked_at=time.time())
+                   pdf_applicable=applicable, pdf_sha256=pdf_hash,
+                   pdf_validation="source-layout-and-upload" if structural else "visual" if applicable else "inapplicable",
+                   checked_at=time.time())
     proof = work / ("verification-" + uuid.uuid4().hex + ".json")
     write_new_file(proof, json.dumps(summary).encode("utf-8"))
     return {**summary, "verification_file": str(proof)}

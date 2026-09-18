@@ -17,7 +17,8 @@ export interface Extraction {
   receipt_date: string | null;
   reference: string | null;
   currency: string | null;
-  has_handwriting: boolean;
+  /** Null means no visual handwriting assessment was made. */
+  has_handwriting: boolean | null;
   has_payment_slip: boolean;
   payment_status: "approved" | "declined" | "unknown" | "not-applicable";
   card_last_four: string | null;
@@ -45,7 +46,7 @@ export interface Extraction {
 export interface ProcessingState {
   extraction: Extraction;
   not_invoice: boolean;
-  has_handwriting: boolean;
+  has_handwriting: boolean | null;
   small_model_certainty: Certainty | null;
   large_model_confidence: Certainty | null;
   has_human_review: boolean;
@@ -107,10 +108,10 @@ export function extractionErrors(input: unknown): string[] {
     "Invalid currency.",
   );
   check(
-    typeof e.has_handwriting === "boolean" &&
+    (e.has_handwriting === null || typeof e.has_handwriting === "boolean") &&
       typeof e.has_payment_slip === "boolean" &&
       typeof e.confirmed_arithmetic_mismatch === "boolean",
-    "Presence and mismatch flags must be booleans.",
+    "Handwriting must be boolean or null; payment-slip and mismatch flags must be booleans.",
   );
   check(
     ["approved", "declined", "unknown", "not-applicable"].includes(

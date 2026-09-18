@@ -164,7 +164,14 @@ class FakeScanner:
         return {**result, "ocr_path": str(ocr), "crop": crop, "rotation": rotation,
                 "ocr_sha256": hashlib.sha256(ocr.read_bytes()).hexdigest()}
 
-    def pdf(self, did, directory, before_upload=None):
+    def saved_ocr(self, cid, directory, *, crop=module.AUTO_CROP, rotation=0):
+        if crop is module.AUTO_CROP:
+            crop = [1, 2, 9, 18]
+        result = self.prepare(cid, directory, crop=crop, rotation=rotation, allow_inference=False)
+        result.pop('path')
+        return {**result, 'pixels': [10, 20]}
+
+    def pdf(self, did, directory, before_upload=None, *, prepared=None):
         self.pdf_calls += 1
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)

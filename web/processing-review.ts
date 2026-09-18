@@ -179,7 +179,10 @@ function reviewForm(
   ] as const) {
     const check = el("input");
     check.type = "checkbox";
-    check.checked = e[key];
+    check.checked = e[key] === true;
+    check.indeterminate = e[key] === null;
+    if (check.indeterminate)
+      check.title = "Not visually assessed; leave unchanged to keep unknown.";
     const wrap = el("label");
     wrap.className = "toggle";
     wrap.append(check, label);
@@ -426,7 +429,9 @@ function reviewForm(
         for (const [key, select] of selects)
           (e as unknown as Record<string, unknown>)[key] = select.value;
         for (const [key, check] of bools)
-          (e as unknown as Record<string, unknown>)[key] = check.checked;
+          (e as unknown as Record<string, unknown>)[key] = check.indeterminate
+            ? null
+            : check.checked;
         e.category_id = category.value || null;
         e.line_items = lineRows
           .filter((l) => l.row.isConnected)

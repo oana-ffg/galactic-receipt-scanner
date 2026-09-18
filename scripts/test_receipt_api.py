@@ -170,6 +170,33 @@ class ClientTests(unittest.TestCase):
                 "provenance": {"engine": "PP-OCRv6"},
                 "text_only_pdf_layers": [{"base64": "c3ludGhldGlj", "sha256": "f" * 64}]}
 
+    def test_saved_ocr_skips_malformed_artifacts_without_images_or_inference(self):
+        good = json.dumps(self.ocr_fixture()).encode()
+        bodies = {hashlib.sha256(body).hexdigest(): body for body in (b'not JSON', b'\xff', good)}
+        self.client.get = Mock(return_value={**self.meta, 'artifacts': [dict(kind='ocr', sha256=sha) for sha in bodies]})
+        self.client.request = Mock(side_effect=lambda path: bodies[path.split('version=')[1]])
+        self.client.original = Mock(side_effect=AssertionError('Saved OCR must not fetch pixels'))
+        geometry = Mock(returncode=0, stdout=json.dumps(dict(pixels=[100, 200], crop=[0, 0, 100, 200])))
+        with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run', return_value=geometry):
+            result = self.client.saved_ocr(self.id, directory)
+            self.assertEqual(result['ocr_sha256'], hashlib.sha256(good).hexdigest())
+            self.assertNotIn('path', result)
+        self.client.ocr_backend.run.assert_not_called()
+        self.client.ocr_backend.preflight.assert_not_called()
+
+    def test_saved_ocr_changed_outline_requests_matching_ocr(self):
+        body = json.dumps(self.ocr_fixture()).encode()
+        sha = hashlib.sha256(body).hexdigest()
+        self.client.get = Mock(return_value={**self.meta, 'artifacts': [dict(kind='ocr', sha256=sha)]})
+        self.client.request = Mock(return_value=body)
+        self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha))
+        geometry = Mock(returncode=0, stdout=json.dumps(dict(pixels=[100, 200], crop=[1, 2, 90, 180])))
+        with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run', return_value=geometry):
+            with self.assertRaises(OCRRequired) as error:
+                self.client.saved_ocr(self.id, directory, crop=[1, 2, 90, 180])
+            self.assertEqual(error.exception.request['crop'], [1, 2, 90, 180])
+        self.client.ocr_backend.run.assert_not_called()
+
     def test_prepare_reuses_only_source_matched_ocr_and_skips_malformed_candidates(self):
         good = json.dumps(self.ocr_fixture()).encode()
         wrong = json.dumps({**self.ocr_fixture(), "source": {"captureId": self.id, "sha256": "0" * 64}}).encode()
@@ -263,7 +290,8 @@ class ClientTests(unittest.TestCase):
         sha = hashlib.sha256(data).hexdigest()
         def generate(args, **kwargs):
             Path(args[-1]).write_bytes(data)
-            return Mock(returncode=0)
+            return Mock(returncode=0, stdout=json.dumps(dict(sha256=sha, pages=1,
+                layouts=[dict(captureId=self.id, sha256=self.sha, pixels=[10, 20], crop=None, rotation=0)])))
         self.client.request = Mock(side_effect=lambda path, body=None, content_type=None: json.dumps({"sha256": sha, "revision": 3, "filename": "2026-01-01_synthetic.pdf"}).encode() if body is not None else data)
         with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=generate):
             result = self.client.pdf(self.id, directory)

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
 from receipt_ppocr import PPBackend
 from receipt_locks import LockBusy, acquire_lock, lock_held
-from receipt_api import ScannerClient, ClientError, OCRRequired, artifact_directory, credentials, write_new_file
+from receipt_api import ScannerClient, ClientError, OCRRequired, AUTO_CROP, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
 WINDOWS_REPLACE_ATTEMPTS = 7
@@ -320,6 +320,10 @@ class Worker:
                     return page
         raise InputError("Capture page was not discovered in this receipt context.")
 
+    def inspected_ids(self):
+        """Sources read as PP text or explicitly retrieved as images, never mere context."""
+        return set(self.state["sources"]) | set(self.state["prepared"])
+
     def render_file(self, path, pages, dpi, label):
         return self.render_pages(path, pages, dpi, label, "jpeg")
 
@@ -382,7 +386,7 @@ class Worker:
         require(isinstance(selected, list) and 0 < len(selected) <= 100 and len(set(selected)) == len(selected)
                 and set(selected) <= pages.keys() and {p["captureId"] for p in target["pages"]} <= set(selected),
                 "Grouping must preserve all target pages exactly once.")
-        require(set(selected) <= self.state["sources"].keys(), "Open verified originals before grouping pages.")
+        require(set(selected) <= self.inspected_ids(), "Read every selected source before grouping pages.")
         if duplicate:
             if self.state.get("input_mode") == "ppocr-first":
                 require(selection.get("visual_duplicate_checked") is True,
@@ -434,7 +438,7 @@ class Worker:
             ids = window["capture_ids"]
             boundary = next((cid for cid in ids if cid not in retained), None)
             if boundary is not None:
-                require(boundary in self.state["sources"],
+                require(boundary in self.inspected_ids(),
                         "Inspect the next available scan before draft; it may be a continuation, payment slip or duplicate. "
                         "Retain it with grouping or explain its exclusion in page_review.")
             elif ids:
@@ -450,9 +454,21 @@ class Worker:
                     and isinstance(item["reason"], str) and 0 < len(item["reason"].strip()) <= 2000,
                     "Each excluded page needs capture_id and a concrete evidence-based reason for keeping it separate.")
         ids = [item["capture_id"] for item in excluded]
-        require(len(ids) == len(set(ids)) and set(ids) == set(self.state["sources"]) - set(retained),
+        require(len(ids) == len(set(ids)) and set(ids) == self.inspected_ids() - set(retained),
                 "Account for every inspected non-retained page exactly once in page_review.excluded. "
                 "A known continuation belongs in grouping; it is not a missing future page.")
+
+    def review_repair(self, message):
+        """Expose exact bookkeeping, without inventing membership or exclusion reasons."""
+        review = message.get("page_review") or {}
+        selected = review.get("capture_ids", []) if isinstance(review, dict) else []
+        selected = {cid for cid in selected if isinstance(cid, str)} if isinstance(selected, list) else set()
+        inspected = self.inspected_ids()
+        return dict(retry_op="review", inspected_capture_ids=sorted(inspected),
+                    required_exclusion_ids=sorted(inspected - selected),
+                    context_only_ids=sorted(set(self.state["capture_ids"]) - inspected),
+                    instruction="Correct the same review request. Exclusions are individual capture IDs, not document IDs. "
+                                "Context-only neighbours need no exclusion. Never merge an unrelated page to satisfy validation.")
 
     def observe_claimed(self, message):
         require(self.state["phase"] == "claimed" and not self.state.get("draft_saved"),
@@ -510,6 +526,9 @@ class Worker:
         require(set(message) <= {"op", "extraction", "grouping", "category_name", "page_review"}, "Unknown draft option.")
         extraction = deepcopy(message["extraction"])
         if self.state.get("input_mode") == "ppocr-first":
+            retained_ids = message["page_review"]["capture_ids"]
+            if not set(retained_ids) <= self.state.get("preview_records", {}).keys() and extraction.get("has_handwriting") is False:
+                extraction["has_handwriting"] = None
             provenance = "Initial extraction uses PP-OCRv6 text and coordinates; it is not an independent visual OCR reading."
             if isinstance(extraction.get("evidence"), str) and provenance not in extraction["evidence"]:
                 extraction["evidence"] = provenance + "\n" + extraction["evidence"]
@@ -534,7 +553,7 @@ class Worker:
         self.check_page_review(message.get("page_review"), retained)
         previous = self.state.get("previous_ids", [])
         if previous and (extraction["type"] == "payment-slip" or extraction["completeness"] == "fragment"):
-            require(previous[0] in self.state["sources"],
+            require(previous[0] in self.inspected_ids(),
                     "Inspect the immediately preceding scan for a payment slip or fragment; it may hold the main receipt or earlier section.")
         require(set(retained) <= layouts.keys(), "Preview every retained page before freezing the Luna draft.")
         for document in documents:
@@ -545,6 +564,13 @@ class Worker:
                     page["crop"], page["rotation"] = layout["crop"], layout["rotation"]
         validation = self.check("validate", extraction=extraction)
         require(not validation["errors"], "Grouping exceeded extraction limits; revise the extraction.")
+        for cid in retained:
+            if cid not in self.state["sources"]:
+                source = self.client.original(cid, self.work / "originals")
+                verify(source["sha256"] == self.state["capture_hashes"][cid], "Retained original differs from the OCR source.")
+                self.state["sources"][cid] = source
+            if cid in self.state["prepared"]:
+                self.state["prepared"][cid]["path"] = self.state["sources"][cid]["path"]
         pages = [{**p, "path": self.state["sources"][p["captureId"]]["path"]} for p in target["pages"]]
         pixel_pdf = self.client.image_pdf(pages, self.work / "draft")
         verify(pixel_pdf["pages"] == len(pages) and pixel_pdf["layouts"] == [layouts[cid] for cid in retained],
@@ -697,7 +723,22 @@ class Worker:
         self.state["pdf"], self.state["phase"] = intent, "pdf"
         self.state.pop("failed", None)
         self.checkpoint()
+        if self.structural_pdf():
+            return {"recovered": True, "pdf": intent, **self.finish_structural_pdf()}
         return {"recovered": True, "pdf": intent, **self.render(150)}
+
+    def structural_pdf(self):
+        return (self.state.get("input_mode") == "ppocr-first"
+                and self.state.get("layout_approval", {}).get("visual") is False)
+
+    def finish_structural_pdf(self):
+        """Complete a confirmed upload without asserting that a model viewed it."""
+        verify(self.structural_pdf() and self.state["phase"] == "pdf", "No confirmed OCR-first PDF to complete.")
+        self.state["pdf_validation"] = "source-layout-and-upload"
+        self.state["phase"] = "complete"
+        self.checkpoint()
+        return {**self.summary(), "pdf_applicable": True, "pdf_review_attested": False,
+                "pdf_validation": self.state["pdf_validation"]}
 
     def workflow_step(self, op, **fields):
         """Run the existing bounded operation, preserving its recovery checkpoints."""
@@ -711,22 +752,19 @@ class Worker:
         return result
 
     def begin(self, message):
-        require(set(message) == {"op", "viewer_checked"}, "begin needs only viewer_checked after opening the preflight image.")
+        require(set(message) <= {"op", "viewer_checked"}, "begin accepts no source assignment overrides.")
         # A correctable crop error can leave a known claim; never issue a second claim.
         require(self.state["phase"] in {"ready", "claimed"}, "begin requires a fresh or already confirmed claim.")
         if self.state["phase"] == "ready":
-            result = self.workflow_step("claim", viewer_checked=message["viewer_checked"])
+            self.state["input_mode"] = "ppocr-first"
+            result = self.workflow_step("claim", viewer_checked=message.get("viewer_checked", False))
             if self.state["phase"] == "empty":
                 return result
-        require(message["viewer_checked"] is True, "Open the preflight image before begin.")
         cid = self.state["claim"]["document"]["pages"][0]["captureId"]
-        preview = self.state.get("preview_records", {}).get(cid)
-        if preview is None:
-            preview = self.workflow_step("previews", capture_ids=[cid])[0]
         self.state["input_mode"] = "ppocr-first"
         reading = self.workflow_step("ocr", capture_ids=[cid])[0]
         return {**self.summary(), "input_mode": "ppocr-first", "claimed_ocr": reading,
-                "claimed_preview": preview, "images_optional": True, "next": "inspect",
+                "images_optional": True, "image_request": {"op": "previews", "capture_ids": [cid]}, "next": "inspect",
                 "request": {"op": "inspect", "observation": dict(capture_id=cid, type=None,
                     vendor=None, receipt_date=None, currency=None, total_minor=None, card_last_four=None)}}
 
@@ -743,12 +781,12 @@ class Worker:
         ids += self.state.get("lookahead_ids", [])[:3]
         ids = list(dict.fromkeys(cid for cid in ids if cid != claimed["pages"][0]["captureId"]))
         readings = self.workflow_step("ocr", capture_ids=ids) if ids else []
-        previews = [self.state["preview_records"][cid] for cid in ids]
         categories = self.workflow_step("categories")
         retained = [p["captureId"] for p in claimed["pages"]]
-        return {"context": context, "ocr": readings, "previews": previews, "images_optional": True, "categories": categories,
+        return {"context": context, "ocr": readings, "images_optional": True, "categories": categories,
                 "next": "review", "request": {"op": "review", "extraction": extraction_template(),
-                    "page_review": {"capture_ids": retained, "excluded": []}}}
+                    "page_review": {"capture_ids": retained, "excluded": [dict(capture_id=cid, reason="")
+                        for cid in ids if cid not in retained]}, "grouping_evidence": ""}}
 
     def ocr(self, message):
         """Supply source-pinned PP text/coordinates before Luna's extraction, without image viewing."""
@@ -763,25 +801,50 @@ class Worker:
         result = []
         for cid in ids:
             self.renew_if_needed()
-            if cid not in self.state.get("preview_records", {}):
-                self.workflow_step("previews", capture_ids=[cid])
-            layout = self.state["layouts"][cid]
-            source = self.client.prepare(cid, self.work / "ocr", crop=layout["crop"], rotation=layout["rotation"], allow_inference=False)
+            layout = self.state.get("layouts", {}).get(cid)
+            page = self.page(cid)
+            source = self.client.saved_ocr(cid, self.work / "ocr",
+                crop=layout["crop"] if layout else page.get("crop") if page.get("crop") is not None else AUTO_CROP,
+                rotation=layout["rotation"] if layout else page.get("rotation", 0))
             verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR source differs from the claimed context.")
+            layout = dict(captureId=cid, sha256=source["sha256"], pixels=source["pixels"], crop=source["crop"], rotation=source["rotation"])
+            self.state.setdefault("layouts", {})[cid] = layout
             self.state["prepared"][cid] = source
             value = json.loads(Path(source["ocr_path"]).read_text(encoding="utf-8"))
             reading = {"capture_id": cid, "source_sha256": source["sha256"], "ocr_sha256": source["ocr_sha256"],
                        "layout": layout, "text": value.get("text", ""), "confidence": value.get("confidence"),
                        "lines": [{key: line.get(key) for key in ("text", "confidence", "box")}
                                  for line in value.get("lines", [])],
-                       "preview": self.state["preview_records"][cid]["preview"]}
+                       "image_request": {"op": "previews", "capture_ids": [cid]}}
             self.record("ocr-reading", reading)
             result.append(reading)
             self.checkpoint()
         return result
 
     def review(self, message):
-        require(set(message) <= {"op", "extraction", "grouping", "category_name", "page_review"}, "Unknown review option.")
+        require(set(message) <= {"op", "extraction", "grouping", "grouping_evidence", "category_name", "page_review"}, "Unknown review option.")
+        message = deepcopy(message)
+        evidence = message.pop("grouping_evidence", "")
+        # One ordered selection is authoritative; the model need not repeat IDs in
+        # a donor list or a second page list. Keep explicit duplicate handling.
+        if "grouping" not in message:
+            selected = message["page_review"]["capture_ids"]
+            claim = self.active()["document"]
+            own = {p["captureId"] for p in claim["pages"]}
+            require(isinstance(selected, list) and selected and len(set(selected)) == len(selected)
+                    and own <= set(selected) and set(selected) <= self.inspected_ids(),
+                    "Keep all claimed pages exactly once and use only inspected source IDs in page_review.capture_ids.")
+            donors = []
+            for cid in selected:
+                if cid in own:
+                    continue
+                matches = [did for did in self.state["document_ids"] if did != claim["id"]
+                           and any(p["captureId"] == cid for p in self.get_document(did)["pages"])]
+                require(len(matches) == 1, "Selected source must belong to exactly one discovered donor document.")
+                if matches[0] not in donors:
+                    donors.append(matches[0])
+            if donors or selected != [p["captureId"] for p in claim["pages"]]:
+                message["grouping"] = dict(donor_ids=donors, capture_ids=selected, evidence=evidence)
         result = self.workflow_step("draft", **{k: v for k, v in message.items() if k != "op"})
         if not result.get("drafted"):
             return result
@@ -793,7 +856,7 @@ class Worker:
                 "initial_validation": self.check("validate", extraction=frozen["extraction"]),
                 "next": "finish", "request": {"op": "finish", "extraction": deepcopy(frozen["extraction"]),
                     "rationale": "", "all_pages_inspected": False,
-                    "layout_evidence": ""}}
+                    "layout_evidence": "OCR-first; visual inspection not performed."}}
 
     def finish(self, message):
         allowed = {"op", "extraction", "rationale",
@@ -801,21 +864,28 @@ class Worker:
         if set(message) - allowed or self.state["phase"] != "drafted" or not self.state.get("confirmation"):
             raise ProtocolInputError("finish requires the saved draft and its OCR/math confirmation.")
         frozen = self.state["draft"]
-        if (message.get("all_pages_inspected") is not True
+        visual = message.get("all_pages_inspected") is True
+        if (type(message.get("all_pages_inspected")) is not bool
+                or (not visual and frozen.get("input_mode") != "ppocr-first")
                 or not 0 < len(message["layout_evidence"].strip()) <= 2000):
-            raise ProtocolInputError("Inspect every returned draft page, then provide layout_evidence (1-2000 characters).")
+            raise ProtocolInputError("State whether every draft page was visually inspected and explain the layout evidence (1-2000 characters).")
+        retained = {p["captureId"] for p in frozen["target"]["pages"]}
+        if not visual and not retained <= self.state.get("preview_records", {}).keys() and message["extraction"].get("has_handwriting") is False:
+            raise ProtocolInputError("Without visual evidence leave has_handwriting null, not false.")
         # This session has exactly one immutable draft and confirmation. Pin their
         # hashes internally rather than asking the model to transcribe machine IDs.
         result = self.workflow_step("assess", confirmation_sha256=self.state["confirmation"]["sha256"],
             **{k: message[k] for k in ("extraction", "rationale", "category_name") if k in message})
         if not result.get("assessed"):
             return result
-        self.state["layout_approval"] = {"sha256": frozen["pixel_pdf"]["sha256"], "evidence": message["layout_evidence"]}
+        self.state["layout_approval"] = {"sha256": frozen["pixel_pdf"]["sha256"], "evidence": message["layout_evidence"], "visual": visual}
         self.record("layout-approval", self.state["layout_approval"])
         self.workflow_step("submit")
         pdf_result = self.workflow_step("pdf")
         if self.state["phase"] == "complete":
             return {**self.summary(), "pdf_applicable": False}
+        if not visual:
+            return self.finish_structural_pdf()
         proof = self.compare_pdf_pixels()
         if not proof["identical"]:
             return {**pdf_result, "needs_pdf_review": True, "next": "attest",
@@ -978,7 +1048,7 @@ class Worker:
             return self.summary()
         if op == "claim":
             require(self.state["phase"] == "ready", "One claim only per worker process; start no replacement document.")
-            require(message.get("viewer_checked") is True, "Open the synthetic image before claiming.")
+            require(message.get("viewer_checked") is True or self.state.get("input_mode") == "ppocr-first", "Open the synthetic image before claiming.")
             try:
                 transition = acquire_lock(self.work.parent / "batch-transition.lock")
             except LockBusy:
@@ -1208,11 +1278,14 @@ class Worker:
             self.state["phase"] = "pdf-preparing"
             self.checkpoint_intent(previous_state)
             pdf = self.client.pdf(doc["id"], self.work / "pdf",
-                                  before_upload=lambda value: self.pdf_intent(value, previous_state))
+                                  before_upload=lambda value: self.pdf_intent(value, previous_state),
+                                  prepared=self.state["prepared"] if self.state.get("input_mode") == "ppocr-first" else None)
             require(pdf["revision"] == doc["revision"], "Document changed before PDF generation; reconcile.")
             self.state["pdf"] = pdf
             self.state["phase"] = "pdf"
             self.checkpoint()
+            if self.state.get("layout_approval", {}).get("visual") is False:
+                return {"pdf": pdf}
             return {"pdf": pdf, **self.render(300 if self.state.get("layout_approval") else 150)}
         if op == "render":
             return self.render(message.get("dpi", 300))
@@ -1262,10 +1335,10 @@ class Worker:
         require(access.get("lunaReassessment") is True, "Deploy the Luna reassessment API before running this workflow.")
         if self.confirmation_provider == "ppocr":
             require(access.get("ppocrConfirmation") is True, "Deploy PP OCR confirmation support before processing.")
+            require(access.get("ocrFirstOptionalVision") is True,
+                    "Deploy OCR-first optional-vision support before running the updated worker.")
         if not (self.resumed and self.state["phase"] in {"draft-uncertain", "confirmation-uncertain"}):
-            if self.confirmation_provider == "ppocr":
-                self.client.ocr_backend.preflight()
-            else:
+            if self.confirmation_provider != "ppocr":
                 receipt_qwen.preflight()
         self.check("validate", extraction={})
         # Verify prepared packages and model assets without fetching/installing anything.
@@ -1316,7 +1389,8 @@ class Worker:
                 return {'ok': False, 'blocking': True, 'op': op, 'error': str(error), **self.summary()}
             # If a write was already attempted, this is a workflow failure, not an editable input.
             if self.state["phase"] not in {"draft-uncertain", "confirmation-uncertain", "submit-uncertain", "submit-readback", "submitted", "pdf", "pdf-uncertain", "pdf-preparing", "attestation-uncertain", "claim-uncertain"}:
-                return {"ok": False, "input_error": str(error), "op": op}
+                return {"ok": False, "input_error": str(error), "op": op,
+                        **(self.review_repair(message) if op == "review" else {})}
             return self.failure(op, str(error), prior_failure)
         except ClientError as error:
             return self.failure(op, str(error), prior_failure)
