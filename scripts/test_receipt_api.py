@@ -283,6 +283,33 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(result["ocr_sha256"], sha)
             self.client.ocr_backend.run.assert_called_once()
 
+    def test_pdf_reused_sources_create_output_directory_without_preparing_again(self):
+        page = dict(captureId=self.id, sha256=self.sha, rotation=0, crop=None)
+        self.client.get = Mock(return_value={"document": dict(id=self.id, revision=3,
+            filename="2026-01-01_synthetic.pdf", pages=[page])})
+        self.client.prepare = Mock(side_effect=AssertionError("Reuse prepared sources"))
+        data = b"%PDF-synthetic-test-only"
+        sha = hashlib.sha256(data).hexdigest()
+        self.client.request = Mock(return_value=json.dumps(dict(sha256=sha, revision=3)).encode())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, ocr = root / "source.jpg", root / "ocr.json"
+            source.write_bytes(b"synthetic source")
+            ocr.write_bytes(b"{}")
+            prepared = {self.id: dict(path=str(source), ocr_path=str(ocr), sha256=self.sha,
+                ocr_sha256=hashlib.sha256(ocr.read_bytes()).hexdigest(), crop=None, rotation=0)}
+            def generate(args, **kwargs):
+                manifest = json.loads(Path(args[-2]).read_text())
+                self.assertEqual(manifest["pages"], [{**page, "path": str(source), "ocr_path": str(ocr)}])
+                Path(args[-1]).write_bytes(data)
+                return Mock(returncode=0, stdout=json.dumps(dict(sha256=sha, pages=1,
+                    layouts=[{**page, "pixels": [10, 20]}])))
+            with patch("receipt_api.subprocess.run", side_effect=generate):
+                result = self.client.pdf(self.id, root / "new" / "pdf", prepared=prepared)
+            self.assertEqual(Path(result["path"]).read_bytes(), data)
+            self.client.prepare.assert_not_called()
+            self.client.request.assert_called_once_with(f"/api/documents/{self.id}/pdf?revision=3", data, "application/pdf")
+
     def test_pdf_verifies_upload_without_redownloading_and_preserves_errors(self):
         self.client.get = Mock(return_value={"document": {"id": self.id, "revision": 3, "filename": "2026-01-01_synthetic.pdf", "pages": [{"captureId": self.id, "sha256": self.sha, "rotation": 0, "crop": None}]}})
         self.client.prepare = Mock(return_value={"path": "/synthetic/source.jpg", "ocr_path": "/synthetic/ocr.json", "sha256": self.sha})

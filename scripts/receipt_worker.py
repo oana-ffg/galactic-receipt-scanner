@@ -883,9 +883,7 @@ class Worker:
         self.workflow_step("submit")
         pdf_result = self.workflow_step("pdf")
         if self.state["phase"] == "complete":
-            return {**self.summary(), "pdf_applicable": False}
-        if not visual:
-            return self.finish_structural_pdf()
+            return {**pdf_result, **self.summary()}
         proof = self.compare_pdf_pixels()
         if not proof["identical"]:
             return {**pdf_result, "needs_pdf_review": True, "next": "attest",
@@ -1284,8 +1282,8 @@ class Worker:
             self.state["pdf"] = pdf
             self.state["phase"] = "pdf"
             self.checkpoint()
-            if self.state.get("layout_approval", {}).get("visual") is False:
-                return {"pdf": pdf}
+            if self.structural_pdf():
+                return {"pdf": pdf, **self.finish_structural_pdf()}
             return {"pdf": pdf, **self.render(300 if self.state.get("layout_approval") else 150)}
         if op == "render":
             return self.render(message.get("dpi", 300))

@@ -366,6 +366,7 @@ class ScannerClient:
             if source["sha256"] != page["sha256"]:
                 raise ClientError("Document source hash mismatch.")
             pages.append({**page, "path": source["path"], "ocr_path": source["ocr_path"]})
+        artifact_directory(root)
         run = root / (document_id + "-" + str(document["revision"]) + "-" + os.urandom(8).hex())
         manifest, output = run.with_suffix(".pages.json"), run.with_suffix(".pdf")
         write_new_file(manifest, json.dumps({"pages": pages}).encode())

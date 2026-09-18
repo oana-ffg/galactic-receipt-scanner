@@ -22,9 +22,31 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['result']['phase'], 'complete')
         self.assertFalse(result['result']['pdf_review_attested'])
+        self.assertTrue(result['result']['pdf_applicable'])
         self.assertFalse(self.fake.documents[fixtures.DID]['checks']['pdf'])
         self.assertNotIn(('POST', '/api/processing/pdf-review'), self.fake.calls)
         self.assertIsNone(json.loads(self.fake.submit_bytes[0])['extraction']['has_handwriting'])
+
+    def test_pdf_preparation_failure_recovers_without_resubmitting_or_viewing(self):
+        finish = self.start_review()
+        finish['all_pages_inspected'] = False
+        with patch.object(self.fake, 'pdf', side_effect=FileNotFoundError('output directory')):
+            failed = self.worker.handle(finish)
+        self.assertTrue(failed['blocking'])
+        self.assertEqual(self.worker.state['phase'], 'pdf-preparing')
+        self.assertNotIn('pdf_intent', self.worker.state)
+        self.worker.lock.close()
+        self.worker = self.make_worker(self.worker.state['run_id'])
+        self.assertTrue(self.worker.handle(dict(op='reconcile'))['ok'])
+        with patch.object(self.worker, 'render', side_effect=AssertionError('No visual review')):
+            result = self.worker.handle(dict(op='pdf'))
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['result']['phase'], 'complete')
+        self.assertTrue(result['result']['pdf_applicable'])
+        self.assertFalse(result['result']['pdf_review_attested'])
+        self.assertIn('completion_file', result['result'])
+        self.assertEqual(len(self.fake.submit_bytes), 1)
+        self.assertEqual(self.fake.pdf_calls, 1)
 
     def test_lost_ocr_first_pdf_ack_recovers_without_visual_review_or_reupload(self):
         finish = self.start_review()
