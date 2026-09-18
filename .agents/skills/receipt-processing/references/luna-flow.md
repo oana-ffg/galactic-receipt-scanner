@@ -24,6 +24,8 @@ Require `ready: true` and `confirmation_provider: ppocr`. Send each
 request through that same session with `write_stdin`: `JSON.stringify(request) + "\n"`.
 Await the actual response; poll that same session if the tool yields. Never resend a
 request just because it is still running. Never write a sequence of future requests.
+Taking 10 minutes or longer on a receipt is normal; the parent can keep the batch
+running for hours. A wait timeout is not a deadline or a reason to abandon this receipt.
 
 ## Four requests: OCR first, images when useful
 
@@ -210,9 +212,11 @@ Never merge an unrelated source just to satisfy a validator. Never stop solely b
 an editable request was rejected. A missing crop requires originals then explicit preview bounds before retrying.
 `begin` reuses its known claim if crop preparation needed correction.
 
-`blocking:true`, an approval rejection, a crash or lost process session stops the batch.
+`blocking:true`, an approval rejection, a crash or lost process session stops this worker's
+processing and triggers the parent's repair procedure, not an immediate batch block.
 Report the exact stage/run and known claim state to the parent through collaboration,
 not send_message_to_thread. Do not launch replacements or resume uncertain writes.
+The parent calls Sol if it cannot resolve the issue and blocks only if that repair fails.
 Release/quit only a known unsubmitted claim; preserve uncertain operations for the
 owner's coordinator to reconcile. Saved low confidence, OCR disagreements, awaiting-pages
 or model-review are successful review outcomes: finish this document and let the parent

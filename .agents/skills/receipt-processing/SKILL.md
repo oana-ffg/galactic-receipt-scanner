@@ -42,7 +42,7 @@ asking for anything unavailable. Ask only about a concrete missing prerequisite 
 ambiguous destination, not the already-defined batch size or stage.
 
 Do not create a recurring schedule from a bare invocation. Respect actual permission
-failures and the stop-on-worker-failure rule; the defaults do not bypass approvals.
+failures and the repair-before-block procedure; the defaults do not bypass approvals.
 
 Use the owner's subscription-backed managed agents. Do not call the OpenAI API or paid
 inference services. The coordinator reads [direct data access](../receipt-data-access/SKILL.md)
@@ -108,7 +108,7 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
    review or require a later visual pass. `has_handwriting: null` honestly means unchecked.
    If Luna voluntarily inspected all draft pages, the existing pixel-comparison/attestation
    path remains available. Saved review flags still let
-   the coordinator continue the next document; actual execution failures stop the batch.
+   the coordinator continue the next document; execution failures enter the repair procedure below.
 
 Use [Luna's short flow](references/luna-flow.md) for normal processing; the detailed
 [protocol](references/luna-protocol.md) covers coordinator setup and maintenance. The host
@@ -120,7 +120,7 @@ If the coordinator discovers missing/broken PP setup before launching Luna, dele
 the OCR skill's setup/repair to Sol first, then verify the prepared launch configuration.
 An existing worker waiting on `ocr_required` keeps its session and claim while Sol works;
 this expected wait is not a worker failure and does not block the batch guard. Actual
-Sol failures and approval rejections still use the stop-on-worker-failure rule.
+Sol failures and approval rejections enter the coordinator's repair-before-block procedure below.
 This local-host flow is not yet verified in cloud Work.
 
 For a full-flow test, use the next unprocessed small-stage documents so saved values
@@ -159,9 +159,14 @@ the [older worker runbook](references/worker-runbook.md) is for Astra. Provide v
 runtime/config/work paths and the exact call recipes. Pass a bounded source assignment, not
 conversation history or images. Each worker handles one document. Default batch: 10 documents.
 Retain coordination until the requested count is verified complete, the queue is
-empty/busy, or an actual blocking failure occurs. Progress updates are not a final
+empty/busy, or an actual failure remains unresolved after repair. Progress updates are not a final
 handoff: do not end the task while a worker is active or further assigned documents
-remain. A long-running batch alone is not a stop condition.
+remain. **Luna may take 10 minutes or longer on an individual receipt; this is normal.
+The whole batch may run for hours if needed.** Wait for real worker results and keep
+the same guard/session alive. A tool wait timeout or quiet worker is not an execution
+deadline. Do not invent a "scheduled execution window", infer a deadline from the
+schedule interval, or stop because the batch feels slow. Only an explicit user limit
+or a concrete platform limit establishes a deadline; record its actual evidence.
 
 Use collaboration messages for parent/subagent progress, not the app's
 `send_message_to_thread` (which starts a new parent turn). A message saying "blocked"
@@ -170,7 +175,8 @@ same child to stop further actions, and wait for its terminal result and Python 
 exit/claim state before reporting a stopped batch. Keep the active worker in the
 checkpoint until this is confirmed. Never let a child report terminal failure and then
 continue launching, claiming or recovering in the background.
-Require the guard's `ok: true, phase: blocked` acknowledgement and process exit before
+Attempt the repair procedure below before issuing a guard block. Require the guard's
+`ok: true, phase: blocked` acknowledgement and process exit before
 reporting a stopped batch. If its stop request says a claim is in flight, await that
 same worker's response and retry the stop through the same guard session; a rejected
 stop is not permission to end the parent or close the guard's stdin.
@@ -227,18 +233,45 @@ outcome "process one document through verified completion", never "produce the r
 JSON files". A process session cannot be handed between tasks. An approval failure is
 a blocker to resolve in that execution context, not permission to introduce forwarding.
 
-**Stop the entire batch when a worker fails or reports a blocking error**, including
-approval rejection, inaccessible originals, failed submission or failed PDF attestation.
+### Repair before blocking
+
+**Suspend new document dispatch on a real failure; do not immediately block the batch.**
+Keep the guard and private checkpoint while investigating. Correct ordinary request
+errors in their existing session. If the coordinator cannot resolve the trouble,
+**call a fresh Sol subagent (`gpt-5.6-sol`, `fork_turns: none`) to diagnose and fix it**
+before creating a block. This includes worker, verification, runtime and setup failures.
+Give Sol the exact error, run/batch IDs, relevant private journal paths, verified scope
+and known claim/save state, never credentials or a full conversation dump. Sol can
+inspect the relevant code/logs, repair scripts or setup, and run targeted checks.
+Do not start another receipt while repair is in progress.
+
+Sol must preserve originals, saved readings and immutable requests. It must not clear
+batch holds, take over live sessions, claim replacement work, replay uncertain writes,
+or bypass permissions. The coordinator remains responsible for the exact-run recovery
+using the documented protocol, after confirming the previous process's state. This
+repair policy authorizes supported recovery of the current run after the cause is fixed;
+it does not authorize clearing an unrelated or previously blocked batch. Respect any
+actual missing permission or ambiguous saved state. A rejected operation needs new
+evidence or a permitted alternative, not the same request routed through Sol.
+
+After repair, verify the saved result through the guard and continue with its next
+action. If Sol cannot fix the issue safely, or a required approval/access remains
+unavailable, only then send `block`, pause the recurring automation and report the
+concrete remaining problem plus what Sol tried. If Sol cannot be launched, report that
+actual tool failure as the failed repair attempt. Do not cycle through replacement Sol
+agents for an unchanged failure. Never use elapsed time alone as the block reason.
+
 While a request is still running, a journal phase such as `submit-uncertain` or
 `pdf-uncertain` is the Python script's pre-request recovery marker, not a failure
 response. Await the actual result in that same worker session; do not interrupt,
 retry or stop the batch based on a transient phase alone. A completed response with
-`blocking: true`, a tool rejection, a process crash, or a failed worker is a stop.
+`blocking: true`, a tool rejection, a process crash, or a failed worker triggers this repair procedure.
 Do not spawn a replacement/next worker or reclaim the released document. Preserve private
 artifacts and report the failed stage, non-sensitive reason and known claim/save state
 to the owner. Release a known active, unsubmitted claim when safely possible; retain
 uncertain submission state for reconciliation instead of assuming it was not saved.
-Wait for explicit owner direction before resuming the batch. A successfully saved
+If repair fails and the guard is blocked, wait for explicit owner direction before
+resuming that blocked batch. A successfully saved
 model-review/awaiting-page/broken disposition is a document outcome, not by itself a
 worker execution failure. **Continue with the next pending Luna document after such
 a saved outcome**, including low/medium certainty, OCR disagreement and arithmetic
