@@ -73,7 +73,9 @@ documents, including all their pages, toward the batch limit.
 After first enabling Jev, run `python scripts/receipt_api.py --config PRIVATE_CONFIG
 jev-backfill`. It queues only the latest PP-OCR artifact for each current capture and
 processes retryable jobs one at a time. Inspect `/api/jev/documents?disagreements=1`
-before accepting any Jev/Luna category or document-role disagreement.
+before accepting any Jev/Luna category or document-role disagreement. This endpoint is
+paginated: follow every non-null `next` value with `after`, even when a filtered page's
+`documents` array is empty, until `next` is null.
 
 Current development and verification are local Codex. Cloud Work remains the deployment
 target; its browser tool support, private credential persistence and scheduled managed

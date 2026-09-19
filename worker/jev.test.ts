@@ -1051,3 +1051,71 @@ it("atomically owns a Jev job while upload and backfill overlap", async () => {
     await db.prepare("SELECT status,run_token FROM jev_jobs").first(),
   ).toEqual({ status: "complete", run_token: null });
 });
+
+it("paginates the Jev document inventory", async () => {
+  await mf.dispose();
+  const processingToken = `rsc_${"v".repeat(43)}`;
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const captures = [await saveCapture(), await saveCapture()];
+  for (const capture of captures) {
+    const response = await mf.dispatchFetch(
+      `${origin}/api/captures/${capture.id}/artifacts/ocr`,
+      {
+        method: "POST",
+        headers: {
+          ...ownerHeaders,
+          Origin: origin,
+          "X-Scanner-Request": "1",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source: {
+            captureId: capture.id,
+            sha256: capture.sha256,
+            pixels: [1000, 1600],
+            rotation: 0,
+            region: { left: 0, top: 0, width: 1000, height: 1600 },
+          },
+          provenance: { engine: "PP-OCRv6" },
+          text: "",
+        }),
+      },
+    );
+    expect(response.status, await response.text()).toBe(200);
+  }
+  const headers = {
+    ...ownerHeaders,
+    Origin: origin,
+    "X-Scanner-Request": "1",
+    Authorization: `Bearer ${processingToken}`,
+  };
+  const filteredResponse = await mf.dispatchFetch(
+    `${origin}/api/jev/documents?limit=1&disagreements=1`,
+    { headers },
+  );
+  const filtered = await filteredResponse.json<any>();
+  expect(filteredResponse.status, JSON.stringify(filtered)).toBe(200);
+  expect(filtered.documents).toEqual([]);
+  expect(filtered.next).toBe(captures.map((capture) => capture.id).sort()[0]);
+  const firstResponse = await mf.dispatchFetch(
+    `${origin}/api/jev/documents?limit=1`,
+    { headers },
+  );
+  const first = await firstResponse.json<any>();
+  expect(firstResponse.status, JSON.stringify(first)).toBe(200);
+  expect(first.documents).toHaveLength(1);
+  expect(first.next).toBe(first.documents[0].document_id);
+  const secondResponse = await mf.dispatchFetch(
+    `${origin}/api/jev/documents?limit=1&after=${encodeURIComponent(first.next)}`,
+    { headers },
+  );
+  const second = await secondResponse.json<any>();
+  expect(secondResponse.status, JSON.stringify(second)).toBe(200);
+  expect(second.documents).toHaveLength(1);
+  expect(second.next).toBeNull();
+  expect(
+    new Set([first.documents[0].document_id, second.documents[0].document_id]),
+  ).toEqual(new Set(captures.map((capture) => capture.id)));
+});

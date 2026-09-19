@@ -1368,10 +1368,25 @@ export async function jevRoute(
     });
   }
   if (url.pathname === "/api/jev/documents" && request.method === "GET") {
-    const captures = await loadCaptures();
-    const documents = records(await storedDocuments(env), captures).filter(
-      (document) => !document.mergedInto && !document.duplicateOf,
+    const limit = Number(url.searchParams.get("limit") ?? "25");
+    requireThat(
+      Number.isInteger(limit) && limit >= 1 && limit <= 100,
+      400,
+      "Jev document limit must be an integer from 1 to 100.",
     );
+    const after = url.searchParams.get("after");
+    requireThat(
+      after === null || (after.length > 0 && after.length <= 128),
+      400,
+      "Invalid Jev document cursor.",
+    );
+    const captures = await loadCaptures();
+    const candidates = records(await storedDocuments(env), captures)
+      .filter((document) => !document.mergedInto && !document.duplicateOf)
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .filter((document) => after === null || document.id > after)
+      .slice(0, limit + 1);
+    const documents = candidates.slice(0, limit);
     const categories = (
       await env.DB.prepare("SELECT id,name FROM purchase_categories").all<{
         id: string;
@@ -1422,7 +1437,10 @@ export async function jevRoute(
           : null,
       });
     }
-    return json({ documents: results });
+    return json({
+      documents: results,
+      next: candidates.length > limit ? documents.at(-1)!.id : null,
+    });
   }
   if (url.pathname === "/api/jev/backfill" && request.method === "POST") {
     const captures = await loadCaptures();

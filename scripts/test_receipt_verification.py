@@ -24,11 +24,12 @@ class VerificationTests(unittest.TestCase):
         pending = document('pending')
         pending['processing']['disposition'] = 'processing'
         client = Mock(origin='https://synthetic.example')
-        client.get.side_effect = [dict(documents=[
+        client.get.side_effect = [dict(documents=[], next='jev-cursor'),
+                                  dict(documents=[
                                       dict(document_id='a', ready=True, jev={'role': 'purchase_document'}),
                                       dict(document_id='b', ready=True, jev={'role': 'purchase_document'}),
                                       dict(document_id='not-ready', ready=False, jev={'role': 'purchase_document'}),
-                                  ]),
+                                  ], next=None),
                                   dict(documents=[document('b'), document('high', 'high'), reviewed, human,
                                                   document('not-ready')], next='cursor'),
                                   dict(documents=[document('a', 'low'), pending, {**document('duplicate'), 'duplicateOf': 'a'}], next=None)]
@@ -36,7 +37,14 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result['eligible'], 2)
         self.assertEqual([d['document_id'] for d in result['documents']], ['a'])
         self.assertNotIn('PRIVATE MERCHANT', json.dumps(result))
+        self.assertTrue(any('after=jev-cursor' in call.args[0] for call in client.get.call_args_list))
         self.assertIn('after=cursor', client.get.call_args.args[0])
+
+    def test_repeated_jev_cursor_is_not_reported_as_complete(self):
+        client = Mock(origin='https://synthetic.example')
+        client.get.side_effect = [dict(documents=[], next='same'), dict(documents=[], next='same')]
+        with self.assertRaisesRegex(ClientError, 'Jev cursor'):
+            queue(client)
 
     def test_repeated_cursor_is_not_reported_as_complete(self):
         client = Mock(origin='https://synthetic.example')

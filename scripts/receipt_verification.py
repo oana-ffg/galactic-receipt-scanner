@@ -16,11 +16,21 @@ def require(condition, message):
 
 
 def queue(client, limit=10):
-    jev = client.get('/api/jev/documents')
-    ready = {
-        item['document_id'] for item in jev.get('documents', [])
-        if item.get('ready') is True and (item.get('jev') or {}).get('role') == 'purchase_document'
-    }
+    ready, jev_seen, jev_cursor = set(), set(), None
+    while True:
+        query = {'limit': 25}
+        if jev_cursor:
+            query['after'] = jev_cursor
+        jev = client.get('/api/jev/documents?' + urlencode(query))
+        ready.update(
+            item['document_id'] for item in jev.get('documents', [])
+            if item.get('ready') is True and (item.get('jev') or {}).get('role') == 'purchase_document'
+        )
+        jev_cursor = jev.get('next')
+        if not jev_cursor:
+            break
+        require(jev_cursor not in jev_seen, 'Repeated Jev cursor; review inventory is incomplete.')
+        jev_seen.add(jev_cursor)
     selected, seen, cursor = {}, set(), None
     while True:
         query = dict(summary=1, limit=100)
