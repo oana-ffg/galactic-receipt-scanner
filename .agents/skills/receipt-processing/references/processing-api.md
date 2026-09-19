@@ -1,8 +1,10 @@
 # Processing API v2
 
-## First-pass PP confirmation
+## First-pass PP and Jev gate
 
-The configured Luna worker now uses organization with PP-OCRv6. After saving
+Saving exact-layout PP-OCRv6 triggers the backend's pinned Jev page/document pass.
+Only a current `purchase_document` with both PP and Jev readiness is eligible for Luna.
+The claim includes the Jev document/category/page decisions and confidence. After saving
 the ordinary immutable Luna draft and preparing every frozen region, POST
 `/api/processing/confirmation` with `token`, `provider: "ppocr"`, the unchanged
 `pixel_pdf_sha256`, and ordered `artifacts: [{capture_id, sha256}]` for all retained
@@ -24,8 +26,11 @@ uploads handled by the client. Never print claim tokens; build query strings in 
 
 | Method and route                            | Request                                                                                                   | Response / handling                                                                                                                                                                                 |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET /api/processing/access                  | none                                                                                                      | Version 2 must advertise queueClaims and lunaReassessment for the new Luna flow.                                                                                                                    |
-| POST /api/processing/claim                  | `{stage:"small"}` or `{stage:"large"}`                                                                    | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Stop on null.                                                   |
+| GET /api/processing/access                  | none                                                                                                      | Version 2 must advertise queueClaims, lunaReassessment and configured Jev with its pinned model.                                                                                                    |
+| POST /api/processing/claim                  | `{stage:"small"}` or `{stage:"large"}`                                                                    | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at,jev}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Both stages require current exact-layout PP+Jev; large also requires a saved eligible Luna result. Stop on null.          |
+| GET /api/jev/status                         | none                                                                                                      | Jev configuration plus queued job counts.                                                                                                                                                           |
+| POST /api/jev/backfill                      | `{}`                                                                                                      | Queues the latest PP artifact per current scan, processes one retryable job, and returns `remaining`.                                                                                                |
+| GET /api/jev/documents?disagreements=1      | none                                                                                                      | Current Jev/Luna document-role and category disagreements with names/confidence; no OCR text.                                                                                                        |
 | POST /api/processing/renew                  | `{token}`                                                                                                 | `{expires}`, epoch milliseconds.                                                                                                                                                                    |
 | POST /api/processing/release                | `{token}`                                                                                                 | `{released:true}`. Only for an active claim being abandoned.                                                                                                                                        |
 | GET /api/processing/context?token=â€¦       | Optional after_capture, date, total_minor, currency                                                       | `{document,ocr_comparison,independent_parse,previous_images,next_images,candidates,candidates_truncated,rejected_associations,rejected_associations_truncated}`.                                    |
@@ -41,6 +46,10 @@ uploads handled by the client. Never print claim tokens; build query strings in 
 One renewable global lease prevents overlapping model work and expires after 20 minutes.
 A token assigns ONE document. Claim pages use `captureId`; context `next_images` use
 `id`, with `sha256`, `created_at` and `document_id`. Fetching lookahead does not attach it.
+
+Normal Luna does not use context for grouping: the backend has already matched chronological
+continuations and detached payment evidence with Jev before the claim. The context and
+grouping routes below remain for explicit Astra repair/legacy maintenance only.
 
 Context returns two next images in chronological order; continue with `after_capture`.
 It also returns `previous_images`: up to two current captures before the earliest page
@@ -62,6 +71,9 @@ For an owner-requested repair of a specific processed document, Astra may claim 
 This can revisit an awaiting-pages result; it never falls back to another queued
 document. Stale, merged, duplicate and human-reviewed targets are rejected, and the
 same exclusive processing lease applies. Routine Luna batches use the normal queue.
+An explicit targeted claim remains available when exact PP is missing so an AI can
+investigate the document. The automatic Astra queue excludes it, and submission cannot
+save an Astra confidence result until exact-layout PP and Jev are ready.
 If the repair agent already saw previous readings, explicitly describe the draft and
 final evidence as reconciliation with prior context, not an independent blind review.
 
@@ -125,10 +137,13 @@ Use the actual model: gpt-5.6-luna for small, gpt-6-astra for large. **Omit docu
 grouping and page layout are unchanged**; include copied document records when saving
 new crop/rotation bounds. Extraction is not a legacy document record.
 
-The server saves provenance, computes arithmetic and compares numeric readings with saved
-plain OCR. Missing OCR or unresolved disagreements cap high certainty at medium. Astra
-can supply a concrete pixel-backed `ocr_resolution` string for a resolved discrepancy;
-neither OCR nor model digits are automatically substituted.
+The server saves provenance, computes arithmetic and compares numeric readings with exact
+PP-OCR. Missing PP is rejected at submission rather than converted into a confidence result;
+this does not prevent an explicitly targeted read-only investigation.
+Luna disagreement with PP or Jev is always low. Astra disagreement with PP is always low,
+even when Astra and Luna agree; an `ocr_resolution` preserves its explanation but does not
+raise confidence. When Astra agrees with PP, Astra may choose confidence. Neither OCR nor
+model digits are automatically substituted.
 
 Successful submit closes the claim. Preserve exact request bytes: replaying them with
 the same token is idempotent; a different payload conflicts. For a lost response,

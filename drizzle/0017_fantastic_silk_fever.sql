@@ -1,0 +1,1 @@
+ALTER TABLE `jev_document_heads` ADD `category_assessment_id` text;

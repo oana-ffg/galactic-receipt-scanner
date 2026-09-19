@@ -24,7 +24,13 @@ class VerificationTests(unittest.TestCase):
         pending = document('pending')
         pending['processing']['disposition'] = 'processing'
         client = Mock(origin='https://synthetic.example')
-        client.get.side_effect = [dict(documents=[document('b'), document('high', 'high'), reviewed, human], next='cursor'),
+        client.get.side_effect = [dict(documents=[
+                                      dict(document_id='a', ready=True, jev={'role': 'purchase_document'}),
+                                      dict(document_id='b', ready=True, jev={'role': 'purchase_document'}),
+                                      dict(document_id='not-ready', ready=False, jev={'role': 'purchase_document'}),
+                                  ]),
+                                  dict(documents=[document('b'), document('high', 'high'), reviewed, human,
+                                                  document('not-ready')], next='cursor'),
                                   dict(documents=[document('a', 'low'), pending, {**document('duplicate'), 'duplicateOf': 'a'}], next=None)]
         result = queue(client, 1)
         self.assertEqual(result['eligible'], 2)
@@ -34,7 +40,7 @@ class VerificationTests(unittest.TestCase):
 
     def test_repeated_cursor_is_not_reported_as_complete(self):
         client = Mock(origin='https://synthetic.example')
-        client.get.return_value = dict(documents=[], next='same')
+        client.get.side_effect = [dict(documents=[]), dict(documents=[], next='same'), dict(documents=[], next='same')]
         with self.assertRaisesRegex(ClientError, 'cursor'):
             queue(client)
 
@@ -101,6 +107,14 @@ class VerificationTests(unittest.TestCase):
         self.save('final-document.json', self.final)
         self.assertTrue(self.verify()['verified'])
 
+    def test_medium_proposal_capped_to_low_by_server_is_valid(self):
+        self.final['processing']['large_model_confidence'] = 'low'
+        self.final['processing']['extraction']['certainty'] = 'low'
+        self.save('final-document.json', self.final)
+        result = self.verify()
+        self.assertTrue(result['verified'])
+        self.assertEqual(result['confidence'], 'low')
+
     def test_generic_claim_or_different_assigned_target_is_rejected(self):
         with self.assertRaisesRegex(ClientError, 'different target'):
             verify(self.client, self.work, 'other', 3)
@@ -109,9 +123,12 @@ class VerificationTests(unittest.TestCase):
         self.save('claim-request.json', {'stage': 'large'})
         with self.assertRaisesRegex(ClientError, 'targeted claim'): self.verify()
 
-    def test_unsupported_confidence_change_and_wrong_submit_revision_fail(self):
-        self.final['processing']['large_model_confidence'] = 'low'
-        self.final['processing']['extraction']['certainty'] = 'low'
+    def test_unsupported_confidence_increase_and_wrong_submit_revision_fail(self):
+        self.extraction['certainty'] = 'low'
+        self.save('astra-reconciled-extraction.json', self.extraction)
+        self.save('submit-request.json', dict(token='synthetic-token', model='gpt-6-astra', extraction=self.extraction))
+        self.final['processing']['large_model_confidence'] = 'medium'
+        self.final['processing']['extraction']['certainty'] = 'medium'
         with self.assertRaisesRegex(ClientError, 'server cap'): self.verify()
         self.save('submit-response.json', {'saved': [dict(id='doc', revision=3)]})
         with self.assertRaisesRegex(ClientError, 'claimed revision'): self.verify()

@@ -2,7 +2,8 @@
 
 The Site remains owner-private. Signed-in browser access uses the Sites owner identity.
 Machine requests use a Sites gateway token in `OAI-Sites-Authorization` plus a scoped
-scanner credential in `Authorization`. No model API is called by the server or client.
+scanner credential in `Authorization`. The server calls the pinned Jev model after
+PP-OCR upload; the client never receives the TypeSafe key.
 
 ## Instance setup
 
@@ -46,7 +47,8 @@ already authorized may finish. Last-use timestamps update at most hourly.
 ## Scope
 
 - **Processing:** capture/original/artifact reads, document/context/category reads, shared
-  queue claims, drafts/submission, supported detach, immutable OCR and PDF operations.
+  queue claims, drafts/submission, supported detach, immutable OCR and PDF operations,
+  and Jev status/backfill reads and writes.
 - **Backup:** GET-only capture history/metadata and original bytes; no processing writes.
 - Neither credential permits camera uploads, station controls, private issues, arbitrary
   document writes, human approval, or creating/revoking other connections.
@@ -67,6 +69,11 @@ Terra coordinates using compact metadata and authorizes access through WebMCP. F
 Luna workers inspect images, with independent Astra workers reviewing exceptions.
 Ordinary CPU OCR and PDF helpers run outside the capture/save path. Count complete
 documents, including all their pages, toward the batch limit.
+
+After first enabling Jev, run `python scripts/receipt_api.py --config PRIVATE_CONFIG
+jev-backfill`. It queues only the latest PP-OCR artifact for each current capture and
+processes retryable jobs one at a time. Inspect `/api/jev/documents?disagreements=1`
+before accepting any Jev/Luna category or document-role disagreement.
 
 Current development and verification are local Codex. Cloud Work remains the deployment
 target; its browser tool support, private credential persistence and scheduled managed

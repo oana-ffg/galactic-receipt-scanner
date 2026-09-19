@@ -227,7 +227,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await page.route("**/api/documents", (route) =>
     route.fulfill({ json: { documents: docs, captures } }),
   );
-  await page.route("**/api/processing/categories", (route) =>
+  await page.route("**/api/processing/categories*", (route) =>
     route.fulfill({ json: categories }),
   );
   await page.route("**/api/processing/readings?*", (route) =>

@@ -16,6 +16,11 @@ def require(condition, message):
 
 
 def queue(client, limit=10):
+    jev = client.get('/api/jev/documents')
+    ready = {
+        item['document_id'] for item in jev.get('documents', [])
+        if item.get('ready') is True and (item.get('jev') or {}).get('role') == 'purchase_document'
+    }
     selected, seen, cursor = {}, set(), None
     while True:
         query = dict(summary=1, limit=100)
@@ -24,7 +29,8 @@ def queue(client, limit=10):
         page = client.get('/api/documents?' + urlencode(query))
         for document in page['documents']:
             processing = document.get('processing') or {}
-            if (processing.get('small_model_certainty') in {'low', 'medium'}
+            if (document.get('id') in ready
+                    and processing.get('small_model_certainty') in {'low', 'medium'}
                     and processing.get('large_model_confidence') is None
                     and not processing.get('has_human_review') and not document.get('duplicateOf')
                     and document.get('pageIds') and processing.get('disposition') != 'processing'):
@@ -84,8 +90,9 @@ def verify(client, work, expected_id, expected_revision):
     adjusted = {'certainty', 'uncertainties', 'broken_reasons'}
     require(set(saved) == set(proposed) and all(saved[key] == value for key, value in proposed.items() if key not in adjusted),
             'Live saved extraction differs from the submitted Astra values.')
-    require(saved['certainty'] == confidence and (confidence == proposed['certainty']
-            or (proposed['certainty'] == 'high' and confidence == 'medium')), 'Saved confidence is not a supported server cap.')
+    rank = {'low': 0, 'medium': 1, 'high': 2}
+    require(saved['certainty'] == confidence and rank[confidence] <= rank[proposed['certainty']],
+            'Saved confidence is not a supported server cap.')
     require(all(set(proposed[key]) <= set(saved[key]) for key in ('uncertainties', 'broken_reasons')),
             'Saved review reasons lost a submitted uncertainty.')
     applicable = bool(final.get('filename') and not final.get('mergedInto') and not final.get('duplicateOf'))

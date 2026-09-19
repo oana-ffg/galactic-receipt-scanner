@@ -232,6 +232,79 @@ export const processingConfirmations = sqliteTable("processing_confirmations", {
   sha256: text("sha256").notNull(),
   created_at: text("created_at").notNull(),
 });
+
+// Jev decisions are append-only. The head tables are rebuildable indexes that point
+// at the assessment matching each page/document's current OCR-backed layout.
+export const jevAssessments = sqliteTable(
+  "jev_assessments",
+  {
+    id: text("id").primaryKey(),
+    task: text("task").notNull(),
+    subject_id: text("subject_id").notNull(),
+    subject_revision: integer("subject_revision"),
+    candidate_id: text("candidate_id"),
+    candidate_revision: integer("candidate_revision"),
+    model: text("model").notNull(),
+    input_sha256: text("input_sha256").notNull(),
+    payload: text("payload").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("jev_assessment_input").on(table.task, table.input_sha256),
+    index("jev_assessment_subject_created").on(
+      table.subject_id,
+      table.created_at,
+    ),
+  ],
+);
+export const jevPageHeads = sqliteTable("jev_page_heads", {
+  capture_id: text("capture_id")
+    .primaryKey()
+    .references(() => captures.id),
+  source_sha256: text("source_sha256").notNull(),
+  ocr_sha256: text("ocr_sha256").notNull(),
+  role: text("role").notNull(),
+  probability: integer("probability").notNull(),
+  confidence: integer("confidence").notNull(),
+  model: text("model").notNull(),
+  assessment_id: text("assessment_id").notNull(),
+  updated_at: text("updated_at").notNull(),
+});
+export const jevDocumentHeads = sqliteTable("jev_document_heads", {
+  document_id: text("document_id").primaryKey(),
+  document_revision: integer("document_revision").notNull(),
+  page_fingerprint: text("page_fingerprint").notNull(),
+  role: text("role").notNull(),
+  role_probability: integer("role_probability").notNull(),
+  role_confidence: integer("role_confidence").notNull(),
+  category_id: text("category_id"),
+  category_probability: integer("category_probability"),
+  category_confidence: integer("category_confidence"),
+  model: text("model").notNull(),
+  assessment_id: text("assessment_id").notNull(),
+  category_assessment_id: text("category_assessment_id"),
+  updated_at: text("updated_at").notNull(),
+});
+export const jevJobs = sqliteTable(
+  "jev_jobs",
+  {
+    id: text("id").primaryKey(),
+    capture_id: text("capture_id")
+      .notNull()
+      .references(() => captures.id),
+    ocr_sha256: text("ocr_sha256").notNull(),
+    status: text("status").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    run_token: text("run_token"),
+    last_error: text("last_error"),
+    created_at: text("created_at").notNull(),
+    updated_at: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("jev_job_ocr").on(table.capture_id, table.ocr_sha256),
+    index("jev_job_status_created").on(table.status, table.created_at),
+  ],
+);
 // Append-only manual outlines; capture metadata and source bytes stay immutable.
 export const captureOutlines = sqliteTable(
   "capture_outlines",

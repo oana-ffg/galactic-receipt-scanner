@@ -24,6 +24,7 @@ import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
 import { authorizeProcessor } from "./processing-access";
 import { connectionRoute } from "./connections";
+import { jevRoute, queueJevJob, runJevJob } from "./jev";
 import {
   isControlCommand,
   retakeTarget,
@@ -40,6 +41,7 @@ export interface Env {
   PROCESSING_TOKEN_SHA256?: string;
   SITES_GATEWAY_TOKEN?: string;
   RETIRED_CAPTURE_IDS?: string;
+  TYPESAFE_API_KEY?: string;
   DB: D1Database;
   BUCKET: R2Bucket;
   ASSETS: Fetcher;
@@ -271,6 +273,7 @@ async function route(
         "searchable_pdfs",
         "save_ocr_artifacts",
         "save_document_pdfs",
+        "jev_classification",
       ],
       captureWrites: false,
       queueClaims: true,
@@ -280,6 +283,10 @@ async function route(
       ocrFirstOptionalVision: true,
       categories: true,
       independentReview: true,
+      jev: {
+        configured: Boolean(env.TYPESAFE_API_KEY),
+        model: "jev-1.13.0",
+      },
     });
   const loadCaptures = async () => {
     const rows = await env.DB.prepare(
@@ -288,6 +295,8 @@ async function route(
     return rows.results.map(publicCapture) as import("../web/types").Capture[];
   };
   await protectBlindParse(request, env);
+  const jevResponse = await jevRoute(request, env, loadCaptures);
+  if (jevResponse) return jevResponse;
   const processingResponse = await processingRoute(request, env, loadCaptures);
   if (processingResponse) return processingResponse;
   const documentResponse = await documentRoute(request, env, loadCaptures);
@@ -523,6 +532,7 @@ async function route(
         415,
         "Expected PDF.",
       );
+    let ocrValue: Record<string, any> | null = null;
     if (kind === "ocr") {
       try {
         const value = JSON.parse(new TextDecoder().decode(data));
@@ -531,6 +541,7 @@ async function route(
           400,
           "Expected OCR object.",
         );
+        ocrValue = value;
       } catch {
         throw new HttpError(400, "Expected JSON object.");
       }
@@ -553,7 +564,19 @@ async function route(
     )
       .bind(key, id, kind, sha, new Date().toISOString(), type)
       .run();
-    return json({ id, kind, sha256: sha });
+    let jev: { status: string } | null = null;
+    if (kind === "ocr" && ocrValue?.provenance?.engine === "PP-OCRv6") {
+      const jobId = await queueJevJob(env, id, sha);
+      try {
+        const result = await runJevJob(request, env, loadCaptures, jobId);
+        jev = { status: result.status };
+      } catch {
+        // The immutable OCR upload succeeded. Jev remains retryable through the
+        // backfill endpoint and must not make the OCR client replay saved bytes.
+        jev = { status: "failed" };
+      }
+    }
+    return json({ id, kind, sha256: sha, jev });
   }
   const keep = path.match(/^\/api\/captures\/([^/]+)\/keep$/);
   if (keep && method === "POST") {

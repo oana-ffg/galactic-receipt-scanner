@@ -17,6 +17,8 @@ human-reviewed documents, duplicates, empty documents and documents awaiting a L
 Astra's remaining uncertainty belongs in the review queue; do not repeatedly review the
 same receipt until a model says high. Explicit owner requests can separately authorize a
 named re-review. Creating or invoking this skill does not create a schedule or resume Luna.
+This is the skill for the separate daily Astra run; it must never be folded into Luna's
+hourly first pass.
 
 ## Coordinator
 
@@ -79,6 +81,16 @@ presence. Inspect raw originals or neighboring crops when useful. The initial re
 must come from pixels without seeing Luna/PP values. After that checkpoint, compare and
 correct from source evidence; agreement alone is not proof. Keep the independent draft,
 reconciled Astra values and confidence separate from the preserved Luna and PP attempts.
+
+Confidence reconciliation is deliberately asymmetric: **any Astra disagreement with
+PP-OCR remains low and requires human review, even when Astra and Luna agree**. Shared
+model training makes Astra/Luna agreement non-independent. Missing exact-layout PP keeps
+the document out of the automatic Astra parse queue; fail closed and repair the PP/Jev gate
+instead of saving a confidence result. Do not confuse that queue gate with investigation:
+an explicitly named document may still be requested and inspected by an AI without PP.
+When Astra agrees with PP, Astra may choose low/medium/high;
+disagreement with Luna alone does not force low. Preserve Jev's separate assessment and
+note any disagreement, but never use Luna/Jev agreement to overrule a PP conflict.
 
 Use the existing [four supermarket categories](../receipt-processing/references/supermarket-classification.md)
 for supermarkets only. Explain category with actual items and any confidence below high

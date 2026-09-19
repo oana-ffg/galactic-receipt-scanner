@@ -10,6 +10,7 @@ import {
 } from "../web/extraction";
 import { newDocument } from "../web/documents";
 import type { Env } from "./index";
+import { pageFingerprint } from "./jev";
 let mf: Awaited<ReturnType<typeof runtime>>;
 const token = "rsc_" + "a".repeat(43);
 beforeEach(async () => {
@@ -44,7 +45,109 @@ async function ok(path: string, body?: unknown, machine = false): Promise<any> {
   expect(r.status, JSON.stringify(value)).toBe(200);
   return value;
 }
-async function capture() {
+async function seedJevReady(capture: any, ocrSha256: string) {
+  const db = await mf.getD1Database("DB");
+  const now = new Date().toISOString();
+  const pageAssessment = crypto.randomUUID();
+  const roleAssessment = crypto.randomUUID();
+  const categoryAssessment = crypto.randomUUID();
+  const pins = [{ capture_id: capture.id, ocr_sha256: ocrSha256 }];
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+      )
+      .bind(
+        roleAssessment,
+        "document-role",
+        capture.id,
+        "synthetic-jev",
+        roleAssessment,
+        JSON.stringify({
+          input: { pins },
+          response: {
+            model: "synthetic-jev",
+            answers: {
+              document_role: {
+                type: "choice",
+                choice: "purchase_document",
+                probabilities: {
+                  purchase_document: 1,
+                  payment_evidence_only: 0,
+                  account_record: 0,
+                  cash_withdrawal: 0,
+                  misc: 0,
+                },
+                confidence: 1,
+              },
+            },
+          },
+        }),
+        now,
+      ),
+    db
+      .prepare(
+        "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+      )
+      .bind(
+        categoryAssessment,
+        "purchase-category",
+        capture.id,
+        "synthetic-jev",
+        categoryAssessment,
+        JSON.stringify({
+          input: { pins, category_ids: {} },
+          response: {
+            model: "synthetic-jev",
+            answers: {
+              purchase_category: {
+                type: "choice",
+                choice: "unresolved",
+                probabilities: { unresolved: 1 },
+                confidence: 1,
+              },
+            },
+          },
+        }),
+        now,
+      ),
+    db
+      .prepare(
+        "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+      )
+      .bind(
+        capture.id,
+        capture.sha256,
+        ocrSha256,
+        "receipt",
+        1_000_000,
+        1_000_000,
+        "synthetic-jev",
+        pageAssessment,
+        now,
+      ),
+    db
+      .prepare(
+        "INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,category_id,category_probability,category_confidence,model,assessment_id,category_assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .bind(
+        capture.id,
+        0,
+        await pageFingerprint(newDocument(capture)),
+        "purchase_document",
+        1_000_000,
+        1_000_000,
+        null,
+        1_000_000,
+        1_000_000,
+        "synthetic-jev",
+        roleAssessment,
+        categoryAssessment,
+        now,
+      ),
+  ]);
+}
+async function capture(jevReady = true) {
   const id = crypto.randomUUID();
   const r = await mf.dispatchFetch(origin + `/api/captures/${id}`, {
     method: "POST",
@@ -62,11 +165,18 @@ async function capture() {
   });
   expect(r.status).toBe(200);
   const c = await r.json();
-  await ok(`/api/captures/${id}/artifacts/ocr`, {
-    source: { captureId: id, sha256: c.sha256 },
-    provenance: { engine: "tesseract.js synthetic fixture" },
+  const ocr = await ok(`/api/captures/${id}/artifacts/ocr`, {
+    source: {
+      captureId: id,
+      sha256: c.sha256,
+      pixels: [1400, 2200],
+      rotation: 0,
+      region: { left: 0, top: 0, width: 1400, height: 2200 },
+    },
+    provenance: { engine: "PP-OCRv6" },
     text: "1 Synthetic item 12,34\nTOTAL 12,34\nVAT 2,47",
   });
+  if (jevReady) await seedJevReady(c, ocr.sha256);
   return c;
 }
 function extraction(category: string | null = null): Extraction {
@@ -114,6 +224,18 @@ async function category() {
 async function claim(stage = "small") {
   return (await ok("/api/processing/claim", { stage }, true)).claim;
 }
+it("does not offer Luna work until the current layout has a Jev pass", async () => {
+  const c = await capture(false);
+  expect(await claim()).toBeNull();
+  const db = await mf.getD1Database("DB");
+  const artifact = await db
+    .prepare("SELECT sha256 FROM artifacts WHERE capture_id=? AND kind='ocr'")
+    .bind(c.id)
+    .first<any>();
+  await seedJevReady(c, artifact.sha256);
+  const lease = await claim();
+  expect(lease.document.id).toBe(c.id);
+});
 it("excludes documents already verified by the active local batch", async () => {
   const first = await capture(),
     second = await capture();
@@ -1049,7 +1171,7 @@ it("adds signed VAT once to net invoice lines and requires the printed tax amoun
   expect(arithmetic(e).status).toBe("matched");
 });
 
-it("downgrades OCR disagreement without correcting the model and lets Astra resolve it from pixels", async () => {
+it("keeps Astra low when it disagrees with PP even if Astra agrees with Luna", async () => {
   const c = await capture(),
     cat = await category(),
     lease = await claim();
@@ -1064,7 +1186,7 @@ it("downgrades OCR disagreement without correcting the model and lets Astra reso
     true,
   );
   let d = (await ok(`/api/documents/${c.id}`)).document;
-  expect(d.processing.small_model_certainty).toBe("medium");
+  expect(d.processing.small_model_certainty).toBe("low");
   expect(d.processing.extraction.total_minor).toBe(1294);
   expect(d.processing.ocr_comparison.status).toBe("disagreement");
   const large = await claim("large");
@@ -1085,7 +1207,7 @@ it("downgrades OCR disagreement without correcting the model and lets Astra reso
     true,
   );
   d = (await ok(`/api/documents/${c.id}`)).document;
-  expect(d.processing.large_model_confidence).toBe("high");
+  expect(d.processing.large_model_confidence).toBe("low");
   expect(d.processing.extraction.total_minor).toBe(1294);
   expect(d.processing.ocr_comparison.resolution).toContain("visual reread");
 });
@@ -1113,56 +1235,34 @@ it("treats unaligned or reused OCR lines as uncertainty", () => {
     compareOcrNumbers(e, "1 Unrelated product 12,34\nTOTAL 12,34").length,
   ).toBeGreaterThan(0);
 });
-it("does not let Astra override missing ordinary OCR or browsers forge model provenance", async () => {
+it("keeps missing-PP documents out of Astra's automatic queue but permits explicit investigation", async () => {
   const c = await capture(),
     cat = await category(),
     lease = await claim();
-  const db = await mf.getD1Database("DB");
-  await db
-    .prepare("DELETE FROM artifacts WHERE capture_id=? AND kind='ocr'")
-    .bind(c.id)
-    .run();
   await ok(
     "/api/processing/submit",
     { token: lease.token, model: "gpt-5.6-luna", extraction: extraction(cat) },
     true,
   );
-  const large = await claim("large");
-  expect(
-    (
-      await req(
-        "/api/processing/draft",
-        {
-          token: large.token,
-          model: "gpt-5.6-luna",
-          extraction: extraction(cat),
-        },
-        true,
-      )
-    ).status,
-  ).toBe(400);
-  await ok(
-    "/api/processing/draft",
-    { token: large.token, model: "gpt-6-astra", extraction: extraction(cat) },
-    true,
-  );
-  await ok(
-    "/api/processing/submit",
-    {
-      token: large.token,
-      model: "gpt-6-astra",
-      extraction: extraction(cat),
-      ocr_resolution:
-        "There is no OCR, so this cannot establish numeric agreement.",
-    },
-    true,
-  );
-  const d = (await ok(`/api/documents/${c.id}`)).document;
-  expect(d.processing.large_model_confidence).toBe("medium");
-  expect(d.status).toBe("review");
-  expect((await req("/api/processing/claim", { stage: "small" })).status).toBe(
-    403,
-  );
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("DELETE FROM artifacts WHERE capture_id=? AND kind='ocr'")
+    .bind(c.id)
+    .run();
+  expect(await claim("large")).toBeNull();
+  const document = (await ok(`/api/documents/${c.id}`)).document;
+  const investigation = (
+    await ok(
+      "/api/processing/claim",
+      {
+        stage: "large",
+        document_id: document.id,
+        revision: document.revision,
+      },
+      true,
+    )
+  ).claim;
+  expect(investigation.document.id).toBe(document.id);
 });
 it("pins PDF attestation to current pages/hash and approves humans only at the final revision", async () => {
   const c = await capture(),

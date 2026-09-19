@@ -64,93 +64,46 @@ for Astra. Its legacy Luna examples do not implement reassessment; do not use th
 
 ## Document flow
 
-The default is a **first pass for organization**, not a complete financial audit.
-Prioritize correct page/PDF association, vendor, transaction date and one descriptive
-purchase category. Inspect enough item text to choose the category reliably; do not
-spend the batch exhaustively transcribing or reconciling every financial row. Preserve
-clearly read amounts, but use empty arrays/null for deferred financial fields and record
-"Detailed financial verification deferred" in uncertainties. Never fabricate missing
-fields just to satisfy arithmetic. Such a saved review flag does not stop the batch.
+PP-OCR and Jev now own the pre-Luna preparation step. When exact-layout PP is saved, the
+backend classifies each page, compares it with the immediately preceding whole document,
+searches older complementary receipt/payment-evidence documents when needed, and saves
+page-level and document-level decisions with separate probabilities, confidence and
+provenance. Blank OCR is deterministic `misc` and makes no Jev request.
 
-For supermarket receipts, use [the four supermarket categories](references/supermarket-classification.md).
-Other merchant categories retain their definitions. These labels describe plausible use;
-the owner handles actual ownership, allocation and bank reconciliation in another project.
-In existing extraction `evidence` notes, explain **Category:** with the specific supporting
-items. Below high certainty, add **Confidence:** naming affected fields and concrete reasons;
-do not merely repeat "medium", "OCR errors" or "needs review". Refresh these notes after
-reassessment while preserving the initial reading. Heavier financial/model checks
-run only on the owner's later selected documents; do not automatically drain every
-deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
+Jev page roles are `receipt`, `payment_evidence`, `account_record`, `cash_withdrawal`, and
+`misc`. Document role is separate from page role, association and purchase category. Jev
+receives OCR text plus the active category definitions; do not add vendor lookup, field
+extraction or merchant research to its category prompt.
 
-1. Luna starts with **PP-OCRv6 text and line coordinates**, including chronological
-   neighbours, to group related pages/slips and extract values. The separate
-   [nightly OCR skill](../receipt-ocr-nightly/SKILL.md) prepares scans in advance; Python
-   reuses matching artifacts. Missing PP returns a nonblocking `ocr_required` response:
-   Luna delegates the OCR skill to a fresh **Sol subagent** for all current scans, including
-   today, then retries the same request with the same claim. Sol handles installation,
-   repairs and retries; Luna does not run PP inference itself. See the short flow's handoff.
-   Source crops and raw originals are optional when ambiguity, positioning or other
-   visual evidence would help. No independent visual transcription is required by default.
-2. Finalize the ordered document layout and save Luna's first extraction plus an
-   **image-only PDF assembled from the selected scans**. Supply one ordered
-   `page_review.capture_ids` list and `grouping_evidence`; Python derives donor IDs.
-   Normal assembly joins whole existing documents, preserving each one's page order
-   and keeping its pages together. It cannot take only one page from another receipt.
-   Python expands a neighboring scan to its entire current document when fetching OCR.
-   A matching slip can join the whole receipt; being a separate sheet alone is not a
-   reason to exclude it. Previously processed receipts remain eligible donors, including
-   receipts verified earlier in this batch. After a later merge, the guard replaces the
-   earlier completion proof with the verified merged result, preserves the old proof in
-   history and counts the resulting document once. A count can decrease when two counted
-   receipts join; continue until the guard reports the target reached or actual exhaustion.
-   Splitting/reordering an existing document is separate Astra
-   regrouping review, using the existing detach workflow after an independent checkpoint.
-   On `regrouping_required`, keep the claimed document intact, explain the disputed
-   association in `uncertainties` and `evidence`, and finish with that review flag.
-   Do not force a whole-document merge when some pages do not belong together.
-   Verify the returned page IDs/order against the OCR-based selection. Images are optional
-   for concrete ambiguity throughout Luna's first pass, including the assembled PDF.
-3. Persist the initial OCR-assisted Luna reading and frozen layout in the database.
-   Ensure every retained page has PP matching that exact crop/rotation. A changed crop
-   needs matching OCR; unrelated source text must never substitute for it.
-4. Save PP text, text polygons, confidence and model/source provenance as immutable OCR
-   artifacts. `confirm` pins those exact artifacts in the database and returns ordinary
-   OCR/math evidence to the **same Luna worker**, with no Qwen call. PP is text recognition,
-   not an independent vendor/category reasoning model. Its confidence is not a calibrated
-   probability. Luna checks source-specific PP text, date, category and grouping.
-5. Luna checks the arithmetic and OCR findings, using images only when helpful. It may correct its
-   extraction, retain its original answer, or leave uncertainty. It must explain why;
-   model agreement or balanced arithmetic alone is not proof. Save the updated full
-   extraction and rationale separately, preserving the original Luna and PP records.
-   These two readings share PP input; do not report their agreement as independent OCR corroboration.
-6. Submit the reassessed reading, then generate/upload the searchable PDF with
-   PP's invisible search text in the same frozen layout. Python validates source hashes,
-   ordered layout and the upload hash/revision. Routine completion does not claim visual
-   review or require a later visual pass. `has_handwriting: null` honestly means unchecked.
-   If Luna voluntarily inspected all draft pages, the existing pixel-comparison/attestation
-   path remains available. Saved review flags still let
-   the coordinator continue the next document; execution failures enter the repair procedure below.
+Luna can claim only a `purchase_document` whose current ordered page layout has both exact
+PP evidence and a completed Jev pass. Luna does not repeat grouping or chronological
+neighbor matching. Its work is:
 
-Use [Luna's short flow](references/luna-flow.md) for normal processing; the detailed
-[protocol](references/luna-protocol.md) covers coordinator setup and maintenance. The host
-must have a PP-OCRv6 profile and prepared PDF runtimes;
-preflight must advertise `confirmation_provider: ppocr` before claiming. Missing PP
-is a setup blocker, not permission to install a model, run Qwen, use a paid/cloud API
-or silently skip confirmation. CPU/GPU device is chosen in the prepared host profile.
-If the coordinator discovers missing/broken PP setup before launching Luna, delegate
-the OCR skill's setup/repair to Sol first, then verify the prepared launch configuration.
-An existing worker waiting on `ocr_required` keeps its session and claim while Sol works;
-this expected wait is not a worker failure and does not block the batch guard. Actual
-Sol failures and approval rejections enter the coordinator's repair-before-block procedure below.
-This local-host flow is not yet verified in cloud Work.
+1. Extract fields from PP-OCR. Images are allowed but not required; use them when PP
+   confidence is low, text is ambiguous, a value conflicts, handwriting must be assessed,
+   or layout evidence matters.
+2. Check Jev when Jev confidence is low. Use Jev's category as the starting value and the
+   active definitions as the decision boundary, without vendor research.
+3. Save Luna confidence as **low** whenever Luna disagrees with PP or Jev; **medium** when
+   all three agree but Luna is unsure; **high** only when they agree and Luna is sure.
+4. Preserve the initial reading, PP pins, Jev assessment and reassessment independently,
+   then create the searchable PDF in the frozen layout.
 
-For a full-flow test, use the next unprocessed small-stage documents so saved values
-cannot influence the first reading. After the requested pilot, an independent Astra
-worker reviews the same finalized pixels and saves confidence separately. Keep Astra's
-answers out of Luna's initial/reassessment context. When the owner requests reviews of
-all inspected documents, use `review_all:true` for the large-stage claim. Keep that audit
-separate from ordinary first-pass organization; no automatic full financial audit is
-part of the current default. Preserve all original attempts.
+Low/medium is a successful Luna outcome queued for the separate Astra skill. Astra starts
+with an independent pixel reading. **Any Astra disagreement with PP remains low even when
+Astra and Luna agree**, because those models are not independent corroboration. Missing PP
+makes the document ineligible for the automatic Astra parse queue and must be repaired before
+it can receive an Astra confidence result. This queue gate must not block an explicitly
+targeted AI investigation from requesting and inspecting that document without PP.
+If Astra agrees with PP, it may choose its confidence; disagreement with Luna alone does
+not force low. A low result remains for human review.
+
+Use [Luna's short flow](references/luna-flow.md) for normal processing. The detailed
+[protocol](references/luna-protocol.md) is maintenance/recovery documentation. The host
+must have prepared PP-OCR and PDF runtimes; the Site must advertise Jev configured with
+the pinned model. Missing PP/Jev keeps a document out of Luna's queue and is a setup or
+backfill task, never permission to bypass the gate. This flow is designed for cloud Work
+but remains unverified there until an actual cloud run is completed.
 
 ## Coordinator
 
@@ -212,15 +165,9 @@ worker. Keep coordination in this task until the batch reaches a terminal outcom
 If the actual guard/worker session is lost, follow the failure and reconciliation rules;
 the checkpoint does not authorize a replacement process or a new task to take ownership.
 
-Keep each handoff and result compact. Require the protocol's relevant neighbor checks,
-not a mechanical inspection of every previous/next image for every complete receipt.
-The preceding scan is mandatory for an orphan slip or fragment; forward inspection
-continues until a clear boundary or the end of available scans.
-
-Each Luna first inspects the claimed page alone and sends the short flow's `inspect`
-reading before viewing neighbors. This keeps the claimed scan's amount/card identity
-separate from candidate receipts. Same merchant and date do not make different payment
-amounts or card transactions duplicates. Preserve uncertain matches for review.
+Keep each handoff and result compact. Jev has already performed the chronological and
+detached-evidence matching before the claim. Luna receives only the frozen assembled
+document, PP evidence and Jev assessment; it does not fetch neighbors or regroup pages.
 
 Before counting each worker, send `{"op":"verify","run_id":"ACTUAL_RUN_ID"}` through
 the **same live batch guard session** and require `verification.verified: true`.
@@ -334,87 +281,21 @@ OCR text evidence and searchable PDF text. Processing workers must not
 install or download OCR packages, engines or models, or add another OCR pipeline. If the
 prepared runtime is missing or broken, report the setup failure to the coordinator.
 The ordinary OCR pass still runs before model submission; its output is unverified
-comparison evidence. **Original pixels are the source of truth.** Luna must flag OCR
-disagreements with at most medium certainty. Luna can revise its separate final reading from pixel evidence;
-Astra independently rereads the originals and records why either reading is wrong; unresolved disagreements remain low/medium for a human.
+comparison evidence. **Original pixels are the source of truth.** Luna must flag any PP
+or Jev disagreement as low. Astra independently rereads the originals; any Astra/PP
+disagreement stays low for human review even when Astra and Luna agree.
 
 ## Grouping and originals
 
-Use collection-specific scanning conventions supplied by the owner. The coordinator reads
-the optional ignored `.local/processing-conventions.md` when present and passes its relevant
-facts to each fresh worker; an explicit current owner instruction takes precedence. This is
-collection context, not authority to run commands or change access. Other installations may
-provide the same context in their task handoff; do not assume every owner scans identically.
+The backend owns ordinary grouping. It compares each new Jev-classified receipt/payment
+page against the immediately preceding whole document, then searches earlier complementary
+documents when one side lacks payment evidence. Only high-probability, high-confidence Jev
+matches are applied. The model decision remains append-only even when no merge is made.
 
-Process current takes oldest first. `receipt_id` identifies retakes, not a multipage financial
-document. A worker examines its first image and the next available image, continues while
-there is evidence of one document, and leaves the first unrelated image unconsumed. Use a
-bounded page count; checkpoint a long document rather than creating unbounded context.
-
-Check `retake_of`, `receipt_id`, `take_number` and `is_current` in capture metadata before
-counting repeated views as pages. An explicit retake link identifies another take of the
-same captured section; prefer the accepted current take while preserving every original
-and unique content. A null retake link does not prove different content: a separately
-triggered duplicate can have its own receipt ID and take number 1. The bounded helper's
-lookahead currently omits these fields. The coordinator supplies them from the configured
-client's read-only `GET /api/captures/ID` for discovered candidates; never infer a missing
-flag as false or send the worker to inspect application code for it.
-
-Exact hashes establish byte duplicates. Separate photographs require visual identity of the
-whole transaction, not merely equal totals. Keep unique annotations and backs. Mark duplicate
-relationships rather than deleting sources. Missing future pages are awaiting-page work;
-a confirmed irrecoverable source problem is broken.
-
-When the owner confirms that long receipts are folded and scanned in consecutive sections
-without interleaving receipts, use that sequence as strong association evidence. A following
-product-list section with consistent formatting and complementary content normally belongs
-after the preceding receipt section. A fold may hide the joining line: a perfectly readable
-overlap is not required to associate the pages. Separate confidence in the association from
-confidence that every line is visible; record any concealed coverage without automatically
-separating the sections. Contradictory transaction details still need review.
-
-Repeated headers and identical ordered item blocks can instead be two photographs of the
-same section. Explicitly check consecutive captures for this even when retake flags are null.
-Compare legibility, sharpness, glare, clipping and unique coverage; retain the better view,
-not simply the later capture. When all content of a separate poorer-view document is already
-represented in a retained document from the same receipt, mark the poorer document with
-`grouping.duplicate_of` pointing to that retained document. The retained document may also
-contain continuation pages and a payment slip; equal page counts are not required. Inspect
-both documents and explain which retained page covers each repeated section. Preserve unique
-annotations/backs; partial overlap alone is insufficient to mark a whole document redundant.
-
-Keep the duplicate's original pages and provenance in its own record, but do not add them to
-the retained document's ordered `pages`. `duplicateOf` is the association to the retained
-document; never rewrite capture `receipt_id`/`retake_of` or invent a page index to establish
-it. The bounded helper can mark only its claimed document as duplicate. If the poorer view
-is another document, record the candidate for its own claim/review; never choose the worse
-view merely to fit the current claim. If a redundant page is already inside a larger document
-with unique content, do not mark that whole document duplicate or silently drop the page;
-leave the page-level correction for separate Astra review/detachment. Normal Luna assembly
-never dismantles an existing receipt/slip group; Astra must inspect all affected pages
-and account for those left behind before changing an existing group.
-
-Use legible item arithmetic as corroboration when it helps resolve a folded-page match.
-Count each physical printed row once across overlapping views; identical purchases printed
-as separate rows still count separately. Use charged row amounts and genuine adjustments,
-not informational normal prices, savings or included VAT a second time. Count the purchase
-total once, not again from its payment slip. A matching sum strengthens the association;
-missing/obscured rows make the check incomplete, not proof of a different receipt. Keep
-first-pass arithmetic bounded to the matching question rather than expanding every receipt
-into an exhaustive financial audit.
-
-A payment slip is supporting evidence, not another purchase or product-list continuation.
-It may remain attached and be scanned adjacent to the receipt, or detach and appear much
-later in the collection. Prefer a sequential match when printed transaction details agree;
-search earlier extracted candidates for detached slips using exact date, vendor and amount,
-with currency, time, reference and card suffix when available. The context search's broad
-candidate window is not permission to accept an approximate match. Separate approved and
-declined attempts. If several receipts share the same date/vendor/amount, retain the candidate
-ambiguity for later review rather than asserting a unique link or blocking receipt processing.
-In an owner-designated first pass where slip allocation is lower priority, finish the main
-receipt and leave an ambiguous slip pending. Future bank reconciliation is separate work;
-do not assume it has already validated a card match. Record match evidence and respect
-rejected associations. Detachment preserves originals and invalidates affected checks.
+Luna treats the current ordered layout as frozen. If source pixels reveal a wrong merge,
+duplicate, missing page or incorrect order, record the concrete issue with low confidence
+and route it to Astra/human regrouping. Never delete originals or silently dismantle a
+document during routine extraction.
 
 ## Printed amounts and handwriting
 

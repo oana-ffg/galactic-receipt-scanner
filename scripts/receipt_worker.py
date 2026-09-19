@@ -481,6 +481,10 @@ class Worker:
                 and selected == retained,
                 "page_review.capture_ids must exactly match the ordered pages to save. "
                 "To retain adjacent pages, supply grouping with their donor_ids and ordered capture_ids before draft.")
+        if self.state.get("claim", {}).get("jev", {}).get("ready") is True:
+            require(review["excluded"] == [],
+                    "Jev already froze this document's OCR-backed grouping; Luna must not inspect or regroup neighbors.")
+            return
         windows = self.state.get("lookahead_windows")
         require(windows and windows[0]["after_capture"] is None,
                 "Read the initial context before drafting so adjacent scans can be checked.")
@@ -585,7 +589,8 @@ class Worker:
         validation = self.check("validate", extraction=extraction)
         if validation["errors"]:
             return {"validation": validation, "drafted": False}
-        self.check_claimed_observation(extraction)
+        if self.state.get("claim", {}).get("jev", {}).get("ready") is not True:
+            self.check_claimed_observation(extraction)
         self.check_category(extraction, message.get("category_name"))
         claim = self.active()
         documents = self.grouping(message["grouping"], extraction) if message.get("grouping") else [deepcopy(self.get_document(claim["document"]["id"]))]
@@ -810,13 +815,20 @@ class Worker:
             result = self.workflow_step("claim", viewer_checked=message.get("viewer_checked", False))
             if self.state["phase"] == "empty":
                 return result
-        cid = self.state["claim"]["document"]["pages"][0]["captureId"]
+        claim = self.state["claim"]
+        require(claim.get("jev", {}).get("ready") is True,
+                "Luna requires a completed Jev pass for this exact document layout.")
+        ids = [page["captureId"] for page in claim["document"]["pages"]]
         self.state["input_mode"] = "ppocr-first"
-        reading = self.workflow_step("ocr", capture_ids=[cid])[0]
-        return {**self.summary(), "input_mode": "ppocr-first", "claimed_ocr": reading,
-                "images_optional": True, "image_request": {"op": "previews", "capture_ids": [cid]}, "next": "inspect",
-                "request": {"op": "inspect", "observation": dict(capture_id=cid, type=None,
-                    vendor=None, receipt_date=None, currency=None, total_minor=None, card_last_four=None)}}
+        readings = self.workflow_step("ocr", capture_ids=ids)
+        extraction = extraction_template()
+        extraction["category_id"] = claim["jev"]["document"].get("category_id")
+        return {**self.summary(), "input_mode": "ppocr-first", "claimed_ocr": readings,
+                "jev": claim["jev"], "images_optional": True,
+                "image_request": {"op": "previews", "capture_ids": ids}, "next": "review",
+                "request": {"op": "review", "extraction": extraction,
+                    "page_review": {"capture_ids": ids, "excluded": []},
+                    "grouping_evidence": "Jev completed OCR-backed grouping before Luna claimed this document."}}
 
     def inspect(self, message):
         require(set(message) <= {"op", "observation", "correction_reason"}, "Unknown inspect option.")
@@ -847,8 +859,10 @@ class Worker:
         require(isinstance(ids, list) and 0 < len(ids) <= 100 and len(set(ids)) == len(ids)
                 and set(ids) <= set(self.state["capture_ids"]), "Use unique discovered capture IDs.")
         if not self.state.get("claimed_observation"):
-            require(ids == [self.state["claim"]["document"]["pages"][0]["captureId"]],
-                    "Read the first claimed scan by itself before considering neighbors.")
+            jev_ready = self.state.get("claim", {}).get("jev", {}).get("ready") is True
+            claimed_ids = [page["captureId"] for page in self.state["claim"]["document"]["pages"]]
+            require(ids == (claimed_ids if jev_ready else claimed_ids[:1]),
+                    "Read only the Jev-grouped document, or the first claimed scan before considering neighbors.")
         documents = self.source_documents(ids)
         membership = {p["captureId"]: d for d in documents for p in d["pages"]}
         if self.state.get("claimed_observation"):

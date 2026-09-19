@@ -25,7 +25,13 @@ Give ChatGPT Work or Codex the public repository URL and ask:
    owner, use first-visitor ownership, or commit account details. Missing configuration
    denies all requests. The server requires both the dispatcher user-ID header and the
    exact owner email; authentication alone does not authorize a different visitor.
-6. Install Node.js 22.13+ (24 recommended), then run:
+6. Create a private TypeSafe API key at `https://console.typesafe.ai/keys` and configure
+   it as the hosted secret `TYPESAFE_API_KEY`. Pass it directly from the authenticated
+   console to the Site secret store; never put it in source, prompts, logs, Git, local
+   environment files or deployment metadata. The backend pins Jev `jev-1.13.0`. Missing
+   Jev configuration never blocks capture or PP upload, but leaves retryable Jev jobs and
+   keeps those documents out of Luna's queue.
+7. Install Node.js 22.13+ (24 recommended), then run:
 
    ```sh
    npm ci
@@ -42,20 +48,20 @@ Give ChatGPT Work or Codex the public repository URL and ask:
    Drizzle migrations. Existing migration files are immutable after deployment.
    The browser test uses installed Google Chrome and synthetic receipts only.
 
-7. Commit the validated source. Keep the public GitHub origin; push the same commit to
+8. Commit the validated source. Keep the public GitHub origin; push the same commit to
    the instance's Sites source repository using its temporary credential only as a
    per-command authorization header. Never put credentials in Git URLs or files.
    Use Sites' build/package helpers and privately deploy the exact saved version.
    Wait for a successful deployment, then re-read the saved owner-only access policy.
-8. Verify the deployed root, camera, metadata, previews and file endpoints without
+9. Verify the deployed root, camera, metadata, previews and file endpoints without
    cookies: no application data may be returned. Test spoofed identity headers too;
    the Sites dispatcher must strip or reject them. Verify the signed-in owner can
    open the dashboard and camera. Check another authenticated identity if available;
    do not claim this live case was tested when only synthetic identity tests ran.
    Never disable an owner check to make a test pass.
-9. Verify WebMCP tools in a supported owner-authenticated browser. If unavailable, keep
-   ordinary downloads/API access and describe the tool validation gap honestly.
-10. Give the owner the private dashboard URL and short phone instructions. Keep all
+10. Verify WebMCP tools in a supported owner-authenticated browser. If unavailable, keep
+    ordinary downloads/API access and describe the tool validation gap honestly.
+11. Give the owner the private dashboard URL and short phone instructions. Keep all
     real-data testing out of the public repository. Do not make a central shared instance.
 
 **Do not deploy this Worker directly to an unrestricted workers.dev address.** The
@@ -123,7 +129,8 @@ and vendors, group non-adjacent pages, mark duplicates, check invoice totals and
 named multi-page PDFs. Unknown readings remain in review; failed processing and inconsistent
 totals are broken. Every decision has revision history. Give Work/Codex the project
 [receipt-processing skill](.agents/skills/receipt-processing/SKILL.md) to process a batch.
-No external OCR or model API subscription is required.
+PP-OCR runs locally. The hosted backend uses the owner's private TypeSafe key for Jev
+page/document classification and grouping before Luna can claim a receipt.
 
 To ask Codex to investigate a parsing mistake, select the receipt and choose
 **Copy for Codex**. Paste into your task and describe what looks wrong. The copied
@@ -155,13 +162,16 @@ Where supported, the open dashboard exposes these WebMCP tools:
 - `prepare_receipt_outputs`: after scanning, verify an original against its hash and create its crop and image PDF. Run one receipt at a time; failed derivative generation never changes the saved original.
 - `save_receipt_transcription`: save source-backed text, provenance, explicit uncertainties and original-pixel regions after visual inspection.
 
-OCR runs through PP-OCR in the Luna processing flow, outside the browser. The review page displays saved OCR and model readings; PDF generation reuses saved OCR matching the current page layout.
+OCR runs through PP-OCR outside the browser. Saving exact-layout PP triggers the hosted
+Jev pass; blank OCR is classified as misc without an external call. The review page displays
+saved OCR and model readings; PDF generation reuses saved OCR matching the current page layout.
 
 Follow [POST_PROCESSING.md](POST_PROCESSING.md) for batch processing and source reconciliation.
 
 Image bytes must actually be retrieved and inspected; a file URL alone is not visual
 inspection. Extraction and reporting run in the user's Work/Codex task. The hosted Site
-does not run a persistent AI worker or charge an embedded model API account. PDFs generated after scanning
+calls Jev only after PP-OCR upload and never from the capture/save path; Luna and Astra
+remain subscription-backed managed agents. PDFs generated after scanning
 contain a crop derived from the preserved original; searchable PDFs and reports are downstream derivatives.
 Authenticated clients may upload versioned PDF, image or OCR artifacts with
 `POST /api/captures/{id}/artifacts/{pdf|image|ocr}`. Use `Origin` equal to the Site origin

@@ -1,0 +1,1 @@
+ALTER TABLE `jev_jobs` ADD `run_token` text;

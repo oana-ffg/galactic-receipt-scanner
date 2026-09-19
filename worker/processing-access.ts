@@ -11,6 +11,8 @@ export function processingRouteAllowed(method: string, path: string): boolean {
         "/api/processing/categories",
         "/api/processing/context",
         "/api/processing/readings",
+        "/api/jev/status",
+        "/api/jev/documents",
         "/api/captures",
         "/api/documents",
       ].includes(path) ||
@@ -30,6 +32,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/processing/detach",
       "/api/processing/categories",
       "/api/processing/pdf-review",
+      "/api/jev/backfill",
     ].includes(path) ||
       new RegExp(`^/api/documents/${id}/pdf$`).test(path) ||
       new RegExp(`^/api/captures/${id}/artifacts/ocr$`).test(path))

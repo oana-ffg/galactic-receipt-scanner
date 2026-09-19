@@ -84,6 +84,33 @@ export interface DocumentView extends ReceiptDocument {
   scannedAt: string[];
   pdf: { sha256: string; revision: number } | null;
 }
+
+export function retargetAbsorbedAliases(
+  changed: ReceiptDocument[],
+  stored: ReceiptDocument[],
+  targetId: string,
+) {
+  const absorbed = new Set(
+    changed
+      .filter((document) => document.mergedInto === targetId)
+      .map((document) => document.id),
+  );
+  if (!absorbed.size) return;
+  const changedIds = new Set(changed.map((document) => document.id));
+  for (const previous of stored) {
+    if (changedIds.has(previous.id)) continue;
+    if (
+      !absorbed.has(previous.mergedInto ?? "") &&
+      !absorbed.has(previous.duplicateOf ?? "")
+    )
+      continue;
+    const alias = structuredClone(previous);
+    if (absorbed.has(alias.mergedInto ?? "")) alias.mergedInto = targetId;
+    if (absorbed.has(alias.duplicateOf ?? "")) alias.duplicateOf = targetId;
+    changed.push(alias);
+    changedIds.add(alias.id);
+  }
+}
 export interface DocumentCatalog {
   documents: DocumentView[];
   captures: Capture[];

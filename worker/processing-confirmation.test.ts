@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { origin, ownerHeaders, runtime } from "../scripts/test-runtime.mjs";
 import type { Extraction } from "../web/extraction";
+import { newDocument } from "../web/documents";
+import { pageFingerprint } from "./jev";
 
 let mf: Awaited<ReturnType<typeof runtime>>;
 const accessToken = "rsc_" + "q".repeat(43);
@@ -91,7 +93,7 @@ async function capture() {
   });
   expect(response.status).toBe(200);
   const saved = await response.json<any>();
-  await ok(
+  const ocr = await ok(
     `/api/captures/${id}/artifacts/ocr`,
     {
       source: {
@@ -99,12 +101,112 @@ async function capture() {
         sha256: saved.sha256,
         pixels: [1400, 2200],
         region: { left: 0, top: 0, width: 1400, height: 2200 },
+        rotation: 0,
       },
-      provenance: { engine: "tesseract.js synthetic fixture" },
+      provenance: { engine: "PP-OCRv6" },
       text: "1 Synthetic item 12,34\nTOTAL 12,34\nVAT 2,47",
     },
     false,
   );
+  const db = await mf.getD1Database("DB");
+  const now = new Date().toISOString();
+  const roleAssessment = crypto.randomUUID();
+  const categoryAssessment = crypto.randomUUID();
+  const pins = [{ capture_id: id, ocr_sha256: ocr.sha256 }];
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+      )
+      .bind(
+        roleAssessment,
+        "document-role",
+        id,
+        "synthetic-jev",
+        roleAssessment,
+        JSON.stringify({
+          input: { pins },
+          response: {
+            model: "synthetic-jev",
+            answers: {
+              document_role: {
+                type: "choice",
+                choice: "purchase_document",
+                probabilities: {
+                  purchase_document: 1,
+                  payment_evidence_only: 0,
+                  account_record: 0,
+                  cash_withdrawal: 0,
+                  misc: 0,
+                },
+                confidence: 1,
+              },
+            },
+          },
+        }),
+        now,
+      ),
+    db
+      .prepare(
+        "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+      )
+      .bind(
+        categoryAssessment,
+        "purchase-category",
+        id,
+        "synthetic-jev",
+        categoryAssessment,
+        JSON.stringify({
+          input: { pins, category_ids: {} },
+          response: {
+            model: "synthetic-jev",
+            answers: {
+              purchase_category: {
+                type: "choice",
+                choice: "unresolved",
+                probabilities: { unresolved: 1 },
+                confidence: 1,
+              },
+            },
+          },
+        }),
+        now,
+      ),
+    db
+      .prepare(
+        "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+      )
+      .bind(
+        id,
+        saved.sha256,
+        ocr.sha256,
+        "receipt",
+        1_000_000,
+        1_000_000,
+        "synthetic-jev",
+        crypto.randomUUID(),
+        now,
+      ),
+    db
+      .prepare(
+        "INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,category_id,category_probability,category_confidence,model,assessment_id,category_assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .bind(
+        id,
+        0,
+        await pageFingerprint(newDocument(saved)),
+        "purchase_document",
+        1_000_000,
+        1_000_000,
+        null,
+        1_000_000,
+        1_000_000,
+        "synthetic-jev",
+        roleAssessment,
+        categoryAssessment,
+        now,
+      ),
+  ]);
   return saved;
 }
 
@@ -247,6 +349,20 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
 
   const qwen = reading(1299);
   qwen.category_id = null;
+  await ok(
+    `/api/captures/${source.id}/artifacts/ocr`,
+    {
+      source: {
+        captureId: source.id,
+        sha256: source.sha256,
+        pixels: [1400, 2200],
+        region: { left: 0, top: 0, width: 1400, height: 2200 },
+      },
+      provenance: { engine: "tesseract.js synthetic fixture" },
+      text: "1 Synthetic item 12,34\nTOTAL 12,34\nVAT 2,47",
+    },
+    false,
+  );
   const confirmation = {
     token: lease.token,
     model: "qwen3-vl:8b-instruct",
@@ -317,6 +433,36 @@ it("stores immutable ordered Luna, Qwen, and reassessed readings", async () => {
     documents: [document],
     assessment,
   };
+  const bucket = await mf.getR2Bucket("BUCKET");
+  const artifactRows = (
+    await db
+      .prepare("SELECT key FROM artifacts WHERE capture_id=? AND kind='ocr'")
+      .bind(source.id)
+      .all<{ key: string }>()
+  ).results;
+  let ppKey: string | null = null;
+  for (const row of artifactRows) {
+    const value = await (await bucket.get(row.key))?.json<any>();
+    if (value?.provenance?.engine === "PP-OCRv6") ppKey = row.key;
+  }
+  expect(ppKey).not.toBeNull();
+  await db.prepare("DELETE FROM artifacts WHERE key=?").bind(ppKey).run();
+  expect((await request("/api/processing/submit", submit)).status).toBe(409);
+  await ok(
+    `/api/captures/${source.id}/artifacts/ocr`,
+    {
+      source: {
+        captureId: source.id,
+        sha256: source.sha256,
+        pixels: [1400, 2200],
+        region: { left: 0, top: 0, width: 1400, height: 2200 },
+        rotation: 0,
+      },
+      provenance: { engine: "PP-OCRv6" },
+      text: "1 Synthetic item 12,34\nTOTAL 12,34\nVAT 2,47",
+    },
+    false,
+  );
   await ok("/api/processing/submit", submit);
   expect((await ok("/api/processing/submit", submit)).replayed).toBe(true);
 
@@ -476,7 +622,7 @@ it("preserves inherited merge notes when reassessment drops them without rewriti
   ]);
   expect(saved.uncertainties).toEqual(sourceReading.uncertainties);
   expect(saved.broken).toEqual(sourceReading.broken_reasons);
-  expect(saved.processing.extraction.certainty).toBe("medium");
+  expect(saved.processing.extraction.certainty).toBe("low");
   const moved = (await ok(`/api/documents/${source.id}`, undefined, false))
     .document;
   expect(moved.mergedInto).toBe(target.id);

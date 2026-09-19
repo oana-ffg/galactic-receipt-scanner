@@ -12,6 +12,7 @@ import type { Capture } from "../web/types";
 import {
   newDocument,
   DOCUMENT_EVIDENCE_LIMIT,
+  retargetAbsorbedAliases,
   requiredMergeReviewReasons,
   type ReceiptDocument,
 } from "../web/documents";
@@ -24,6 +25,7 @@ import {
   type ProcessingState,
 } from "../web/extraction";
 import { bodyJson, digest, HttpError, json, requireThat, UUID } from "./http";
+import { jevReadyDocuments, jevSummary } from "./jev";
 import {
   documentRoute,
   MAX_DOCUMENT_CHANGES,
@@ -168,33 +170,6 @@ function applyExtraction(
     pdf: false,
   };
   d.reviewedPdfSha256 = null;
-}
-
-function retargetAbsorbedAliases(
-  changed: ReceiptDocument[],
-  stored: ReceiptDocument[],
-  targetId: string,
-) {
-  const absorbed = new Set(
-    changed
-      .filter((document) => document.mergedInto === targetId)
-      .map((document) => document.id),
-  );
-  if (!absorbed.size) return;
-  const changedIds = new Set(changed.map((document) => document.id));
-  for (const previous of stored) {
-    if (changedIds.has(previous.id)) continue;
-    if (
-      !absorbed.has(previous.mergedInto ?? "") &&
-      !absorbed.has(previous.duplicateOf ?? "")
-    )
-      continue;
-    const alias = structuredClone(previous);
-    if (absorbed.has(alias.mergedInto ?? "")) alias.mergedInto = targetId;
-    if (absorbed.has(alias.duplicateOf ?? "")) alias.duplicateOf = targetId;
-    changed.push(alias);
-    changedIds.add(alias.id);
-  }
 }
 
 async function save(
@@ -631,6 +606,7 @@ export async function processingRoute(
     );
     const captures = await load(),
       docs = await records(env, captures);
+    const jevReady = await jevReadyDocuments(env, docs);
     const current = new Set(
       captures.filter((c) => c.is_current).map((c) => c.id),
     );
@@ -643,11 +619,13 @@ export async function processingRoute(
           !d.duplicateOf &&
           d.pages.some((p) => current.has(p.captureId)) &&
           (input.stage === "small"
-            ? !d.processing ||
-              d.processing.needs_reparse ||
-              (processingDisposition(d.processing) === "awaiting-pages" &&
-                captures.length > d.processing.seen_capture_count)
+            ? jevReady.has(d.id) &&
+              (!d.processing ||
+                d.processing.needs_reparse ||
+                (processingDisposition(d.processing) === "awaiting-pages" &&
+                  captures.length > d.processing.seen_capture_count))
             : d.processing &&
+              jevReady.has(d.id) &&
               !d.processing.needs_reparse &&
               d.processing.large_model_confidence === null &&
               !d.processing.has_human_review &&
@@ -700,6 +678,7 @@ export async function processingRoute(
         stage: input.stage,
         document: { id: d.id, revision: d.revision, pages: d.pages },
         scanned_at: d.pages.map((p) => time.get(p.captureId)),
+        jev: await jevSummary(env, d),
       },
     });
   }
@@ -1221,6 +1200,7 @@ export async function processingRoute(
     return json({
       rejected_associations_truncated: rejected.length > 100,
       document: doc,
+      jev: await jevSummary(env, doc),
       ocr_comparison: doc.processing?.ocr_comparison ?? null,
       independent_parse: lock.draft
         ? lock.stage === "small"
@@ -1368,17 +1348,14 @@ export async function processingRoute(
         "This page association was rejected; keep it detached for another match.",
       );
     }
-    const comparison = await compareStoredOcr(
-      env,
-      d,
-      input.extraction,
-      confirmation
-        ? {
-            strictRegion: true,
-            pins: JSON.parse(confirmation.payload).evidence.initial_ocr
-              .artifacts,
-          }
-        : undefined,
+    const comparison = await compareStoredOcr(env, d, input.extraction, {
+      engine: "ppocr",
+      strictRegion: true,
+    });
+    requireThat(
+      comparison.status !== "missing",
+      409,
+      "Exact-layout PP OCR is required; this document is not processing-eligible.",
     );
     const extracted = structuredClone(input.extraction);
     // Retain inherited review notes even when reassessment omits or paraphrases them.
@@ -1403,8 +1380,7 @@ export async function processingRoute(
     )
       extracted.certainty = "medium";
     validateExtraction(extracted);
-    const conflict =
-      comparison.status === "missing" || comparison.status === "disagreement";
+    const conflict = comparison.status === "disagreement";
     if (
       lock.stage === "large" &&
       comparison.status === "disagreement" &&
@@ -1413,14 +1389,27 @@ export async function processingRoute(
       input.ocr_resolution.length <= 20000
     )
       comparison.resolution = input.ocr_resolution;
-    if (conflict && !comparison.resolution && extracted.certainty === "high")
-      extracted.certainty = "medium";
+    const jev = await jevSummary(env, d);
+    const jevDocument = jev.ready ? jev.document : null;
+    const jevDisagreement = Boolean(
+      jevDocument &&
+      ((jevDocument.role === "purchase_document" &&
+        !financialTypes.includes(extracted.type)) ||
+        (jevDocument.category_id !== null &&
+          extracted.category_id !== jevDocument.category_id)),
+    );
+    const unresolvedOcrConflict = conflict && !comparison.resolution;
+    if (lock.stage === "small" && (jevDisagreement || unresolvedOcrConflict))
+      extracted.certainty = "low";
+    else if (lock.stage === "large" && comparison.status === "disagreement")
+      extracted.certainty = "low";
     applyExtraction(
       d,
       extracted,
       state(extracted, previous.processing, lock.stage, d.revision),
     );
     d.processing!.ocr_comparison = comparison;
+    d.processing!.jev_assessment = jevDocument;
     d.processing!.seen_capture_count = captures.length;
     const saved = changed.map((document) => ({
       id: document.id,

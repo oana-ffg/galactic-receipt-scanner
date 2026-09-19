@@ -11,109 +11,12 @@ import test_receipt_worker as fixtures
 
 
 class WorkflowTests(unittest.TestCase):
-    setUp = fixtures.WorkerTests.setUp
     make_worker = fixtures.WorkerTests.make_worker
     send = fixtures.WorkerTests.send
 
-    def receipt_and_slip(self):
-        """The claimed slip follows only the last scan of an existing two-page receipt."""
-        donor = self.fake.documents[fixtures.OTHER]
-        self.fake.raw[fixtures.FOREIGN] = b"synthetic receipt lower section"
-        donor['pages'].append(dict(captureId=fixtures.FOREIGN,
-            sha256=hashlib.sha256(self.fake.raw[fixtures.FOREIGN]).hexdigest(), rotation=0, crop=None))
-        self.fake.previous_images = [dict(id=fixtures.FOREIGN, document_id=fixtures.OTHER,
-            sha256=donor['pages'][1]['sha256'])]
-        begun = self.send('begin')
-        self.assertEqual(list(self.worker.state['prepared']), [fixtures.DID])
-        begun['request']['observation']['type'] = 'payment-slip'
-        return self.worker.handle(begun['request'])['result']
-
-    def test_slip_inspection_expands_previous_scan_to_whole_receipt(self):
-        packet = self.receipt_and_slip()
-        self.assertEqual([r['capture_id'] for r in packet['ocr']], [fixtures.OTHER, fixtures.FOREIGN])
-        for reading in packet['ocr']:
-            self.assertEqual(reading['document_id'], fixtures.OTHER)
-            self.assertEqual(reading['document_capture_ids'], [fixtures.OTHER, fixtures.FOREIGN])
-        self.assertEqual([r['capture_id'] for r in packet['request']['page_review']['excluded']],
-                         [fixtures.OTHER, fixtures.FOREIGN])
-        self.assertNotIn('preview_records', self.worker.state)
-        # Explicit candidate reads use the same whole-document expansion.
-        readings = self.send('ocr', capture_ids=[fixtures.FOREIGN, fixtures.OTHER])
-        self.assertEqual([r['capture_id'] for r in readings], [fixtures.OTHER, fixtures.FOREIGN])
-
-    def test_normal_review_rejects_partial_reversed_or_interleaved_receipt(self):
-        packet = self.receipt_and_slip()
-        before = deepcopy(self.fake.documents)
-        for selected in ([fixtures.FOREIGN, fixtures.DID],
-                         [fixtures.FOREIGN, fixtures.OTHER, fixtures.DID],
-                         [fixtures.OTHER, fixtures.DID, fixtures.FOREIGN]):
-            with self.subTest(selected=selected):
-                request = deepcopy(packet['request'])
-                request.update(extraction=fixtures.extraction(), grouping_evidence='Synthetic proposed match.',
-                    page_review=dict(capture_ids=selected, excluded=[dict(capture_id=cid, reason='Synthetic exclusion.')
-                        for cid in (fixtures.OTHER, fixtures.FOREIGN) if cid not in selected]))
-                result = self.worker.handle(request)
-                self.assertTrue(result['regrouping_required'], result)
-                self.assertFalse(result['blocking'])
-                self.assertEqual(self.worker.state['phase'], 'claimed')
-                self.assertNotIn('draft', self.worker.state)
-                self.assertEqual(self.fake.documents, before)
-                self.assertFalse(self.fake.readings['draft_saved'])
-        # The direct draft command cannot bypass the same rule.
-        result = self.worker.handle(dict(op='draft', extraction=fixtures.extraction(),
-            grouping=dict(donor_ids=[fixtures.OTHER], capture_ids=[fixtures.FOREIGN, fixtures.DID], evidence='Synthetic match.'),
-            page_review=dict(capture_ids=[fixtures.FOREIGN, fixtures.DID],
-                excluded=[dict(capture_id=fixtures.OTHER, reason='Separate regroup review needed.')])))
-        self.assertTrue(result['regrouping_required'], result)
-
-        # A genuine regroup dispute can be saved for review without changing the donor.
-        request = deepcopy(packet['request'])
-        value = fixtures.extraction()
-        value['uncertainties'] = ['Separate regrouping review needed for the synthetic receipt.']
-        request['extraction'] = value
-        for row in request['page_review']['excluded']:
-            row['reason'] = 'Preserve the existing receipt pending separate regrouping review.'
-        reviewed = self.worker.handle(request)
-        self.assertTrue(reviewed['ok'], reviewed)
-        finish = reviewed['result']['request']
-        finish['rationale'] = 'Keep the claimed slip separate pending review.'
-        completed = self.worker.handle(finish)
-        self.assertTrue(completed['ok'], completed)
-        self.assertEqual(completed['result']['phase'], 'complete')
-        self.assertEqual(self.fake.documents[fixtures.OTHER], before[fixtures.OTHER])
-
-    def test_lookahead_expands_whole_document_without_duplicating_ocr_pages(self):
-        donor = self.fake.documents[fixtures.OTHER]
-        self.fake.raw[fixtures.FOREIGN] = b'synthetic continuation'
-        donor['pages'].append(dict(captureId=fixtures.FOREIGN,
-            sha256=hashlib.sha256(self.fake.raw[fixtures.FOREIGN]).hexdigest(), rotation=0, crop=None))
-        self.fake.next_images = [dict(id=p['captureId'], sha256=p['sha256'], document_id=fixtures.OTHER)
-                                 for p in donor['pages']]
-        begun = self.send('begin')
-        begun['request']['observation']['type'] = 'receipt'
-        packet = self.worker.handle(begun['request'])['result']
-        self.assertEqual([r['capture_id'] for r in packet['ocr']], [fixtures.OTHER, fixtures.FOREIGN])
-        self.assertEqual([r['capture_id'] for r in packet['request']['page_review']['excluded']],
-                         [fixtures.OTHER, fixtures.FOREIGN])
-
-    def test_slip_joins_all_receipt_pages_without_leaving_residual_document(self):
-        packet = self.receipt_and_slip()
-        request = packet['request']
-        request.update(extraction=fixtures.extraction(), grouping_evidence='Synthetic whole receipt and matching slip.',
-            page_review=dict(capture_ids=[fixtures.OTHER, fixtures.FOREIGN, fixtures.DID], excluded=[]))
-        reviewed = self.worker.handle(request)
-        self.assertTrue(reviewed['ok'], reviewed)
-        self.assertEqual(reviewed['result']['draft']['pages'], 3)
-        finish = reviewed['result']['request']
-        finish['rationale'] = 'Synthetic whole-document match confirmed.'
-        result = self.worker.handle(finish)
-        self.assertTrue(result['ok'], result)
-        self.assertEqual(result['result']['phase'], 'complete')
-        self.assertEqual([p['captureId'] for p in self.fake.documents[fixtures.DID]['pages']],
-                         [fixtures.OTHER, fixtures.FOREIGN, fixtures.DID])
-        self.assertEqual(self.fake.documents[fixtures.OTHER]['pages'], [])
-        self.assertEqual(self.fake.documents[fixtures.OTHER]['mergedInto'], fixtures.DID)
-        self.assertEqual(len(self.fake.submit_bytes), 1)
+    def setUp(self):
+        fixtures.WorkerTests.setUp(self)
+        self.fake.jev_ready = True
 
     def test_ocr_first_finishes_without_viewing_or_attesting_pdf(self):
         finish = self.start_review()
@@ -172,43 +75,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('has_handwriting null', self.worker.handle(finish)['input_error'])
         self.assertEqual(self.fake.submit_bytes, [])
 
-    def test_ocr_first_reads_neighbours_without_previews_or_pp_preflight(self):
-        self.fake.next_images = [dict(id=fixtures.OTHER, sha256=self.fake.documents[fixtures.OTHER]['pages'][0]['sha256'], document_id=fixtures.OTHER)]
-        with patch.object(self.worker, 'render_file', side_effect=AssertionError('No previews')):
-            begun = self.send('begin')
-            begun['request']['observation']['type'] = 'receipt'
-            result = self.worker.handle(begun['request'])
-        self.assertTrue(result['ok'], result)
-        self.assertEqual(self.worker.state['sources'], {})
-        self.assertEqual(result['result']['request']['page_review']['excluded'], [dict(capture_id=fixtures.OTHER, reason='')])
-
-    def test_grouping_is_derived_from_one_ordered_capture_list(self):
-        self.fake.next_images = [dict(id=fixtures.OTHER, sha256=self.fake.documents[fixtures.OTHER]['pages'][0]['sha256'], document_id=fixtures.OTHER)]
-        begun = self.send('begin')
-        begun['request']['observation']['type'] = 'receipt'
-        request = self.worker.handle(begun['request'])['result']['request']
-        self.send('context', filters={'after_capture': fixtures.OTHER})
-        request.update(extraction=fixtures.extraction(), grouping_evidence='Synthetic complementary second page.',
-                       page_review=dict(capture_ids=[fixtures.DID, fixtures.OTHER], excluded=[]))
-        result = self.worker.handle(request)
-        self.assertTrue(result['ok'], result)
-        self.assertEqual(self.worker.state['draft']['grouping']['donor_ids'], [fixtures.OTHER])
-        self.assertEqual(result['result']['draft']['pages'], 2)
-
-    def test_context_only_exclusion_returns_exact_repair_without_merging(self):
-        begun = self.send('begin')
-        begun['request']['observation']['type'] = 'receipt'
-        request = self.worker.handle(begun['request'])['result']['request']
-        request['extraction'] = fixtures.extraction()
-        request['page_review']['excluded'] = [dict(capture_id=fixtures.OTHER, reason='Context only.')]
-        result = self.worker.handle(request)
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['required_exclusion_ids'], [])
-        self.assertIn(fixtures.OTHER, result['context_only_ids'])
-        request['page_review']['excluded'] = []
-        self.assertTrue(self.worker.handle(request)['ok'])
-        self.assertEqual(len(self.worker.state['draft']['target']['pages']), 1)
-
     def test_missing_ocr_waits_then_retries_same_claim(self):
         prepare = self.fake.prepare
         def missing(cid, directory, **kwargs):
@@ -242,13 +108,10 @@ class WorkflowTests(unittest.TestCase):
         self.worker.confirmation_provider = "ppocr"
         begun = self.send("begin", viewer_checked=True)
         self.assertEqual(begun["image_request"]["capture_ids"], [fixtures.DID])
-        self.assertEqual(begun["claimed_ocr"]["capture_id"], fixtures.DID)
+        self.assertEqual(begun["claimed_ocr"][0]["capture_id"], fixtures.DID)
+        self.assertTrue(begun["jev"]["ready"])
         self.assertTrue(begun["images_optional"])
         request = begun["request"]
-        request["observation"].update(type="receipt", vendor="Synthetic Shop")
-        packet = self.worker.handle(request)
-        self.assertTrue(packet["ok"], packet)
-        request = packet["result"]["request"]
         request["extraction"] = fixtures.extraction()
         reviewed = self.worker.handle(request)
         self.assertTrue(reviewed["ok"], reviewed)
@@ -275,7 +138,7 @@ class WorkflowTests(unittest.TestCase):
         self.worker.state["draft"]["images"] = [{"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "pixels": [10, 20]}]
         self.worker.render = render
 
-    def test_four_requests_save_initial_pp_updated_and_completion_separately(self):
+    def test_three_requests_save_initial_pp_jev_updated_and_completion_separately(self):
         finish = self.start_review()
         self.matching_renders()
         finish["extraction"]["vendor"] = "Corrected Synthetic Shop"
@@ -389,25 +252,18 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(result["blocking"])
         self.assertFalse(self.fake.documents[fixtures.DID]["checks"]["pdf"])
 
-    def test_begin_exposes_only_claimed_ocr_before_neighbor_observation(self):
+    def test_begin_exposes_all_claimed_ocr_and_jev_without_neighbor_context(self):
         self.fake.next_images = [{"id": fixtures.OTHER, "sha256": self.fake.documents[fixtures.OTHER]["pages"][0]["sha256"],
                                   "document_id": fixtures.OTHER}]
         begun = self.send("begin", viewer_checked=True)
         self.assertEqual(list(self.worker.state["sources"]), [])
-        self.assertEqual(begun['claimed_ocr']['source_sha256'], self.fake.documents[fixtures.DID]['pages'][0]['sha256'])
-        self.assertNotIn('text_only_pdf_layers', begun['claimed_ocr'])
+        self.assertEqual(begun['claimed_ocr'][0]['source_sha256'], self.fake.documents[fixtures.DID]['pages'][0]['sha256'])
+        self.assertNotIn('text_only_pdf_layers', begun['claimed_ocr'][0])
+        self.assertTrue(begun['jev']['ready'])
         self.assertFalse(any("context?" in path for _, path in self.fake.calls))
-        request = begun["request"]
-        request["observation"]["type"] = "receipt"
-        packet = self.worker.handle(request)
-        self.assertTrue(packet["ok"], packet)
-        self.assertNotIn('previews', packet['result'])
-        self.assertEqual([p['capture_id'] for p in packet['result']['ocr']], [fixtures.OTHER])
-        review = packet["result"]["request"]
+        review = begun["request"]
         review["extraction"] = fixtures.extraction()
-        result = self.worker.handle(review)
-        self.assertIn("input_error", result)  # unaccounted neighbor may not be silently discarded
-        self.assertFalse(self.worker.state.get("draft_saved"))
+        self.assertTrue(self.worker.handle(review)["result"]["draft"]["drafted"])
 
     def test_begin_crop_retry_never_claims_again(self):
         with patch.object(self.fake, "saved_ocr", side_effect=module.InputError("Synthetic layout needs correction")):
@@ -417,59 +273,35 @@ class WorkflowTests(unittest.TestCase):
         self.send("begin", viewer_checked=True)
         self.assertEqual(sum(path.endswith("/claim") for _, path in self.fake.calls), 1)
 
-    def test_review_freezes_and_prepares_every_grouped_page_in_order(self):
+    def test_review_freezes_and_prepares_every_preassembled_page_in_order(self):
         self.worker.confirmation_provider = "ppocr"
-        self.fake.next_images = [{"id": fixtures.OTHER, "sha256": self.fake.documents[fixtures.OTHER]["pages"][0]["sha256"],
-                                  "document_id": fixtures.OTHER}]
+        self.fake.raw[fixtures.FOREIGN] = b"synthetic second page"
+        self.fake.documents[fixtures.DID]["pages"].append({
+            "captureId": fixtures.FOREIGN,
+            "sha256": hashlib.sha256(self.fake.raw[fixtures.FOREIGN]).hexdigest(),
+            "rotation": 0,
+            "crop": None,
+        })
         begun = self.send("begin", viewer_checked=True)
         request = begun["request"]
-        request["observation"]["type"] = "receipt"
-        packet = self.worker.handle(request)["result"]
-        self.send("context", filters={"after_capture": fixtures.OTHER})
-        request = packet["request"]
-        request.update(extraction=fixtures.extraction(),
-            grouping={"donor_ids": [fixtures.OTHER], "capture_ids": [fixtures.DID, fixtures.OTHER],
-                      "evidence": "Synthetic complementary continuation."},
-            page_review={"capture_ids": [fixtures.DID, fixtures.OTHER], "excluded": []})
+        request["extraction"] = fixtures.extraction()
         reviewed = self.worker.handle(request)
         self.assertTrue(reviewed["ok"], reviewed)
         self.assertEqual(reviewed["result"]["draft"]["pages"], 2)
-        self.assertEqual(list(self.worker.state["prepared"]), [fixtures.DID, fixtures.OTHER])
+        self.assertEqual(list(self.worker.state["prepared"]), [fixtures.DID, fixtures.FOREIGN])
         self.assertEqual([p["captureId"] for p in self.fake.initial_draft["documents"][0]["pages"]],
-                         [fixtures.DID, fixtures.OTHER])
+                         [fixtures.DID, fixtures.FOREIGN])
         confirmation = self.worker.state["confirmation"]["qwen"]  # FakeScanner stores the provider request here.
         self.assertEqual(confirmation["provider"], "ppocr")
-        self.assertEqual([p["capture_id"] for p in confirmation["artifacts"]], [fixtures.DID, fixtures.OTHER])
+        self.assertEqual([p["capture_id"] for p in confirmation["artifacts"]], [fixtures.DID, fixtures.FOREIGN])
 
     def test_begin_preserves_an_explicitly_corrected_crop(self):
         self.send("begin", viewer_checked=True)
         corrected = self.send("previews", capture_ids=[fixtures.DID], layouts={fixtures.DID: {"crop": [2, 3, 8, 17]}})[0]
         repeated = self.send("begin", viewer_checked=True)
-        self.assertEqual(repeated["claimed_ocr"]["layout"], corrected['layout'])
+        self.assertEqual(repeated["claimed_ocr"][0]["layout"], corrected['layout'])
         self.assertEqual(self.worker.state["layouts"][fixtures.DID]["crop"], [2, 3, 8, 17])
         self.assertEqual(sum(path.endswith("/claim") for _, path in self.fake.calls), 1)
-
-    def test_ocr_first_duplicate_requires_explicit_visual_confirmation(self):
-        self.fake.next_images = [{"id": fixtures.OTHER, "sha256": self.fake.documents[fixtures.OTHER]["pages"][0]["sha256"],
-                                  "document_id": fixtures.OTHER}]
-        begun = self.send('begin', viewer_checked=True)
-        request = begun['request']
-        request['observation']['type'] = 'receipt'
-        packet = self.worker.handle(request)['result']
-        review = packet['request']
-        review['extraction'] = fixtures.extraction()
-        review['page_review']['excluded'] = [dict(capture_id=fixtures.OTHER, reason='Canonical scan stays in its own document.')]
-        review['grouping'] = dict(duplicate_of=fixtures.OTHER, evidence='Synthetic complete visual coverage.')
-        for value in (None, False):
-            if value is not None:
-                review['grouping']['visual_duplicate_checked'] = value
-            rejected = self.worker.handle(review)
-            self.assertIn('visual_duplicate_checked', rejected['input_error'])
-            self.assertFalse(self.worker.state.get('draft_saved'))
-        review['grouping']['visual_duplicate_checked'] = True
-        self.send('previews', capture_ids=[fixtures.DID, fixtures.OTHER])
-        self.send('ocr', capture_ids=[fixtures.DID, fixtures.OTHER])
-        self.assertTrue(self.worker.handle(review)['result']['draft']['drafted'])
 
     def test_ocr_request_validation_is_correctable(self):
         result = self.worker.handle({'op': 'ocr'})
@@ -478,11 +310,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_changed_crop_requires_new_ocr_before_initial_draft(self):
         begun = self.send('begin', viewer_checked=True)
-        observation = begun['request']
-        observation['observation']['type'] = 'receipt'
-        packet = self.worker.handle(observation)['result']
         self.send('previews', capture_ids=[fixtures.DID], layouts={fixtures.DID: {'crop': [2, 3, 8, 17]}})
-        review = packet['request']
+        review = begun['request']
         review['extraction'] = fixtures.extraction()
         self.assertIn('Read ocr', self.worker.handle(review)['input_error'])
         self.assertFalse(self.worker.state.get('draft_saved'))
@@ -494,9 +323,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_non_string_evidence_is_correctable_before_provenance_injection(self):
         begun = self.send('begin', viewer_checked=True)
-        observation = begun['request']
-        observation['observation']['type'] = 'receipt'
-        review = self.worker.handle(observation)['result']['request']
+        review = begun['request']
         review['extraction'] = fixtures.extraction()
         review['extraction']['evidence'] = None
         original_check = self.worker.check

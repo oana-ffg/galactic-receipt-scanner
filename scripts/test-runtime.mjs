@@ -12,6 +12,8 @@ export async function runtime({
   appOrigin = origin,
   processingTokenSha256,
   sitesGatewayToken,
+  typesafeApiKey,
+  outboundService,
 } = {}) {
   const configuredDist = process.env.RECEIPT_TEST_DIST_ROOT;
   if (configuredDist && !isAbsolute(configuredDist))
@@ -25,6 +27,7 @@ export async function runtime({
       OWNER_EMAIL: "owner@example.test",
       APP_ORIGIN: appOrigin,
       ...(sitesGatewayToken ? { SITES_GATEWAY_TOKEN: sitesGatewayToken } : {}),
+      ...(typesafeApiKey ? { TYPESAFE_API_KEY: typesafeApiKey } : {}),
       ...(processingTokenSha256
         ? { PROCESSING_TOKEN_SHA256: processingTokenSha256 }
         : {}),
@@ -40,6 +43,7 @@ export async function runtime({
         has_user_worker: true,
       },
     },
+    ...(outboundService ? { outboundService } : {}),
   });
   const db = await mf.getD1Database("DB");
   for (const file of (await readdir("drizzle"))

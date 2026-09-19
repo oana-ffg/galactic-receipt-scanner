@@ -1,7 +1,7 @@
 import type { Env } from "./index";
 import type { ReceiptDocument } from "../web/documents";
 import { financialTypes, type Extraction } from "../web/extraction";
-import type { OcrArtifact } from "../web/ocr-data";
+import { ocrArtifactMatchesPage, type OcrArtifact } from "../web/ocr-data";
 export interface OcrComparison {
   status:
     "no-disagreement-detected" | "disagreement" | "missing" | "not-applicable";
@@ -198,17 +198,7 @@ export async function compareStoredOcr(
       )
         continue;
       if (options?.strictRegion) {
-        const crop = page.crop;
-        const region = value.source.region;
-        if (
-          !crop ||
-          !region ||
-          region.left !== crop[0] ||
-          region.top !== crop[1] ||
-          region.width !== crop[2] - crop[0] ||
-          region.height !== crop[3] - crop[1]
-        )
-          continue;
+        if (!ocrArtifactMatchesPage(value, page)) continue;
       }
       texts.push(value.text);
       artifacts.push({ capture_id: page.captureId, sha256: row.sha256 });

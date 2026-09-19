@@ -69,6 +69,7 @@ class FakeScanner:
         self.pdf_calls = 0
         self.lost_claim = False
         self.categories = []
+        self.jev_ready = False
         self.next_images = []
         self.previous_images = []
         self.readings = {"draft_saved": False, "attempt_saved": False, "claim_active": False}
@@ -77,7 +78,8 @@ class FakeScanner:
         self.calls.append(("GET", path))
         if path == "/api/processing/access":
             return {"version": 2, "queueClaims": True, "lunaReassessment": True,
-                    "batchDocumentExclusions": True}
+                    "batchDocumentExclusions": True,
+                    "jev": {"configured": True, "model": "jev-1.13.0"}}
         if path == "/api/processing/categories":
             return deepcopy(self.categories)
         if path.startswith("/api/processing/readings?"):
@@ -103,7 +105,15 @@ class FakeScanner:
             if self.lost_claim:
                 raise ClientError("Scanner connection failed; check connectivity and retry.")
             return json.dumps({"claim": dict(token=TOKEN, expires=time.time()*1000+1200000,
-                stage="small", document=deepcopy(self.documents[DID]))}).encode()
+                stage="small", document=deepcopy(self.documents[DID]),
+                jev={"ready": self.jev_ready,
+                     "document": {"role": "purchase_document", "probability": 0.99,
+                                  "confidence": 0.95, "category_id": None,
+                                  "category_probability": None, "category_confidence": None,
+                                  "model": "jev-1.13.0", "assessment_id": "synthetic-jev"},
+                     "pages": [{"capture_id": DID, "role": "receipt", "probability": 0.99,
+                                "confidence": 0.95, "model": "jev-1.13.0",
+                                "assessment_id": "synthetic-page"}]})}).encode()
         if path.endswith("/renew"):
             return json.dumps({"expires": time.time()*1000+1200000}).encode()
         if path.endswith("/release"):

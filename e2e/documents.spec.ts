@@ -5,6 +5,7 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
+import { pageFingerprint } from "../worker/jev";
 const processorToken = "rsc_" + "s".repeat(43);
 let isolated: Awaited<ReturnType<typeof runtime>>;
 test.beforeEach(async ({ page }) => {
@@ -384,14 +385,140 @@ test("human review edits structured values and detaches a wrong page into the po
     name: "Synthetic personal",
     description: "Synthetic personal groceries only.",
   });
-  const lease = (await model("/api/processing/claim", { stage: "small" }))
-    .claim;
   const captures = await Promise.all(
     ids.map(
       async (id) =>
         await (await isolatedRequest.get(`/api/captures/${id}`)).json(),
     ),
   );
+  const db = await isolated.getD1Database("DB");
+  for (const capture of captures) {
+    const ocrResponse = await isolated.dispatchFetch(
+      `${origin}/api/captures/${capture.id}/artifacts/ocr`,
+      {
+        method: "POST",
+        headers: {
+          ...ownerHeaders,
+          Origin: origin,
+          "X-Scanner-Request": "1",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          source: {
+            captureId: capture.id,
+            sha256: capture.sha256,
+            pixels: [941, 1672],
+            rotation: 0,
+            region: { left: 0, top: 0, width: 941, height: 1672 },
+          },
+          provenance: { engine: "PP-OCRv6" },
+          text: "Synthetic shop\nSynthetic item 12,34\nTOTAL 12,34",
+        }),
+      },
+    );
+    expect(ocrResponse.status).toBe(200);
+    const ocr = await ocrResponse.json<any>();
+    const roleAssessment = randomUUID();
+    const categoryAssessment = randomUUID();
+    const now = new Date().toISOString();
+    const pins = [{ capture_id: capture.id, ocr_sha256: ocr.sha256 }];
+    await db.batch([
+      db
+        .prepare(
+          "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+        )
+        .bind(
+          roleAssessment,
+          "document-role",
+          capture.id,
+          "synthetic-jev",
+          roleAssessment,
+          JSON.stringify({
+            input: { pins },
+            response: {
+              model: "synthetic-jev",
+              answers: {
+                document_role: {
+                  type: "choice",
+                  choice: "purchase_document",
+                  probabilities: {
+                    purchase_document: 1,
+                    payment_evidence_only: 0,
+                    account_record: 0,
+                    cash_withdrawal: 0,
+                    misc: 0,
+                  },
+                  confidence: 1,
+                },
+              },
+            },
+          }),
+          now,
+        ),
+      db
+        .prepare(
+          "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+        )
+        .bind(
+          categoryAssessment,
+          "purchase-category",
+          capture.id,
+          "synthetic-jev",
+          categoryAssessment,
+          JSON.stringify({
+            input: { pins, category_ids: {} },
+            response: {
+              model: "synthetic-jev",
+              answers: {
+                purchase_category: {
+                  type: "choice",
+                  choice: "unresolved",
+                  probabilities: { unresolved: 1 },
+                  confidence: 1,
+                },
+              },
+            },
+          }),
+          now,
+        ),
+      db
+        .prepare(
+          "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(
+          capture.id,
+          capture.sha256,
+          ocr.sha256,
+          "receipt",
+          1_000_000,
+          1_000_000,
+          "synthetic-jev",
+          randomUUID(),
+          now,
+        ),
+      db
+        .prepare(
+          "INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,category_id,category_probability,category_confidence,model,assessment_id,category_assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(
+          capture.id,
+          0,
+          await pageFingerprint(newDocument(capture)),
+          "purchase_document",
+          1_000_000,
+          1_000_000,
+          null,
+          1_000_000,
+          1_000_000,
+          "synthetic-jev",
+          roleAssessment,
+          categoryAssessment,
+          now,
+        ),
+    ]);
+  }
+  const lease = (await model("/api/processing/claim", { stage: "small" }))
+    .claim;
   const target = newDocument(captures.find((c) => c.id === lease.document.id));
   target.pages = captures.map((c) => newDocument(c).pages[0]);
   const extraction = {
@@ -432,8 +559,16 @@ test("human review edits structured values and detaches a wrong page into the po
     extraction,
     documents: [target],
   });
-  const large = (await model("/api/processing/claim", { stage: "large" }))
-    .claim;
+  const assembled = (
+    await (await isolatedRequest.get(`/api/documents/${target.id}`)).json()
+  ).document;
+  const large = (
+    await model("/api/processing/claim", {
+      stage: "large",
+      document_id: assembled.id,
+      revision: assembled.revision,
+    })
+  ).claim;
   await model("/api/processing/draft", {
     token: large.token,
     model: "gpt-6-astra",

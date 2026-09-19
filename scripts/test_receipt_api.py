@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 from urllib.request import Request
 from receipt_api import ScannerClient, ClientError, OCRRequired, NoRedirect, main
 
@@ -115,6 +115,32 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {"version": 2, "origin": self.client.origin})
         self.assertNotIn(self.client.sites_token, output.getvalue())
         self.assertNotIn(self.client.processing_token, output.getvalue())
+
+    def test_jev_backfill_runs_one_retryable_job_per_request_until_complete(self):
+        output = io.StringIO()
+        self.client.request = Mock(side_effect=[
+            json.dumps({"result": {"status": "complete"}, "remaining": 1, "blocked": 0}).encode(),
+            json.dumps({"result": {"status": "complete"}, "remaining": 0, "blocked": 0}).encode(),
+        ])
+        with patch("receipt_api.credentials", return_value={}), \
+                patch("receipt_api.ScannerClient", return_value=self.client), \
+                patch("sys.argv", ["receipt_api.py", "jev-backfill"]), redirect_stdout(output):
+            main()
+        self.assertEqual(json.loads(output.getvalue())["processed"], 2)
+        self.assertEqual(self.client.request.call_args_list, [
+            call("/api/jev/backfill", b"{}"),
+            call("/api/jev/backfill", b"{}"),
+        ])
+
+    def test_jev_backfill_fails_closed_when_jobs_are_blocked(self):
+        self.client.request = Mock(return_value=json.dumps({
+            "result": None, "remaining": 0, "blocked": 2
+        }).encode())
+        with patch("receipt_api.credentials", return_value={}), \
+                patch("receipt_api.ScannerClient", return_value=self.client), \
+                patch("sys.argv", ["receipt_api.py", "jev-backfill"]):
+            with self.assertRaisesRegex(ClientError, "2 blocked"):
+                main()
 
     def test_snapshot_metadata_avoids_per_image_lookup_but_still_verifies_bytes(self):
         self.client.get = Mock(side_effect=AssertionError('Unexpected metadata request'))

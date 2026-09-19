@@ -1,5 +1,6 @@
 import { detectedReceiptCrop } from "./receipt-crop.ts";
 import { PSM, type Worker, type Page, type ImageLike } from "tesseract.js";
+import type { DocumentPage } from "./documents";
 function linesOf(data: Page) {
   return (data.blocks ?? []).flatMap((b) =>
     b.paragraphs.flatMap((p) =>
@@ -138,3 +139,20 @@ export async function recognizeReceipt(
   };
 }
 export type OcrArtifact = Awaited<ReturnType<typeof recognizeReceipt>>;
+
+export function ocrArtifactMatchesPage(value: OcrArtifact, page: DocumentPage) {
+  const source = value.source as OcrArtifact["source"] & {
+    rotation?: number;
+    region?: { left: number; top: number; width: number; height: number };
+  };
+  if (!source || (source.rotation ?? 0) !== page.rotation) return false;
+  const region = source.region;
+  if (!region) return false;
+  const expected = page.crop ?? [0, 0, source.pixels[0], source.pixels[1]];
+  return (
+    region.left === expected[0] &&
+    region.top === expected[1] &&
+    region.width === expected[2] - expected[0] &&
+    region.height === expected[3] - expected[1]
+  );
+}

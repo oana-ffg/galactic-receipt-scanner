@@ -53,6 +53,17 @@ export interface ProcessingState {
   human_review_revision: number | null;
   needs_reparse: boolean;
   seen_capture_count: number;
+  jev_assessment?: {
+    role: string;
+    probability: number;
+    confidence: number;
+    category_id: string | null;
+    category_probability: number | null;
+    category_confidence: number | null;
+    model: string;
+    assessment_id: string;
+    category_assessment_id: string | null;
+  } | null;
   ocr_comparison?: {
     status:
       | "no-disagreement-detected"

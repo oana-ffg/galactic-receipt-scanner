@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -402,6 +403,7 @@ def main():
     parser.add_argument("--credentials-stdin", action="store_true", help="Read credentials from a secure provider pipe, never a command argument")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    commands.add_parser("jev-backfill", help="Classify every current PP-OCR scan through the Site's pinned Jev model")
     get = commands.add_parser("get", help="Read a relative processing API path")
     get.add_argument("path")
     post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing endpoint")
@@ -442,6 +444,26 @@ def main():
         client.configure_ppocr(profile_path)
     if args.command == "status":
         result = {**client.get("/api/processing/access"), "origin": client.origin}
+    elif args.command == "jev-backfill":
+        processed = 0
+        last = None
+        while True:
+            last = json.loads(client.request("/api/jev/backfill", b"{}"))
+            if last.get("result") is not None:
+                processed += 1
+            remaining = last.get("remaining")
+            if remaining == 0:
+                break
+            if not isinstance(remaining, int) or remaining < 0:
+                raise ClientError("Jev backfill returned an invalid remaining count.")
+            if last.get("result") is None:
+                time.sleep(0.25)
+        blocked = last.get("blocked", 0)
+        if not isinstance(blocked, int) or blocked < 0:
+            raise ClientError("Jev backfill returned an invalid blocked count.")
+        if blocked:
+            raise ClientError(f"Jev backfill left {blocked} blocked job(s); inspect status before retrying.")
+        result = {"complete": True, "processed": processed, "remaining": 0, "blocked": 0, "last": last}
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":
