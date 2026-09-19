@@ -156,3 +156,51 @@ export function ocrArtifactMatchesPage(value: OcrArtifact, page: DocumentPage) {
     region.height === expected[3] - expected[1]
   );
 }
+
+/**
+ * Jev consumes transcription only, not the OCR PDF layer. A detector-selected OCR
+ * subregion is valid text evidence for an uncropped page. For an explicitly cropped
+ * page, keep the OCR region inside that reviewed crop so unrelated source content
+ * cannot leak into classification.
+ */
+export function ocrTextArtifactMatchesPage(
+  value: OcrArtifact,
+  page: DocumentPage,
+) {
+  const source = value.source as OcrArtifact["source"] & {
+    rotation?: number;
+    region?: { left: number; top: number; width: number; height: number };
+  };
+  if (!source || (source.rotation ?? 0) !== page.rotation) return false;
+  const pixels = Array.isArray(source.pixels) ? source.pixels : [];
+  const [pixelWidth, pixelHeight] = pixels;
+  const region = source.region;
+  if (
+    pixels.length !== 2 ||
+    !region ||
+    ![
+      pixelWidth,
+      pixelHeight,
+      region.left,
+      region.top,
+      region.width,
+      region.height,
+    ].every(Number.isFinite) ||
+    pixelWidth <= 0 ||
+    pixelHeight <= 0 ||
+    region.left < 0 ||
+    region.top < 0 ||
+    region.width <= 0 ||
+    region.height <= 0 ||
+    region.left + region.width > pixelWidth ||
+    region.top + region.height > pixelHeight
+  )
+    return false;
+  if (page.crop === null) return true;
+  return (
+    region.left >= page.crop[0] &&
+    region.top >= page.crop[1] &&
+    region.left + region.width <= page.crop[2] &&
+    region.top + region.height <= page.crop[3]
+  );
+}

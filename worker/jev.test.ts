@@ -3,6 +3,7 @@ import { origin, ownerHeaders, runtime } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
 import {
   loadPurchaseCategoryChoices,
+  documentEvidence,
   jevSummary,
   mergeDocuments,
   pageFingerprint,
@@ -10,7 +11,10 @@ import {
   queueJevJob,
   shouldAutoMerge,
 } from "./jev";
-import { ocrArtifactMatchesPage } from "../web/ocr-data";
+import {
+  ocrArtifactMatchesPage,
+  ocrTextArtifactMatchesPage,
+} from "../web/ocr-data";
 
 let mf: Awaited<ReturnType<typeof runtime>>;
 
@@ -52,6 +56,7 @@ async function seedHistoricalOcr(
   capture: any,
   text: string,
   createdAt: string,
+  region = { left: 0, top: 0, width: 1000, height: 1600 },
 ) {
   const artifact = {
     source: {
@@ -59,7 +64,7 @@ async function seedHistoricalOcr(
       sha256: capture.sha256,
       pixels: [1000, 1600],
       rotation: 0,
-      region: { left: 0, top: 0, width: 1000, height: 1600 },
+      region,
     },
     provenance: { engine: "PP-OCRv6" },
     text,
@@ -229,6 +234,39 @@ it("requires PP OCR to match the exact full-page or cropped layout", () => {
   const cropped = { ...fullPage, crop: [10, 20, 900, 1500] } as any;
   artifact.source.region = { left: 10, top: 20, width: 890, height: 1480 };
   expect(ocrArtifactMatchesPage(artifact, cropped)).toBe(true);
+});
+
+it("accepts safe detector subregions as Jev text evidence without weakening exact PDF layout checks", () => {
+  const fullPage = {
+    captureId: "capture",
+    sha256: "a".repeat(64),
+    crop: null,
+    rotation: 0,
+  } as any;
+  const artifact = {
+    source: {
+      captureId: "capture",
+      sha256: "a".repeat(64),
+      pixels: [1000, 1600],
+      rotation: 0,
+      region: { left: 100, top: 100, width: 800, height: 1300 },
+    },
+  } as any;
+  expect(ocrArtifactMatchesPage(artifact, fullPage)).toBe(false);
+  expect(ocrTextArtifactMatchesPage(artifact, fullPage)).toBe(true);
+
+  const containingCrop = {
+    ...fullPage,
+    crop: [50, 50, 950, 1500],
+  } as any;
+  expect(ocrTextArtifactMatchesPage(artifact, containingCrop)).toBe(true);
+  artifact.source.region = { left: 25, top: 100, width: 875, height: 1300 };
+  expect(ocrTextArtifactMatchesPage(artifact, containingCrop)).toBe(false);
+  artifact.source.rotation = 90;
+  expect(ocrTextArtifactMatchesPage(artifact, fullPage)).toBe(false);
+  artifact.source.rotation = 0;
+  artifact.source.pixels = {};
+  expect(ocrTextArtifactMatchesPage(artifact, fullPage)).toBe(false);
 });
 
 it("keeps existing page groups intact and carries annotations and review reasons when merging payment evidence", () => {
@@ -628,6 +666,191 @@ it("discovers and processes only one historical OCR artifact per backfill reques
   expect(
     await db.prepare("SELECT COUNT(*) AS count FROM jev_jobs").first(),
   ).toEqual({ count: 2 });
+});
+
+it("re-evaluates legacy ineligible jobs and classifies safe auto-cropped PP text", async () => {
+  const processingToken = `rsc_${"r".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const capture = await saveCapture();
+  const digest = await seedHistoricalOcr(
+    capture,
+    "Synthetic shop\nSynthetic item 12,34\nTOTAL 12,34",
+    "2026-01-01T00:00:00.000Z",
+    { left: 100, top: 100, width: 800, height: 1300 },
+  );
+  const db = await mf.getD1Database("DB");
+  await queueJevJob({ DB: db } as any, capture.id, digest);
+  await db
+    .prepare(
+      "UPDATE jev_jobs SET status='ineligible',eligibility_version=1,ineligible_reason=NULL",
+    )
+    .run();
+  expect(
+    await db.prepare("SELECT status,eligibility_version FROM jev_jobs").first(),
+  ).toEqual({ status: "ineligible", eligibility_version: 1 });
+
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 0,
+    blocked: 0,
+  });
+  expect(
+    await db
+      .prepare(
+        "SELECT status,eligibility_version,ineligible_reason FROM jev_jobs",
+      )
+      .first(),
+  ).toEqual({
+    status: "complete",
+    eligibility_version: 2,
+    ineligible_reason: null,
+  });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_page_heads").first(),
+  ).toEqual({ count: 1 });
+});
+
+it("keeps completed Jev evidence pinned when a newer legacy artifact is rejected", async () => {
+  const processingToken = `rsc_${"s".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const capture = await saveCapture();
+  const completed = await seedHistoricalOcr(
+    capture,
+    "Completed synthetic shop\nTOTAL 12,34",
+    "2026-01-01T00:00:00.000Z",
+  );
+  const db = await mf.getD1Database("DB");
+  await queueJevJob({ DB: db } as any, capture.id, completed);
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 0,
+    blocked: 0,
+  });
+
+  const rejected = await seedHistoricalOcr(
+    capture,
+    "Newer rejected synthetic OCR",
+    "2026-01-01T00:00:01.000Z",
+    { left: 100, top: 100, width: 800, height: 1300 },
+  );
+  await queueJevJob({ DB: db } as any, capture.id, rejected);
+  await db
+    .prepare(
+      "UPDATE jev_jobs SET status='ineligible',eligibility_version=1,ineligible_reason=NULL WHERE ocr_sha256=?",
+    )
+    .bind(rejected)
+    .run();
+
+  expect(await runBackfill(processingToken)).toEqual({
+    result: null,
+    remaining: 0,
+    blocked: 0,
+  });
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT ocr_sha256,status,eligibility_version FROM jev_jobs ORDER BY ocr_sha256",
+        )
+        .all()
+    ).results,
+  ).toEqual(
+    [
+      { ocr_sha256: rejected, status: "ineligible", eligibility_version: 1 },
+      { ocr_sha256: completed, status: "complete", eligibility_version: 2 },
+    ].sort((a, b) => a.ocr_sha256.localeCompare(b.ocr_sha256)),
+  );
+  const stored = await mf.dispatchFetch(
+    `${origin}/api/documents/${capture.id}`,
+    { headers: ownerHeaders },
+  );
+  const document = (await stored.json<any>()).document;
+  expect(
+    await jevSummary(
+      { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as any,
+      document,
+    ),
+  ).toMatchObject({ ready: true });
+  expect(
+    await db.prepare("SELECT ocr_sha256 FROM jev_page_heads").first(),
+  ).toEqual({ ocr_sha256: completed });
+  expect(
+    await documentEvidence(
+      { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as any,
+      document,
+    ),
+  ).toMatchObject({
+    ocr: { pins: [{ capture_id: capture.id, ocr_sha256: completed }] },
+  });
+});
+
+it("retries only the newest legacy artifact and leaves its older sibling untouched", async () => {
+  const processingToken = `rsc_${"t".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const capture = await saveCapture();
+  const older = await seedHistoricalOcr(
+    capture,
+    "Older synthetic shop\nTOTAL 10,00",
+    "2026-01-01T00:00:00.000Z",
+    { left: 100, top: 100, width: 800, height: 1300 },
+  );
+  const newer = await seedHistoricalOcr(
+    capture,
+    "Newer synthetic shop\nTOTAL 12,34",
+    "2026-01-01T00:00:01.000Z",
+    { left: 100, top: 100, width: 800, height: 1300 },
+  );
+  const db = await mf.getD1Database("DB");
+  await queueJevJob({ DB: db } as any, capture.id, older);
+  await queueJevJob({ DB: db } as any, capture.id, newer);
+  await db
+    .prepare(
+      "UPDATE jev_jobs SET status='ineligible',eligibility_version=1,ineligible_reason=NULL",
+    )
+    .run();
+
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 0,
+    blocked: 0,
+  });
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT ocr_sha256,status,eligibility_version FROM jev_jobs ORDER BY ocr_sha256",
+        )
+        .all()
+    ).results,
+  ).toEqual(
+    [
+      { ocr_sha256: older, status: "ineligible", eligibility_version: 1 },
+      { ocr_sha256: newer, status: "complete", eligibility_version: 2 },
+    ].sort((a, b) => a.ocr_sha256.localeCompare(b.ocr_sha256)),
+  );
+  expect(
+    await db.prepare("SELECT ocr_sha256 FROM jev_page_heads").first(),
+  ).toEqual({ ocr_sha256: newer });
+  expect(await runBackfill(processingToken)).toEqual({
+    result: null,
+    remaining: 0,
+    blocked: 0,
+  });
 });
 
 it("backfills a historical receipt before its later matching payment slip", async () => {

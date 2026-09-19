@@ -295,6 +295,8 @@ export const jevJobs = sqliteTable(
     ocr_sha256: text("ocr_sha256").notNull(),
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
+    eligibility_version: integer("eligibility_version").notNull().default(1),
+    ineligible_reason: text("ineligible_reason"),
     run_token: text("run_token"),
     association_progress: text("association_progress"),
     last_error: text("last_error"),

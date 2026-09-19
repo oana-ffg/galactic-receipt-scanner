@@ -6,7 +6,7 @@ import {
   retargetAbsorbedAliases,
   type ReceiptDocument,
 } from "../web/documents";
-import { ocrArtifactMatchesPage, type OcrArtifact } from "../web/ocr-data";
+import { ocrTextArtifactMatchesPage, type OcrArtifact } from "../web/ocr-data";
 import { documentRoute, storedDocuments } from "./documents";
 import { HttpError, json, requireThat } from "./http";
 
@@ -15,6 +15,7 @@ export const JEV_MODEL = "jev-1.13.0";
 const MAX_JEV_TEXT = 24_000;
 const AUTO_MATCH_PROBABILITY = 0.9;
 const AUTO_MATCH_CONFIDENCE = 0.75;
+const JEV_ELIGIBILITY_VERSION = 2;
 
 export const pageRoles = [
   "receipt",
@@ -264,35 +265,39 @@ function records(stored: ReceiptDocument[], captures: Capture[]) {
   ];
 }
 
-async function latestPpOcr(
+async function pinnedPpOcr(
   env: Env,
   page: ReceiptDocument["pages"][number],
+  ocrSha256: string,
 ): Promise<{ sha256: string; value: OcrArtifact } | null> {
-  const rows = await env.DB.prepare(
-    "SELECT key,sha256 FROM artifacts WHERE capture_id=? AND kind='ocr' ORDER BY created_at DESC,key DESC",
+  const row = await env.DB.prepare(
+    "SELECT key,sha256 FROM artifacts WHERE capture_id=? AND kind='ocr' AND sha256=?",
   )
-    .bind(page.captureId)
-    .all<{ key: string; sha256: string }>();
-  for (const row of rows.results) {
-    const object = await env.BUCKET.get(row.key);
-    if (!object) continue;
-    const value = await object.json<OcrArtifact>();
-    if (
-      value?.provenance?.engine === "PP-OCRv6" &&
-      value.source?.captureId === page.captureId &&
-      value.source?.sha256 === page.sha256 &&
-      ocrArtifactMatchesPage(value, page) &&
-      typeof value.text === "string"
-    )
-      return { sha256: row.sha256, value };
-  }
-  return null;
+    .bind(page.captureId, ocrSha256)
+    .first<{ key: string; sha256: string }>();
+  if (!row) return null;
+  const object = await env.BUCKET.get(row.key);
+  if (!object) return null;
+  const value = await object.json<OcrArtifact>();
+  return value?.provenance?.engine === "PP-OCRv6" &&
+    value.source?.captureId === page.captureId &&
+    value.source?.sha256 === page.sha256 &&
+    ocrTextArtifactMatchesPage(value, page) &&
+    typeof value.text === "string"
+    ? { sha256: row.sha256, value }
+    : null;
 }
 
-async function documentOcr(env: Env, document: ReceiptDocument) {
+async function documentOcr(
+  env: Env,
+  document: ReceiptDocument,
+  heads: PageHead[],
+) {
   const pins: { capture_id: string; ocr_sha256: string; text: string }[] = [];
-  for (const page of document.pages) {
-    const found = await latestPpOcr(env, page);
+  for (const [index, page] of document.pages.entries()) {
+    const head = heads[index];
+    if (!head || head.capture_id !== page.captureId) return null;
+    const found = await pinnedPpOcr(env, page, head.ocr_sha256);
     if (!found) return null;
     pins.push({
       capture_id: page.captureId,
@@ -433,12 +438,12 @@ async function pageHeads(env: Env, document: ReceiptDocument) {
     .filter((row): row is PageHead => !!row);
 }
 
-async function documentEvidence(env: Env, document: ReceiptDocument) {
-  const ocr = await documentOcr(env, document);
+export async function documentEvidence(env: Env, document: ReceiptDocument) {
   const heads = await pageHeads(env, document);
+  if (heads.length !== document.pages.length) return null;
+  const ocr = await documentOcr(env, document, heads);
   if (
     !ocr ||
-    heads.length !== document.pages.length ||
     document.pages.some((page, index) => {
       const head = heads[index];
       const pin = ocr.pins[index];
@@ -1017,9 +1022,9 @@ export async function queueJevJob(
   const id = await sha256({ captureId, ocrSha256 });
   const now = new Date().toISOString();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO jev_jobs(id,capture_id,ocr_sha256,status,attempts,last_error,created_at,updated_at) VALUES(?,?,?,'pending',0,NULL,?,?)",
+    "INSERT OR IGNORE INTO jev_jobs(id,capture_id,ocr_sha256,status,attempts,eligibility_version,ineligible_reason,last_error,created_at,updated_at) VALUES(?,?,?,'pending',0,?,NULL,NULL,?,?)",
   )
-    .bind(id, captureId, ocrSha256, now, now)
+    .bind(id, captureId, ocrSha256, JEV_ELIGIBILITY_VERSION, now, now)
     .run();
   return id;
 }
@@ -1038,27 +1043,32 @@ async function processJob(
 ) {
   const captures = await loadCaptures();
   const capture = captures.find((item) => item.id === job.capture_id);
-  if (!capture?.is_current) return { eligible: false };
+  if (!capture?.is_current)
+    return { eligible: false, ineligible_reason: "capture_not_current" };
   const artifact = await env.DB.prepare(
     "SELECT key FROM artifacts WHERE capture_id=? AND kind='ocr' AND sha256=?",
   )
     .bind(job.capture_id, job.ocr_sha256)
     .first<{ key: string }>();
-  if (!artifact) return { eligible: false };
+  if (!artifact)
+    return { eligible: false, ineligible_reason: "ocr_artifact_missing" };
   const object = await env.BUCKET.get(artifact.key);
   requireThat(object, 503, "OCR artifact is unavailable.");
   const value = await object.json<OcrArtifact>();
-  if (value?.provenance?.engine !== "PP-OCRv6") return { eligible: false };
+  if (value?.provenance?.engine !== "PP-OCRv6")
+    return { eligible: false, ineligible_reason: "ppocr_required" };
   if (
     value.source?.captureId !== capture.id ||
     value.source?.sha256 !== capture.sha256
   )
-    return { eligible: false };
+    return { eligible: false, ineligible_reason: "source_mismatch" };
   const initialDocument = await currentDocument(env, captures, capture.id);
   const page = initialDocument?.pages.find(
     (item) => item.captureId === capture.id,
   );
-  if (!page || !ocrArtifactMatchesPage(value, page)) return { eligible: false };
+  if (!page) return { eligible: false, ineligible_reason: "page_missing" };
+  if (!ocrTextArtifactMatchesPage(value, page))
+    return { eligible: false, ineligible_reason: "ocr_region_mismatch" };
   const budget: JevBudget = { remaining: 3 };
   try {
     await classifyPage(env, capture, job.ocr_sha256, value, budget);
@@ -1072,7 +1082,11 @@ async function processJob(
     );
     if (association.deferred) return { eligible: true, deferred: true };
     const document = association.document;
-    if (!document) return { eligible: false };
+    if (!document)
+      return {
+        eligible: false,
+        ineligible_reason: "document_missing_after_association",
+      };
     const classification = await classifyDocument(env, document, budget);
     return {
       eligible: true,
@@ -1104,9 +1118,9 @@ export async function runJevJob(
   const runToken = crypto.randomUUID();
   const now = new Date().toISOString();
   const job = await env.DB.prepare(
-    "UPDATE jev_jobs SET status='running',attempts=attempts+1,run_token=?,last_error=NULL,updated_at=? WHERE id=? AND (status='pending' OR (status='failed' AND attempts<3)) RETURNING id,capture_id,ocr_sha256,status,attempts,run_token,association_progress",
+    "UPDATE jev_jobs SET status='running',attempts=attempts+1,eligibility_version=?,ineligible_reason=NULL,run_token=?,last_error=NULL,updated_at=? WHERE id=? AND (status='pending' OR (status='failed' AND attempts<3)) RETURNING id,capture_id,ocr_sha256,status,attempts,run_token,association_progress",
   )
-    .bind(runToken, now, id)
+    .bind(JEV_ELIGIBILITY_VERSION, runToken, now, id)
     .first<Job>();
   if (!job) {
     const current = await env.DB.prepare(
@@ -1141,9 +1155,15 @@ export async function runJevJob(
     }
     const status = result.eligible ? "complete" : "ineligible";
     const saved = await env.DB.prepare(
-      "UPDATE jev_jobs SET status=?,association_progress=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
+      "UPDATE jev_jobs SET status=?,ineligible_reason=?,association_progress=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
     )
-      .bind(status, new Date().toISOString(), id, runToken)
+      .bind(
+        status,
+        result.eligible ? null : result.ineligible_reason,
+        new Date().toISOString(),
+        id,
+        runToken,
+      )
       .first<{ status: string }>();
     if (!saved) {
       const current = await env.DB.prepare(
@@ -1362,9 +1382,13 @@ export async function jevRoute(
     const counts = await env.DB.prepare(
       "SELECT status,COUNT(*) AS count FROM jev_jobs GROUP BY status",
     ).all<{ status: string; count: number }>();
+    const ineligibleReasons = await env.DB.prepare(
+      "SELECT COALESCE(ineligible_reason,'unspecified') AS reason,COUNT(*) AS count FROM jev_jobs WHERE status='ineligible' GROUP BY COALESCE(ineligible_reason,'unspecified') ORDER BY reason",
+    ).all<{ reason: string; count: number }>();
     return json({
       configured: Boolean(env.TYPESAFE_API_KEY),
       jobs: counts.results,
+      ineligible_reasons: ineligibleReasons.results,
     });
   }
   if (url.pathname === "/api/jev/documents" && request.method === "GET") {
@@ -1469,6 +1493,26 @@ export async function jevRoute(
     const running = await env.DB.prepare(
       "SELECT 1 AS present FROM jev_jobs WHERE status='running' LIMIT 1",
     ).first<{ present: number }>();
+    if (!job && !running) {
+      const legacy = await env.DB.prepare(
+        "SELECT candidate.id FROM jev_jobs candidate JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256 JOIN captures capture ON capture.id=candidate.capture_id WHERE candidate.status='ineligible' AND candidate.eligibility_version<? AND NOT EXISTS (SELECT 1 FROM jev_jobs completed WHERE completed.capture_id=candidate.capture_id AND completed.status='complete') AND NOT EXISTS (SELECT 1 FROM jev_jobs sibling JOIN artifacts sibling_artifact ON sibling_artifact.capture_id=sibling.capture_id AND sibling_artifact.kind='ocr' AND sibling_artifact.sha256=sibling.ocr_sha256 WHERE sibling.capture_id=candidate.capture_id AND sibling.status='ineligible' AND sibling.eligibility_version<? AND (sibling_artifact.created_at>artifact.created_at OR (sibling_artifact.created_at=artifact.created_at AND sibling_artifact.key>artifact.key))) ORDER BY capture.created_at,capture.id LIMIT 1",
+      )
+        .bind(JEV_ELIGIBILITY_VERSION, JEV_ELIGIBILITY_VERSION)
+        .first<{ id: string }>();
+      if (legacy) {
+        const activated = await env.DB.prepare(
+          "UPDATE jev_jobs SET status='pending',attempts=0,eligibility_version=?,ineligible_reason=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='ineligible' AND eligibility_version<? RETURNING id",
+        )
+          .bind(
+            JEV_ELIGIBILITY_VERSION,
+            new Date().toISOString(),
+            legacy.id,
+            JEV_ELIGIBILITY_VERSION,
+          )
+          .first<{ id: string }>();
+        if (activated) job = activated;
+      }
+    }
     const backfillCandidates = async () => {
       const artifacts = (
         await env.DB.prepare(

@@ -141,6 +141,13 @@
       "when": 1789843174632,
       "tag": "0019_chief_lady_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1789858196539,
+      "tag": "0020_famous_lockheed",
+      "breakpoints": true
     }
   ]
 }
