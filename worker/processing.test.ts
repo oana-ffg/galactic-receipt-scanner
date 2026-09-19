@@ -323,6 +323,203 @@ it("allows one claim, saves structured amounts atomically, and makes retries ide
   expect(await claim("large")).toBeNull();
   expect((await req(`/api/files/${c.id}/raw`)).status).toBe(200);
 });
+it("retargets merged and duplicate aliases when their retained document is absorbed", async () => {
+  const leafCapture = await capture();
+  const leafLease = await claim();
+  const inheritedReason = "Synthetic leaf source still needs review.";
+  await ok(
+    "/api/processing/submit",
+    {
+      token: leafLease.token,
+      model: "gpt-5.6-luna",
+      extraction: {
+        ...extraction(),
+        certainty: "medium",
+        uncertainties: [inheritedReason],
+      },
+    },
+    true,
+  );
+
+  const donorCapture = await capture();
+  const donorLease = await claim();
+  const donor = (await ok(`/api/documents/${donorCapture.id}`)).document;
+  const leaf = (await ok(`/api/documents/${leafCapture.id}`)).document;
+  donor.pages.push(...leaf.pages);
+  leaf.pages = [];
+  leaf.mergedInto = donor.id;
+  for (const document of [donor, leaf]) {
+    document.evidence = "Synthetic first whole-document merge.";
+    document.checks = {
+      visual: false,
+      transcription: false,
+      grouping: false,
+      pdf: false,
+    };
+    document.invoice = null;
+    document.reviewedPdfSha256 = null;
+  }
+  await ok(
+    "/api/processing/submit",
+    {
+      token: donorLease.token,
+      model: "gpt-5.6-luna",
+      extraction: {
+        ...extraction(),
+        certainty: "medium",
+        uncertainties: [inheritedReason],
+      },
+      documents: [donor, leaf],
+    },
+    true,
+  );
+
+  const duplicateCapture = await capture();
+  const duplicateLease = await claim();
+  const duplicate = (await ok(`/api/documents/${duplicateCapture.id}`))
+    .document;
+  duplicate.duplicateOf = donor.id;
+  duplicate.evidence = "Synthetic duplicate relationship.";
+  await ok(
+    "/api/processing/submit",
+    {
+      token: duplicateLease.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(),
+      documents: [duplicate],
+    },
+    true,
+  );
+
+  const targetCapture = await capture();
+  const targetLease = await claim();
+  const target = (await ok(`/api/documents/${targetCapture.id}`)).document;
+  const absorbed = (await ok(`/api/documents/${donorCapture.id}`)).document;
+  target.pages.push(...absorbed.pages);
+  absorbed.pages = [];
+  absorbed.mergedInto = target.id;
+  for (const document of [target, absorbed]) {
+    document.evidence = "Synthetic second whole-document merge.";
+    document.checks = {
+      visual: false,
+      transcription: false,
+      grouping: false,
+      pdf: false,
+    };
+    document.invoice = null;
+    document.reviewedPdfSha256 = null;
+  }
+  const finalSubmit = {
+    token: targetLease.token,
+    model: "gpt-5.6-luna",
+    extraction: extraction(),
+    documents: [target, absorbed],
+  };
+  const result = await ok("/api/processing/submit", finalSubmit, true);
+  expect(result.saved).toHaveLength(4);
+
+  const savedTarget = (await ok(`/api/documents/${target.id}`)).document;
+  const savedDonor = (await ok(`/api/documents/${absorbed.id}`)).document;
+  const savedLeaf = (await ok(`/api/documents/${leaf.id}`)).document;
+  const savedDuplicate = (await ok(`/api/documents/${duplicate.id}`)).document;
+  expect(savedDonor.mergedInto).toBe(savedTarget.id);
+  expect(savedLeaf.mergedInto).toBe(savedTarget.id);
+  expect(savedDuplicate.duplicateOf).toBe(savedTarget.id);
+  expect(savedTarget.uncertainties).toContain(inheritedReason);
+  expect(savedLeaf.pages).toEqual([]);
+  expect(savedDuplicate.pages).toHaveLength(1);
+  expect(await ok("/api/processing/submit", finalSubmit, true)).toEqual({
+    saved: [{ id: savedTarget.id, revision: savedTarget.revision }],
+    replayed: true,
+  });
+  expect((await ok(`/api/documents/${savedDonor.id}`)).document.revision).toBe(
+    savedDonor.revision,
+  );
+  expect((await ok(`/api/documents/${savedLeaf.id}`)).document.revision).toBe(
+    savedLeaf.revision,
+  );
+  expect(
+    (await ok(`/api/documents/${savedDuplicate.id}`)).document.revision,
+  ).toBe(savedDuplicate.revision);
+});
+it("rejects alias expansion beyond the 100-document atomic-save limit", async () => {
+  const donorCapture = await capture();
+  const donorLease = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: donorLease.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(),
+    },
+    true,
+  );
+  const donor = (await ok(`/api/documents/${donorCapture.id}`)).document;
+
+  const db = await mf.getD1Database("DB");
+  const aliases = Array.from({ length: 99 }, () => ({
+    ...structuredClone(donor),
+    id: crypto.randomUUID(),
+    revision: 1,
+    pages: [],
+    mergedInto: donor.id,
+    duplicateOf: null,
+    evidence: "Synthetic merged alias evidence.",
+  }));
+  const at = new Date().toISOString();
+  await db.batch(
+    aliases.flatMap((alias) => [
+      db
+        .prepare(
+          "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+        )
+        .bind(alias.id, alias.revision, JSON.stringify(alias), at),
+      db
+        .prepare("INSERT INTO document_heads(id,revision) VALUES(?,?)")
+        .bind(alias.id, alias.revision),
+    ]),
+  );
+
+  const targetCapture = await capture();
+  const targetLease = await claim();
+  const target = (await ok(`/api/documents/${targetCapture.id}`)).document;
+  const absorbed = (await ok(`/api/documents/${donor.id}`)).document;
+  target.pages.push(...absorbed.pages);
+  absorbed.pages = [];
+  absorbed.mergedInto = target.id;
+  for (const document of [target, absorbed]) {
+    document.evidence = "Synthetic over-limit whole-document merge.";
+    document.checks = {
+      visual: false,
+      transcription: false,
+      grouping: false,
+      pdf: false,
+    };
+    document.invoice = null;
+    document.reviewedPdfSha256 = null;
+  }
+  const response = await req(
+    "/api/processing/submit",
+    {
+      token: targetLease.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(),
+      documents: [target, absorbed],
+    },
+    true,
+  );
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    detail:
+      "The server cannot safely retarget more than 100 affected documents in one merge; preserve the claim for owner-reviewed repair.",
+  });
+  expect(
+    (await ok(`/api/documents/${absorbed.id}`)).document.mergedInto,
+  ).toBeNull();
+  expect(
+    (await ok(`/api/documents/${aliases[0].id}`)).document.mergedInto,
+  ).toBe(donor.id);
+});
 it("targets an awaiting-pages review without falling back to the queue or bypassing the lease", async () => {
   const first = await capture(),
     cat = await category(),

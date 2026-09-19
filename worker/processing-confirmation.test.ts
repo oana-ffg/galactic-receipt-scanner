@@ -371,6 +371,30 @@ it("preserves inherited merge notes when reassessment drops them without rewriti
   const donor = (await ok(`/api/documents/${source.id}`, undefined, false))
     .document;
   const priorSourceRevision = donor.revision;
+  const alias = {
+    ...structuredClone(donor),
+    id: crypto.randomUUID(),
+    revision: 1,
+    pages: [],
+    mergedInto: donor.id,
+    evidence: "Synthetic earlier merge evidence.",
+  };
+  const db = await mf.getD1Database("DB");
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+      )
+      .bind(
+        alias.id,
+        alias.revision,
+        JSON.stringify(alias),
+        new Date().toISOString(),
+      ),
+    db
+      .prepare("INSERT INTO document_heads(id,revision) VALUES(?,?)")
+      .bind(alias.id, alias.revision),
+  ]);
   retained.pages.push(...donor.pages);
   retained.pages.forEach((page: any) => {
     page.crop = [0, 0, 1400, 2200];
@@ -457,6 +481,11 @@ it("preserves inherited merge notes when reassessment drops them without rewriti
     .document;
   expect(moved.mergedInto).toBe(target.id);
   expect(moved.pages).toEqual([]);
+  const retargetedAlias = (
+    await ok(`/api/documents/${alias.id}`, undefined, false)
+  ).document;
+  expect(retargetedAlias.mergedInto).toBe(target.id);
+  expect(retargetedAlias.revision).toBe(alias.revision + 1);
   const history = (
     await ok(
       `/api/processing/readings?document_id=${target.id}`,
@@ -469,7 +498,6 @@ it("preserves inherited merge notes when reassessment drops them without rewriti
   );
   expect(history[0].updated.extraction).toEqual(final);
   expect(history[0].confirmation.ppocr.artifacts).toEqual(pins);
-  const db = await mf.getD1Database("DB");
   const prior = await db
     .prepare(
       "SELECT payload FROM document_versions WHERE document_id=? AND revision=?",

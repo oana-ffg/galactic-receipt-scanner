@@ -26,6 +26,7 @@ import {
 } from "./http";
 
 const HASH = /^[a-f0-9]{64}$/;
+export const MAX_DOCUMENT_CHANGES = 100;
 type FileRow = {
   key: string;
   document_id: string;
@@ -422,7 +423,7 @@ export async function documentRoute(
     requireThat(
       Array.isArray(input.documents) &&
         input.documents.length > 0 &&
-        input.documents.length <= 100,
+        input.documents.length <= MAX_DOCUMENT_CHANGES,
       400,
       "Save 1 to 100 document changes together.",
     );

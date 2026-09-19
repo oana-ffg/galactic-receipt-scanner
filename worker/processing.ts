@@ -24,7 +24,11 @@ import {
   type ProcessingState,
 } from "../web/extraction";
 import { bodyJson, digest, HttpError, json, requireThat, UUID } from "./http";
-import { documentRoute, storedDocuments } from "./documents";
+import {
+  documentRoute,
+  MAX_DOCUMENT_CHANGES,
+  storedDocuments,
+} from "./documents";
 
 type Lock = {
   token: string;
@@ -36,6 +40,7 @@ type Lock = {
 };
 const STAGE_MODEL = { small: "gpt-5.6-luna", large: "gpt-6-astra" } as const;
 const LEASE_MS = 20 * 60 * 1000;
+const MAX_SUBMITTED_DOCUMENTS = 20;
 async function activeLock(env: Env) {
   return env.DB.prepare(
     "SELECT * FROM processing_lock WHERE id=1 AND expires > unixepoch()*1000",
@@ -162,6 +167,34 @@ function applyExtraction(
   };
   d.reviewedPdfSha256 = null;
 }
+
+function retargetAbsorbedAliases(
+  changed: ReceiptDocument[],
+  stored: ReceiptDocument[],
+  targetId: string,
+) {
+  const absorbed = new Set(
+    changed
+      .filter((document) => document.mergedInto === targetId)
+      .map((document) => document.id),
+  );
+  if (!absorbed.size) return;
+  const changedIds = new Set(changed.map((document) => document.id));
+  for (const previous of stored) {
+    if (changedIds.has(previous.id)) continue;
+    if (
+      !absorbed.has(previous.mergedInto ?? "") &&
+      !absorbed.has(previous.duplicateOf ?? "")
+    )
+      continue;
+    const alias = structuredClone(previous);
+    if (absorbed.has(alias.mergedInto ?? "")) alias.mergedInto = targetId;
+    if (absorbed.has(alias.duplicateOf ?? "")) alias.duplicateOf = targetId;
+    changed.push(alias);
+    changedIds.add(alias.id);
+  }
+}
+
 async function save(
   request: Request,
   env: Env,
@@ -1127,7 +1160,9 @@ export async function processingRoute(
         ? [structuredClone(previous)]
         : (structuredClone(input.documents) as ReceiptDocument[]);
     requireThat(
-      Array.isArray(changed) && changed.length > 0 && changed.length <= 20,
+      Array.isArray(changed) &&
+        changed.length > 0 &&
+        changed.length <= MAX_SUBMITTED_DOCUMENTS,
       400,
       "Submit at most 20 affected documents.",
     );
@@ -1136,6 +1171,15 @@ export async function processingRoute(
       d && d.revision === lock.revision && !d.mergedInto,
       400,
       "Keep the claimed document as the retained target.",
+    );
+    // Existing aliases must continue to point directly at the retained record.
+    // Normalize them inside this leased atomic save so a whole-document merge
+    // cannot create leaf -> absorbed donor -> target relationship chains.
+    retargetAbsorbedAliases(changed, docs, d.id);
+    requireThat(
+      changed.length <= MAX_DOCUMENT_CHANGES,
+      400,
+      "The server cannot safely retarget more than 100 affected documents in one merge; preserve the claim for owner-reviewed repair.",
     );
     const rejected = (
       await env.DB.prepare(
