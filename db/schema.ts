@@ -296,6 +296,7 @@ export const jevJobs = sqliteTable(
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
     run_token: text("run_token"),
+    association_progress: text("association_progress"),
     last_error: text("last_error"),
     created_at: text("created_at").notNull(),
     updated_at: text("updated_at").notNull(),

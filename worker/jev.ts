@@ -45,6 +45,10 @@ type JevResponse = {
   answers: Record<string, ChoiceAnswer>;
   usage?: { input_tokens?: number; output_tokens?: number };
 };
+
+type JevBudget = { remaining: number };
+
+class JevCheckpoint extends Error {}
 type PageHead = {
   capture_id: string;
   source_sha256: string;
@@ -135,7 +139,12 @@ async function callJev(
     string,
     { type: "choice"; instructions: string; criteria: Record<string, string> }
   >,
+  budget?: JevBudget,
 ): Promise<JevResponse> {
+  if (budget) {
+    if (budget.remaining <= 0) throw new JevCheckpoint();
+    budget.remaining -= 1;
+  }
   requireThat(env.TYPESAFE_API_KEY, 503, "Jev is not configured.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
@@ -324,6 +333,7 @@ async function classifyPage(
   capture: Capture,
   ocrSha256: string,
   value: OcrArtifact,
+  budget: JevBudget,
 ): Promise<PageHead> {
   const text = value.text.trim();
   const criteria = {
@@ -372,6 +382,7 @@ async function classifyPage(
             criteria,
           },
         },
+        budget,
       );
     },
     (result) => validateChoice(result.answers.page_role, pageRoles),
@@ -447,6 +458,7 @@ async function compareDocuments(
   env: Env,
   current: ReceiptDocument,
   candidate: ReceiptDocument,
+  budget: JevBudget,
 ) {
   const currentEvidence = await documentEvidence(env, current);
   const candidateEvidence = await documentEvidence(env, candidate);
@@ -472,21 +484,26 @@ async function compareDocuments(
     { id: current.id, revision: current.revision },
     { id: candidate.id, revision: candidate.revision },
     () =>
-      callJev(env, input, {
-        relationship: {
-          type: "choice",
-          instructions:
-            "Classify the relationship between these two scanned documents.",
-          criteria: {
-            continuation:
-              "They are different pages or sections of the same receipt or financial document, excluding separate payment evidence.",
-            payment_match:
-              "One is purchase documentation and the other is payment evidence for that same transaction.",
-            unrelated:
-              "They do not belong to the same transaction or document.",
+      callJev(
+        env,
+        input,
+        {
+          relationship: {
+            type: "choice",
+            instructions:
+              "Classify the relationship between these two scanned documents.",
+            criteria: {
+              continuation:
+                "They are different pages or sections of the same receipt or financial document, excluding separate payment evidence.",
+              payment_match:
+                "One is purchase documentation and the other is payment evidence for that same transaction.",
+              unrelated:
+                "They do not belong to the same transaction or document.",
+            },
           },
         },
-      }),
+        budget,
+      ),
     (result) =>
       validateChoice(result.answers.relationship, [
         "continuation",
@@ -497,7 +514,11 @@ async function compareDocuments(
   const result = saved.result;
   const answer = result.answers.relationship;
   validateChoice(answer, ["continuation", "payment_match", "unrelated"]);
-  return { answer, assessment_id: saved.id, model: result.model };
+  return {
+    answer,
+    assessment_id: saved.id,
+    model: result.model,
+  };
 }
 
 function invalidateProcessing(document: ReceiptDocument) {
@@ -648,7 +669,11 @@ async function documentsAreUnlocked(env: Env, documents: ReceiptDocument[]) {
   return !active;
 }
 
-async function classifyDocument(env: Env, document: ReceiptDocument) {
+async function classifyDocument(
+  env: Env,
+  document: ReceiptDocument,
+  budget: JevBudget,
+) {
   const evidence = await documentEvidence(env, document);
   if (!evidence) return null;
   const { heads, ocr } = evidence;
@@ -696,7 +721,7 @@ async function classifyDocument(env: Env, document: ReceiptDocument) {
             },
           },
         };
-      return callJev(env, roleInput, roleQuestions);
+      return callJev(env, roleInput, roleQuestions, budget);
     },
     (result) => validateChoice(result.answers.document_role, documentRoles),
   );
@@ -719,14 +744,19 @@ async function classifyDocument(env: Env, document: ReceiptDocument) {
       { id: document.id, revision: document.revision },
       null,
       () =>
-        callJev(env, categoryInput, {
-          purchase_category: {
-            type: "choice",
-            instructions:
-              "Classify this receipt using the category definitions.",
-            criteria: categoryChoices.criteria,
+        callJev(
+          env,
+          categoryInput,
+          {
+            purchase_category: {
+              type: "choice",
+              instructions:
+                "Classify this receipt using the category definitions.",
+              criteria: categoryChoices.criteria,
+            },
           },
-        }),
+          budget,
+        ),
       (result) =>
         validateChoice(
           result.answers.purchase_category,
@@ -790,24 +820,30 @@ async function tryAssociations(
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
   captureId: string,
+  job: {
+    id: string;
+    run_token: string;
+    association_progress: string | null;
+  },
+  budget: JevBudget,
 ) {
   const captures = await loadCaptures();
   let current = await currentDocument(env, captures, captureId);
-  if (!current) return null;
+  if (!current) return { document: null, deferred: false };
   const ordered = captures
     .filter((capture) => capture.is_current)
     .sort(
       (a, b) =>
         a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
     );
-  const roles = new Map(
-    (
-      await env.DB.prepare("SELECT capture_id,role FROM jev_page_heads").all<{
-        capture_id: string;
-        role: PageRole;
-      }>()
-    ).results.map((row) => [row.capture_id, row.role]),
+  const orderIndex = new Map(
+    ordered.map((capture, index) => [capture.id, index]),
   );
+  const pageHeadRows = (
+    await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
+  ).results;
+  const pageHeads = new Map(pageHeadRows.map((row) => [row.capture_id, row]));
+  const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
   const allDocuments = records(await storedDocuments(env), captures);
   const docs = allDocuments.filter(
     (document) => !document.mergedInto && !document.duplicateOf,
@@ -819,12 +855,10 @@ async function tryAssociations(
       (head) => head.role === "receipt" || head.role === "payment_evidence",
     )
   )
-    return current;
+    return { document: current, deferred: false };
   const currentHeads = currentEvidence.heads;
   const firstIndex = Math.min(
-    ...current.pages.map((page) =>
-      ordered.findIndex((capture) => capture.id === page.captureId),
-    ),
+    ...current.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
   );
   const previousCapture = [...ordered.slice(0, firstIndex)]
     .reverse()
@@ -837,93 +871,142 @@ async function tryAssociations(
         document.pages.some((page) => page.captureId === previousCapture.id),
       )
     : null;
-  if (previous && previous.id !== current.id) {
-    const decision = await compareDocuments(env, current, previous);
-    if (
-      decision &&
-      shouldAutoMerge(decision.answer) &&
-      (await documentsAreUnlocked(env, [current, previous]))
-    ) {
-      const merged = await mergeDocuments(
-        request,
-        env,
-        loadCaptures,
-        current,
-        previous,
-        decision.answer.choice as "continuation" | "payment_match",
-        roles,
-        allDocuments,
-      );
-      if (merged) return merged;
-    }
-  }
-
   const hasReceipt = currentHeads.some((head) => head.role === "receipt");
   const hasPayment = currentHeads.some(
     (head) => head.role === "payment_evidence",
   );
-  if (hasReceipt === hasPayment) return current;
   const currentLast = Math.max(
-    ...current.pages.map((page) =>
-      ordered.findIndex((capture) => capture.id === page.captureId),
-    ),
+    ...current.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
   );
   const candidates: ReceiptDocument[] = [];
-  for (const document of docs) {
-    if (document.id === current.id) continue;
-    const indexes = document.pages.map((page) =>
-      ordered.findIndex((capture) => capture.id === page.captureId),
-    );
-    if (Math.max(...indexes) >= currentLast) continue;
-    const evidence = await documentEvidence(env, document);
-    if (!evidence) continue;
-    const heads = evidence.heads;
-    const candidateHasReceipt = heads.some((head) => head.role === "receipt");
-    const candidateHasPayment = heads.some(
-      (head) => head.role === "payment_evidence",
-    );
-    if (
-      (hasReceipt &&
-        !hasPayment &&
-        candidateHasPayment &&
-        !candidateHasReceipt) ||
-      (hasPayment && !hasReceipt && candidateHasReceipt && !candidateHasPayment)
-    )
-      candidates.push(document);
-  }
+  if (hasReceipt !== hasPayment)
+    for (const document of docs) {
+      if (document.id === current.id || document.id === previous?.id) continue;
+      const indexes = document.pages.map(
+        (page) => orderIndex.get(page.captureId) ?? -1,
+      );
+      if (Math.max(...indexes) >= currentLast) continue;
+      const heads = document.pages
+        .map((page) => pageHeads.get(page.captureId))
+        .filter((head): head is PageHead => !!head);
+      if (heads.length !== document.pages.length) continue;
+      const candidateHasReceipt = heads.some((head) => head.role === "receipt");
+      const candidateHasPayment = heads.some(
+        (head) => head.role === "payment_evidence",
+      );
+      if (
+        (hasReceipt &&
+          !hasPayment &&
+          candidateHasPayment &&
+          !candidateHasReceipt) ||
+        (hasPayment &&
+          !hasReceipt &&
+          candidateHasReceipt &&
+          !candidateHasPayment)
+      )
+        candidates.push(document);
+    }
   candidates.sort((a, b) => {
     const latest = (document: ReceiptDocument) =>
       Math.max(
-        ...document.pages.map((page) =>
-          ordered.findIndex((capture) => capture.id === page.captureId),
-        ),
+        ...document.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
       );
     return latest(b) - latest(a);
   });
-  for (const candidate of candidates.slice(0, 50)) {
-    const decision = await compareDocuments(env, current, candidate);
+  const documentToken = (document: ReceiptDocument) => ({
+    id: document.id,
+    revision: document.revision,
+    pages: document.pages.map((page) => {
+      const head = pageHeads.get(page.captureId);
+      return {
+        capture_id: page.captureId,
+        source_sha256: head?.source_sha256 ?? null,
+        ocr_sha256: head?.ocr_sha256 ?? null,
+        role: head?.role ?? null,
+      };
+    }),
+  });
+  const steps = [
+    ...(previous && previous.id !== current.id
+      ? [{ kind: "previous" as const, document: previous }]
+      : []),
+    ...candidates.map((document) => ({
+      kind: "payment" as const,
+      document,
+    })),
+  ];
+  const scope = await sha256({
+    current: documentToken(current),
+    steps: steps.map((step) => ({
+      kind: step.kind,
+      document: documentToken(step.document),
+    })),
+  });
+  let next = 0;
+  if (job.association_progress)
+    try {
+      const saved = JSON.parse(job.association_progress) as {
+        scope?: unknown;
+        next?: unknown;
+      };
+      if (
+        saved.scope === scope &&
+        Number.isInteger(saved.next) &&
+        Number(saved.next) >= 0 &&
+        Number(saved.next) <= steps.length
+      )
+        next = Number(saved.next);
+    } catch {
+      next = 0;
+    }
+  const saveProgress = async () => {
+    job.association_progress = JSON.stringify({ scope, next });
+    const saved = await env.DB.prepare(
+      "UPDATE jev_jobs SET association_progress=? WHERE id=? AND status='running' AND run_token=? RETURNING id",
+    )
+      .bind(job.association_progress, job.id, job.run_token)
+      .first<{ id: string }>();
+    requireThat(saved, 409, "Jev job ownership changed.");
+  };
+  let processed = 0;
+  while (next < steps.length && processed < 5) {
+    const step = steps[next];
+    const decision = await compareDocuments(
+      env,
+      current,
+      step.document,
+      budget,
+    );
+    const accepted =
+      step.kind === "previous"
+        ? decision && shouldAutoMerge(decision.answer)
+        : decision?.answer.choice === "payment_match" &&
+          shouldAutoMerge(decision.answer);
     if (
-      decision?.answer.choice === "payment_match" &&
-      shouldAutoMerge(decision.answer) &&
-      (await documentsAreUnlocked(env, [current, candidate]))
+      accepted &&
+      decision &&
+      (await documentsAreUnlocked(env, [current, step.document]))
     ) {
       const merged = await mergeDocuments(
         request,
         env,
         loadCaptures,
         current,
-        candidate,
-        "payment_match",
+        step.document,
+        decision.answer.choice as "continuation" | "payment_match",
         roles,
         allDocuments,
       );
-      if (merged) {
-        current = merged;
-        break;
-      }
+      if (merged) return { document: merged, deferred: false };
     }
+    next += 1;
+    processed += 1;
+    await saveProgress();
   }
-  return current;
+  if (next < steps.length) return { document: current, deferred: true };
+  if (job.association_progress !== JSON.stringify({ scope, next }))
+    await saveProgress();
+  return { document: current, deferred: false };
 }
 
 export async function queueJevJob(
@@ -945,7 +1028,13 @@ async function processJob(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
-  job: { id: string; capture_id: string; ocr_sha256: string },
+  job: {
+    id: string;
+    capture_id: string;
+    ocr_sha256: string;
+    run_token: string;
+    association_progress: string | null;
+  },
 ) {
   const captures = await loadCaptures();
   const capture = captures.find((item) => item.id === job.capture_id);
@@ -970,20 +1059,31 @@ async function processJob(
     (item) => item.captureId === capture.id,
   );
   if (!page || !ocrArtifactMatchesPage(value, page)) return { eligible: false };
-  await classifyPage(env, capture, job.ocr_sha256, value);
-  const document = await tryAssociations(
-    request,
-    env,
-    loadCaptures,
-    capture.id,
-  );
-  if (!document) return { eligible: false };
-  const classification = await classifyDocument(env, document);
-  return {
-    eligible: true,
-    document: classification,
-    awaiting_document: classification === null,
-  };
+  const budget: JevBudget = { remaining: 3 };
+  try {
+    await classifyPage(env, capture, job.ocr_sha256, value, budget);
+    const association = await tryAssociations(
+      request,
+      env,
+      loadCaptures,
+      capture.id,
+      job,
+      budget,
+    );
+    if (association.deferred) return { eligible: true, deferred: true };
+    const document = association.document;
+    if (!document) return { eligible: false };
+    const classification = await classifyDocument(env, document, budget);
+    return {
+      eligible: true,
+      document: classification,
+      awaiting_document: classification === null,
+    };
+  } catch (error) {
+    if (error instanceof JevCheckpoint)
+      return { eligible: true, deferred: true };
+    throw error;
+  }
 }
 
 export async function runJevJob(
@@ -998,17 +1098,19 @@ export async function runJevJob(
     ocr_sha256: string;
     status: string;
     attempts: number;
+    run_token: string;
+    association_progress: string | null;
   };
   const runToken = crypto.randomUUID();
   const now = new Date().toISOString();
   const job = await env.DB.prepare(
-    "UPDATE jev_jobs SET status='running',attempts=attempts+1,run_token=?,last_error=NULL,updated_at=? WHERE id=? AND (status='pending' OR (status='failed' AND attempts<3)) RETURNING id,capture_id,ocr_sha256,status,attempts",
+    "UPDATE jev_jobs SET status='running',attempts=attempts+1,run_token=?,last_error=NULL,updated_at=? WHERE id=? AND (status='pending' OR (status='failed' AND attempts<3)) RETURNING id,capture_id,ocr_sha256,status,attempts,run_token,association_progress",
   )
     .bind(runToken, now, id)
     .first<Job>();
   if (!job) {
     const current = await env.DB.prepare(
-      "SELECT id,capture_id,ocr_sha256,status,attempts FROM jev_jobs WHERE id=?",
+      "SELECT id,capture_id,ocr_sha256,status,attempts,run_token,association_progress FROM jev_jobs WHERE id=?",
     )
       .bind(id)
       .first<Job>();
@@ -1017,9 +1119,29 @@ export async function runJevJob(
   }
   try {
     const result = await processJob(request, env, loadCaptures, job);
+    if (result.deferred) {
+      const saved = await env.DB.prepare(
+        "UPDATE jev_jobs SET status='pending',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
+      )
+        .bind(new Date().toISOString(), id, runToken)
+        .first<{ status: string }>();
+      if (!saved) {
+        const current = await env.DB.prepare(
+          "SELECT status FROM jev_jobs WHERE id=?",
+        )
+          .bind(id)
+          .first<{ status: string }>();
+        return {
+          id,
+          status: current?.status ?? "failed",
+          superseded: true,
+        };
+      }
+      return { id, status: "pending", ...result };
+    }
     const status = result.eligible ? "complete" : "ineligible";
     const saved = await env.DB.prepare(
-      "UPDATE jev_jobs SET status=?,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
+      "UPDATE jev_jobs SET status=?,association_progress=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
     )
       .bind(status, new Date().toISOString(), id, runToken)
       .first<{ status: string }>();
@@ -1311,7 +1433,12 @@ export async function jevRoute(
           a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
       );
     await env.DB.prepare(
-      "UPDATE jev_jobs SET status='failed',run_token=NULL,last_error='Interrupted Jev run; safe to retry.',updated_at=? WHERE status='running' AND unixepoch(updated_at)<unixepoch()-300",
+      "UPDATE jev_jobs SET status='failed',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,run_token=NULL,last_error='Interrupted Jev run; safe to retry.',updated_at=? WHERE status='running' AND unixepoch(updated_at)<unixepoch()-300",
+    )
+      .bind(new Date().toISOString())
+      .run();
+    await env.DB.prepare(
+      "UPDATE jev_jobs SET status='failed',attempts=2,run_token=NULL,updated_at=? WHERE status='blocked' AND last_error='Interrupted Jev run; safe to retry.'",
     )
       .bind(new Date().toISOString())
       .run();

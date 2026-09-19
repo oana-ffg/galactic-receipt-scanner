@@ -134,6 +134,13 @@
       "when": 1789836653739,
       "tag": "0018_tired_jamie_braddock",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1789843174632,
+      "tag": "0019_chief_lady_deathstrike",
+      "breakpoints": true
     }
   ]
 }
