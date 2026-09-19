@@ -45,6 +45,11 @@ running for hours. A wait timeout is not a deadline or a reason to abandon this 
 2. **Send the filled `inspect` request.** Python records the observation and returns
    PP text/coordinates for remaining claimed pages, up to three following scans, the
    preceding scan for a slip or fragment, context, categories and a `review` template.
+   Each neighboring scan expands to **all pages of its current document**, in saved
+   order. OCR records include `document_id`, `document_revision` and
+   `document_capture_ids`; treat that group as a unit, even when only its last page
+   immediately precedes a slip. Explicit `ocr` requests also expand to the whole document
+   after the initial claimed-page observation.
    Read every returned OCR record. Decide page membership and extraction from that
    evidence. Images are optional tools for ambiguity, positions, damage, handwriting,
    unusual layouts or duplicate coverage. Use the crop first; raw photos remain available.
@@ -53,6 +58,9 @@ running for hours. A wait timeout is not a deadline or a reason to abandon this 
 3. **Send `review` with `extraction`, `page_review`, `grouping_evidence` and optional
    `category_name`.** Set the single ordered `page_review.capture_ids` list to the pages
    that belong together. Python derives donor IDs and preserves the other documents.
+   Include each chosen document's entire page group in its existing order. Attach a
+   matching payment slip to the whole receipt, never just its lower section. A separate
+   sheet is not by itself a reason to exclude a matching slip.
    Fill the returned exclusion rows with specific reasons; remove a row if you retain
    that page instead. Context summaries alone are not inspected OCR/images and do not
    need exclusion rows. Python validates and saves the immutable initial reading/layout,
@@ -211,6 +219,14 @@ response. Each exclusion is one capture, even when two belong to the same other 
 Never merge an unrelated source just to satisfy a validator. Never stop solely because
 an editable request was rejected. A missing crop requires originals then explicit preview bounds before retrying.
 `begin` reuses its known claim if crop preparation needed correction.
+
+`regrouping_required` means the proposal would split, reorder or interleave an existing
+document. Nothing was saved. Correct an accidental partial selection to include the
+whole document only if all its pages belong. If the existing group is genuinely wrong,
+keep the claimed document unchanged, exclude the other group's pages with reasons,
+and record the disputed association in `uncertainties` and `evidence` for separate
+Astra regrouping review. Finish the current document with that review flag; do not
+retry a partial merge, force unrelated pages together, or block the batch for this flag.
 
 `blocking:true`, an approval rejection, a crash or lost process session stops this worker's
 processing and triggers the parent's repair procedure, not an immediate batch block.

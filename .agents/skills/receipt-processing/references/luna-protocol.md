@@ -411,16 +411,23 @@ For duplicate marking, `page_review.capture_ids` still lists the claimed documen
 unchanged original pages. List inspected pages of the retained duplicate target in
 `excluded`, explaining that they stay in that retained document, outside this PDF.
 
-For a visual merge/reordering, `draft.grouping` contains `donor_ids`, ordered
+For whole-document assembly, `draft.grouping` contains `donor_ids`, ordered
 `capture_ids` and a nonempty `evidence` string (at most 2000 characters). IDs must come
-from this run's context/document responses. Read donor documents and inspect every
-retained crop before freezing the draft. Prepare OCR for every retained draft page afterward.
+from this run's context/document responses. Read every page of each chosen document
+before freezing the draft. After the initial observation, `ocr` expands selected scans
+to their whole current documents and returns membership/order metadata with every reading.
+Images remain optional for Luna's PP-first path.
 
 The helper copies current records and original page/hash objects, preserves annotations
-and all pages, applies full/partial donor merges, carries shared review reasons and
+and all pages, applies whole-document merges, carries shared review reasons and
 handwriting uncertainty, and verifies the resulting records. It does not accept arbitrary
 replacement document records or allow removing original target pages. At most 20 changed
 documents, 100 retained pages and 512 KiB per request are allowed.
+Each input document stays contiguous and in its saved order. A partial donor move,
+page reorder or interleaving returns nonblocking `regrouping_required` before any
+draft or submission. Separate regrouping uses Astra's independent checkpoint and
+existing detach workflow. Luna preserves current groups and records unresolved
+associations in review notes rather than dismantling them during ordinary assembly.
 
 When all content of the claimed document is redundantly represented in a retained document
 from the same receipt, use `grouping.duplicate_of` and `evidence` without donors or page

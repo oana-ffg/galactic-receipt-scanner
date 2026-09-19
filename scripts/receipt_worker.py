@@ -57,6 +57,15 @@ class ProtocolInputError(InputError):
     """Malformed request envelope rejected before dispatch or remote operations."""
 
 
+class RegroupingRequired(ProtocolInputError):
+    """Normal assembly cannot split or reorder an existing document."""
+
+    def __init__(self, documents):
+        super().__init__("Keep each existing document whole and in order. Splitting or reordering it requires separate Astra regrouping review; no grouping was saved.")
+        self.documents = [dict(document_id=d["id"], revision=d["revision"],
+                               capture_ids=[p["captureId"] for p in d["pages"]]) for d in documents]
+
+
 class WorkerStopped(InputError):
     """A prior terminal failure forbids continuing normal work."""
 
@@ -365,6 +374,18 @@ class Worker:
         self.discover(document)
         return document
 
+    def source_documents(self, capture_ids):
+        """Resolve selected scans to whole current documents, once per operation."""
+        requested = set(capture_ids)
+        documents = [self.get_document(did) for did in list(self.state["document_ids"])]
+        documents = [d for d in documents if any(p["captureId"] in requested for p in d["pages"])]
+        pages = [p["captureId"] for d in documents for p in d["pages"]]
+        require(requested <= set(pages) and len(pages) == len(set(pages)),
+                "Selected scans must belong to unique current documents.")
+        require(len(pages) <= 100, "Whole-document OCR exceeds 100 pages; request fewer candidate documents.")
+        order = {cid: i for i, cid in enumerate(capture_ids)}
+        return sorted(documents, key=lambda d: min(order[p["captureId"]] for p in d["pages"] if p["captureId"] in order))
+
     def grouping(self, selection, extraction):
         claim = self.active()
         target = self.get_document(claim["document"]["id"])
@@ -386,6 +407,14 @@ class Worker:
         require(isinstance(selected, list) and 0 < len(selected) <= 100 and len(set(selected)) == len(selected)
                 and set(selected) <= pages.keys() and {p["captureId"] for p in target["pages"]} <= set(selected),
                 "Grouping must preserve all target pages exactly once.")
+        # Assembly combines whole documents. Splitting or reordering their pages
+        # belongs to the separate Astra detach/regroup workflow, never an incidental donor move.
+        positions = {cid: i for i, cid in enumerate(selected)}
+        for document in before:
+            ids = [p["captureId"] for p in document["pages"]]
+            start = positions.get(ids[0]) if ids else None
+            if start is None or selected[start:start + len(ids)] != ids:
+                raise RegroupingRequired(before)
         require(set(selected) <= self.inspected_ids(), "Read every selected source before grouping pages.")
         if duplicate:
             if self.state.get("input_mode") == "ppocr-first":
@@ -781,6 +810,7 @@ class Worker:
         ids += self.state.get("lookahead_ids", [])[:3]
         ids = list(dict.fromkeys(cid for cid in ids if cid != claimed["pages"][0]["captureId"]))
         readings = self.workflow_step("ocr", capture_ids=ids) if ids else []
+        ids = [reading["capture_id"] for reading in readings]
         categories = self.workflow_step("categories")
         retained = [p["captureId"] for p in claimed["pages"]]
         return {"context": context, "ocr": readings, "images_optional": True, "categories": categories,
@@ -798,11 +828,16 @@ class Worker:
         if not self.state.get("claimed_observation"):
             require(ids == [self.state["claim"]["document"]["pages"][0]["captureId"]],
                     "Read the first claimed scan by itself before considering neighbors.")
+        documents = self.source_documents(ids)
+        membership = {p["captureId"]: d for d in documents for p in d["pages"]}
+        if self.state.get("claimed_observation"):
+            ids = [p["captureId"] for d in documents for p in d["pages"]]
         result = []
         for cid in ids:
             self.renew_if_needed()
             layout = self.state.get("layouts", {}).get(cid)
-            page = self.page(cid)
+            document = membership[cid]
+            page = next(p for p in document["pages"] if p["captureId"] == cid)
             source = self.client.saved_ocr(cid, self.work / "ocr",
                 crop=layout["crop"] if layout else page.get("crop") if page.get("crop") is not None else AUTO_CROP,
                 rotation=layout["rotation"] if layout else page.get("rotation", 0))
@@ -812,6 +847,8 @@ class Worker:
             self.state["prepared"][cid] = source
             value = json.loads(Path(source["ocr_path"]).read_text(encoding="utf-8"))
             reading = {"capture_id": cid, "source_sha256": source["sha256"], "ocr_sha256": source["ocr_sha256"],
+                       "document_id": document["id"], "document_revision": document["revision"],
+                       "document_capture_ids": [p["captureId"] for p in document["pages"]],
                        "layout": layout, "text": value.get("text", ""), "confidence": value.get("confidence"),
                        "lines": [{key: line.get(key) for key in ("text", "confidence", "box")}
                                  for line in value.get("lines", [])],
@@ -1371,6 +1408,10 @@ class Worker:
             # The journal could not record the failure, but this process must still stop.
             self.state["failed"] = prior_failure or {"operation": op, "error": diagnostic}
             return {"ok": False, "blocking": True, "op": op, "error": diagnostic, **self.summary()}
+        except RegroupingRequired as error:
+            return {"ok": False, "input_error": str(error), "op": op, "blocking": False,
+                    "regrouping_required": True, "documents": error.documents,
+                    "next": "Keep the claimed document intact, record the disputed grouping in uncertainties/evidence for Astra, and submit a corrected review."}
         except ProtocolInputError as error:
             return {"ok": False, "input_error": str(error), "op": op}
         except OCRRequired as error:

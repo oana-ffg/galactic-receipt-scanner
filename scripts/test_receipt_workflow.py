@@ -1,6 +1,7 @@
 """Grouped workflow tests with isolated synthetic scanner state; no production access."""
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,106 @@ class WorkflowTests(unittest.TestCase):
     setUp = fixtures.WorkerTests.setUp
     make_worker = fixtures.WorkerTests.make_worker
     send = fixtures.WorkerTests.send
+
+    def receipt_and_slip(self):
+        """The claimed slip follows only the last scan of an existing two-page receipt."""
+        donor = self.fake.documents[fixtures.OTHER]
+        self.fake.raw[fixtures.FOREIGN] = b"synthetic receipt lower section"
+        donor['pages'].append(dict(captureId=fixtures.FOREIGN,
+            sha256=hashlib.sha256(self.fake.raw[fixtures.FOREIGN]).hexdigest(), rotation=0, crop=None))
+        self.fake.previous_images = [dict(id=fixtures.FOREIGN, document_id=fixtures.OTHER,
+            sha256=donor['pages'][1]['sha256'])]
+        begun = self.send('begin')
+        self.assertEqual(list(self.worker.state['prepared']), [fixtures.DID])
+        begun['request']['observation']['type'] = 'payment-slip'
+        return self.worker.handle(begun['request'])['result']
+
+    def test_slip_inspection_expands_previous_scan_to_whole_receipt(self):
+        packet = self.receipt_and_slip()
+        self.assertEqual([r['capture_id'] for r in packet['ocr']], [fixtures.OTHER, fixtures.FOREIGN])
+        for reading in packet['ocr']:
+            self.assertEqual(reading['document_id'], fixtures.OTHER)
+            self.assertEqual(reading['document_capture_ids'], [fixtures.OTHER, fixtures.FOREIGN])
+        self.assertEqual([r['capture_id'] for r in packet['request']['page_review']['excluded']],
+                         [fixtures.OTHER, fixtures.FOREIGN])
+        self.assertNotIn('preview_records', self.worker.state)
+        # Explicit candidate reads use the same whole-document expansion.
+        readings = self.send('ocr', capture_ids=[fixtures.FOREIGN, fixtures.OTHER])
+        self.assertEqual([r['capture_id'] for r in readings], [fixtures.OTHER, fixtures.FOREIGN])
+
+    def test_normal_review_rejects_partial_reversed_or_interleaved_receipt(self):
+        packet = self.receipt_and_slip()
+        before = deepcopy(self.fake.documents)
+        for selected in ([fixtures.FOREIGN, fixtures.DID],
+                         [fixtures.FOREIGN, fixtures.OTHER, fixtures.DID],
+                         [fixtures.OTHER, fixtures.DID, fixtures.FOREIGN]):
+            with self.subTest(selected=selected):
+                request = deepcopy(packet['request'])
+                request.update(extraction=fixtures.extraction(), grouping_evidence='Synthetic proposed match.',
+                    page_review=dict(capture_ids=selected, excluded=[dict(capture_id=cid, reason='Synthetic exclusion.')
+                        for cid in (fixtures.OTHER, fixtures.FOREIGN) if cid not in selected]))
+                result = self.worker.handle(request)
+                self.assertTrue(result['regrouping_required'], result)
+                self.assertFalse(result['blocking'])
+                self.assertEqual(self.worker.state['phase'], 'claimed')
+                self.assertNotIn('draft', self.worker.state)
+                self.assertEqual(self.fake.documents, before)
+                self.assertFalse(self.fake.readings['draft_saved'])
+        # The direct draft command cannot bypass the same rule.
+        result = self.worker.handle(dict(op='draft', extraction=fixtures.extraction(),
+            grouping=dict(donor_ids=[fixtures.OTHER], capture_ids=[fixtures.FOREIGN, fixtures.DID], evidence='Synthetic match.'),
+            page_review=dict(capture_ids=[fixtures.FOREIGN, fixtures.DID],
+                excluded=[dict(capture_id=fixtures.OTHER, reason='Separate regroup review needed.')])))
+        self.assertTrue(result['regrouping_required'], result)
+
+        # A genuine regroup dispute can be saved for review without changing the donor.
+        request = deepcopy(packet['request'])
+        value = fixtures.extraction()
+        value['uncertainties'] = ['Separate regrouping review needed for the synthetic receipt.']
+        request['extraction'] = value
+        for row in request['page_review']['excluded']:
+            row['reason'] = 'Preserve the existing receipt pending separate regrouping review.'
+        reviewed = self.worker.handle(request)
+        self.assertTrue(reviewed['ok'], reviewed)
+        finish = reviewed['result']['request']
+        finish['rationale'] = 'Keep the claimed slip separate pending review.'
+        completed = self.worker.handle(finish)
+        self.assertTrue(completed['ok'], completed)
+        self.assertEqual(completed['result']['phase'], 'complete')
+        self.assertEqual(self.fake.documents[fixtures.OTHER], before[fixtures.OTHER])
+
+    def test_lookahead_expands_whole_document_without_duplicating_ocr_pages(self):
+        donor = self.fake.documents[fixtures.OTHER]
+        self.fake.raw[fixtures.FOREIGN] = b'synthetic continuation'
+        donor['pages'].append(dict(captureId=fixtures.FOREIGN,
+            sha256=hashlib.sha256(self.fake.raw[fixtures.FOREIGN]).hexdigest(), rotation=0, crop=None))
+        self.fake.next_images = [dict(id=p['captureId'], sha256=p['sha256'], document_id=fixtures.OTHER)
+                                 for p in donor['pages']]
+        begun = self.send('begin')
+        begun['request']['observation']['type'] = 'receipt'
+        packet = self.worker.handle(begun['request'])['result']
+        self.assertEqual([r['capture_id'] for r in packet['ocr']], [fixtures.OTHER, fixtures.FOREIGN])
+        self.assertEqual([r['capture_id'] for r in packet['request']['page_review']['excluded']],
+                         [fixtures.OTHER, fixtures.FOREIGN])
+
+    def test_slip_joins_all_receipt_pages_without_leaving_residual_document(self):
+        packet = self.receipt_and_slip()
+        request = packet['request']
+        request.update(extraction=fixtures.extraction(), grouping_evidence='Synthetic whole receipt and matching slip.',
+            page_review=dict(capture_ids=[fixtures.OTHER, fixtures.FOREIGN, fixtures.DID], excluded=[]))
+        reviewed = self.worker.handle(request)
+        self.assertTrue(reviewed['ok'], reviewed)
+        self.assertEqual(reviewed['result']['draft']['pages'], 3)
+        finish = reviewed['result']['request']
+        finish['rationale'] = 'Synthetic whole-document match confirmed.'
+        result = self.worker.handle(finish)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['result']['phase'], 'complete')
+        self.assertEqual([p['captureId'] for p in self.fake.documents[fixtures.DID]['pages']],
+                         [fixtures.OTHER, fixtures.FOREIGN, fixtures.DID])
+        self.assertEqual(self.fake.documents[fixtures.OTHER]['pages'], [])
+        self.assertEqual(self.fake.documents[fixtures.OTHER]['mergedInto'], fixtures.DID)
+        self.assertEqual(len(self.fake.submit_bytes), 1)
 
     def test_ocr_first_finishes_without_viewing_or_attesting_pdf(self):
         finish = self.start_review()

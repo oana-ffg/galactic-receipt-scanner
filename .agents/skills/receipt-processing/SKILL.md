@@ -87,6 +87,15 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
 2. Finalize the ordered document layout and save Luna's first extraction plus an
    **image-only PDF assembled from the selected scans**. Supply one ordered
    `page_review.capture_ids` list and `grouping_evidence`; Python derives donor IDs.
+   Normal assembly joins whole existing documents, preserving each one's page order
+   and keeping its pages together. It cannot take only one page from another receipt.
+   Python expands a neighboring scan to its entire current document when fetching OCR.
+   A matching slip can join the whole receipt; being a separate sheet alone is not a
+   reason to exclude it. Splitting/reordering an existing document is separate Astra
+   regrouping review, using the existing detach workflow after an independent checkpoint.
+   On `regrouping_required`, keep the claimed document intact, explain the disputed
+   association in `uncertainties` and `evidence`, and finish with that review flag.
+   Do not force a whole-document merge when some pages do not belong together.
    Verify the returned page IDs/order against the OCR-based selection. Images are optional
    for concrete ambiguity throughout Luna's first pass, including the assembled PDF.
 3. Persist the initial OCR-assisted Luna reading and frozen layout in the database.
@@ -243,6 +252,15 @@ before creating a block. This includes worker, verification, runtime and setup f
 Give Sol the exact error, run/batch IDs, relevant private journal paths, verified scope
 and known claim/save state, never credentials or a full conversation dump. Sol can
 inspect the relevant code/logs, repair scripts or setup, and run targeted checks.
+**Tell Sol to implement and test a repair, not merely investigate or recommend one.**
+The handoff must explicitly authorize edits to the relevant source, scripts and tests
+within the user's scope. Do not restrict the entire repair task to read-only work;
+keeping production receipt data unchanged does not prohibit fixing code. Require Sol
+to return the implemented changes and validation, or a concrete reason implementation
+cannot safely proceed. A diagnosis or proposed patch alone is not a failed repair
+attempt: follow up with Sol to implement it before blocking. If no code defect exists,
+an evidence-backed exact-run recovery procedure is a valid result for the coordinator
+to execute. Follow repository review/deployment requirements for code changes.
 Do not start another receipt while repair is in progress.
 
 Sol must preserve originals, saved readings and immutable requests. It must not clear
@@ -360,8 +378,9 @@ it. The bounded helper can mark only its claimed document as duplicate. If the p
 is another document, record the candidate for its own claim/review; never choose the worse
 view merely to fit the current claim. If a redundant page is already inside a larger document
 with unique content, do not mark that whole document duplicate or silently drop the page;
-leave the page-level correction for supported review/detachment. Do not dismantle an existing
-receipt/slip group without inspecting all its pages and accounting for any pages left behind.
+leave the page-level correction for separate Astra review/detachment. Normal Luna assembly
+never dismantles an existing receipt/slip group; Astra must inspect all affected pages
+and account for those left behind before changing an existing group.
 
 Use legible item arithmetic as corroboration when it helps resolve a folded-page match.
 Count each physical printed row once across overlapping views; identical purchases printed
