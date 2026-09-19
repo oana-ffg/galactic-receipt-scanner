@@ -86,7 +86,7 @@ export async function mountReview(app: HTMLElement) {
   async function refresh() {
     [catalog, categories] = await Promise.all([
       readDocuments(),
-      api<PurchaseCategory[]>("/api/processing/categories"),
+      api<PurchaseCategory[]>("/api/processing/categories?include_archived=1"),
     ]);
     app
       .querySelector("#review-categories")!

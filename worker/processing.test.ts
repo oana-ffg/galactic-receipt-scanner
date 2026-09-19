@@ -319,6 +319,112 @@ it("corrects only the category, preserving financial values, model readings and 
     readings.attempts.every((r: any) => r.extraction.category_id === cat),
   ).toBe(true);
 });
+it("archives an unused category while preserving history and rejecting active references", async () => {
+  const c = await capture(),
+    archived = await category(),
+    replacement = await ok("/api/processing/categories", {
+      name: "Replacement supplies",
+      description: "Synthetic replacement category.",
+    }),
+    lease = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: lease.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(archived),
+    },
+    true,
+  );
+  let doc = (await ok(`/api/documents/${c.id}`)).document;
+  const categoryRecord = (await ok("/api/processing/categories")).find(
+    (value: any) => value.id === archived,
+  );
+  const archive = {
+    id: archived,
+    revision: categoryRecord.revision,
+    reason: "The owner consolidated this synthetic category.",
+  };
+  expect(
+    (await req("/api/processing/category-archive", archive, true)).status,
+  ).toBe(403);
+  expect((await req("/api/processing/category-archive", archive)).status).toBe(
+    409,
+  );
+  await ok("/api/processing/category-assignment", {
+    document_id: doc.id,
+    revision: doc.revision,
+    category_id: replacement.id,
+    evidence: "Synthetic item belongs to the replacement category.",
+  });
+  const archivedResult = await ok("/api/processing/category-archive", archive);
+  expect(archivedResult).toMatchObject({ id: archived, revision: 1 });
+  expect(typeof archivedResult.archived_at).toBe("string");
+  expect(
+    (await ok("/api/processing/categories")).some(
+      (value: any) => value.id === archived,
+    ),
+  ).toBe(false);
+  expect(
+    (await ok("/api/processing/categories?include_archived=1")).find(
+      (value: any) => value.id === archived,
+    ),
+  ).toMatchObject({
+    id: archived,
+    name: "Test supplies",
+    archived_at: archivedResult.archived_at,
+  });
+  expect(
+    (
+      await req(
+        "/api/processing/categories?include_archived=1",
+        undefined,
+        true,
+      )
+    ).status,
+  ).toBe(403);
+  expect(
+    (
+      await req("/api/processing/categories", {
+        name: "Test supplies",
+        description: "Synthetic test purchases.",
+      })
+    ).status,
+  ).toBe(409);
+  const db = await mf.getD1Database("DB"),
+    stored = await db
+      .prepare("SELECT archived_at FROM purchase_categories WHERE id=?")
+      .bind(archived)
+      .first<any>(),
+    history = await db
+      .prepare(
+        "SELECT previous,updated,reason FROM purchase_category_revisions WHERE category_id=?",
+      )
+      .bind(archived)
+      .first<any>();
+  expect(stored.archived_at).toBe(archivedResult.archived_at);
+  expect(JSON.parse(history.previous)).toEqual(categoryRecord);
+  expect(JSON.parse(history.updated).archived_at).toBe(
+    archivedResult.archived_at,
+  );
+  expect(history.reason).toBe(archive.reason);
+  const nextCapture = await capture(),
+    nextLease = await claim();
+  expect(nextLease.document.id).toBe(nextCapture.id);
+  expect(
+    (
+      await req(
+        "/api/processing/submit",
+        {
+          token: nextLease.token,
+          model: "gpt-5.6-luna",
+          extraction: extraction(archived),
+        },
+        true,
+      )
+    ).status,
+  ).toBe(400);
+});
 it("allows one claim, saves structured amounts atomically, and makes retries idempotent", async () => {
   const c = await capture(),
     cat = await category();

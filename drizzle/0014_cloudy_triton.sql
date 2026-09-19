@@ -1,0 +1,1 @@
+ALTER TABLE `purchase_categories` ADD `archived_at` text;

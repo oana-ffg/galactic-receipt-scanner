@@ -154,6 +154,7 @@ export const purchaseCategories = sqliteTable("purchase_categories", {
   name: text("name").notNull(),
   description: text("description").notNull(),
   created_at: text("created_at").notNull(),
+  archived_at: text("archived_at"),
 });
 export const purchaseCategoryRevisions = sqliteTable(
   "purchase_category_revisions",

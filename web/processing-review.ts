@@ -143,7 +143,7 @@ function reviewForm(
   const category = el("select");
   category.append(el("option", "Unclassified"));
   category.firstElementChild!.setAttribute("value", "");
-  for (const c of categories) {
+  for (const c of categories.filter((value) => !value.archived_at)) {
     const option = el("option", c.name);
     option.value = c.id;
     option.title = c.description;
@@ -605,6 +605,7 @@ export function categorySetup(
   act: (task: () => Promise<void>) => Promise<void>,
   refresh: () => Promise<void>,
 ) {
+  categories = categories.filter((value) => !value.archived_at);
   const panel = el("details");
   panel.open = categories.length === 0;
   panel.append(

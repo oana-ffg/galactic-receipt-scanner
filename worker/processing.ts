@@ -105,7 +105,9 @@ function validateExtraction(value: unknown): asserts value is Extraction {
 async function categoryCheck(env: Env, e: Extraction) {
   if (e.category_id !== null)
     requireThat(
-      await env.DB.prepare("SELECT id FROM purchase_categories WHERE id=?")
+      await env.DB.prepare(
+        "SELECT id FROM purchase_categories WHERE id=? AND archived_at IS NULL",
+      )
         .bind(e.category_id)
         .first(),
       400,
@@ -296,14 +298,25 @@ export async function processingRoute(
     });
   }
   if (path === "/api/processing/categories") {
-    if (method === "GET")
+    if (method === "GET") {
+      const includeArchived = url.searchParams.get("include_archived") === "1";
+      requireThat(
+        !includeArchived || !request.headers.has("authorization"),
+        403,
+        "Archived categories require the owner's interactive session.",
+      );
       return json(
         (
           await env.DB.prepare(
-            "SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision FROM purchase_categories ORDER BY name",
+            includeArchived
+              ? `SELECT id,name,description,archived_at,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision
+                FROM purchase_categories ORDER BY name`
+              : `SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision
+                FROM purchase_categories WHERE archived_at IS NULL ORDER BY name`,
           ).all()
         ).results,
       );
+    }
     requireThat(method === "POST", 405, "Method not allowed.");
     const input = await bodyJson(request);
     requireThat(
@@ -346,7 +359,7 @@ export async function processingRoute(
         "Explain the category definition change.",
       );
       const previous = await env.DB.prepare(
-        "SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision FROM purchase_categories WHERE id=?",
+        "SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision FROM purchase_categories WHERE id=? AND archived_at IS NULL",
       )
         .bind(input.id)
         .first<{
@@ -410,16 +423,118 @@ export async function processingRoute(
       )
       .run();
     const result = await env.DB.prepare(
-      "SELECT id,name,description FROM purchase_categories WHERE normalized_name=?",
+      "SELECT id,name,description,archived_at FROM purchase_categories WHERE normalized_name=?",
     )
       .bind(normalized)
-      .first<{ id: string; name: string; description: string }>();
+      .first<{
+        id: string;
+        name: string;
+        description: string;
+        archived_at: string | null;
+      }>();
     requireThat(
-      result?.description === input.description.trim(),
+      result?.archived_at === null &&
+        result.description === input.description.trim(),
       409,
-      "This category name already has a different description. Read and reuse the existing category or choose a distinct name.",
+      "This category name is unavailable. Read and reuse the active category or choose a distinct name.",
     );
-    return json(result);
+    return json({
+      id: result.id,
+      name: result.name,
+      description: result.description,
+    });
+  }
+  if (path === "/api/processing/category-archive" && method === "POST") {
+    requireThat(
+      !request.headers.has("authorization"),
+      403,
+      "Category archival requires the owner's interactive session.",
+    );
+    requireThat(
+      !(await activeLock(env)),
+      409,
+      "Finish the active model claim before archiving a category.",
+    );
+    const input = await bodyJson(request);
+    requireThat(
+      typeof input.id === "string" &&
+        UUID.test(input.id) &&
+        typeof input.revision === "number" &&
+        Number.isSafeInteger(input.revision) &&
+        input.revision >= 0,
+      400,
+      "Read the category and its revision before archiving.",
+    );
+    requireThat(
+      typeof input.reason === "string" &&
+        input.reason.trim().length > 0 &&
+        input.reason.length <= 2000,
+      400,
+      "Explain why the category is being archived.",
+    );
+    const previous = await env.DB.prepare(
+      "SELECT id,name,description,COALESCE((SELECT MAX(revision) FROM purchase_category_revisions r WHERE r.category_id=purchase_categories.id),0) AS revision FROM purchase_categories WHERE id=? AND archived_at IS NULL",
+    )
+      .bind(input.id)
+      .first<{
+        id: string;
+        name: string;
+        description: string;
+        revision: number;
+      }>();
+    requireThat(
+      previous && previous.revision === input.revision,
+      409,
+      "Category changed. Reload before archiving.",
+    );
+    const captures = await load(),
+      docs = await records(env, captures),
+      assigned = docs.filter(
+        (doc) =>
+          !doc.mergedInto &&
+          !doc.duplicateOf &&
+          doc.processing?.extraction.category_id === input.id,
+      );
+    requireThat(
+      assigned.length === 0,
+      409,
+      "Reassign every retained document before archiving this category.",
+    );
+    const archivedAt = new Date().toISOString(),
+      updated = {
+        ...previous,
+        revision: previous.revision + 1,
+        archived_at: archivedAt,
+      };
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO purchase_category_revisions(category_id,revision,previous,updated,reason,created_at) VALUES(?,?,?,?,?,?)",
+        ).bind(
+          input.id,
+          updated.revision,
+          JSON.stringify(previous),
+          JSON.stringify(updated),
+          input.reason.trim(),
+          archivedAt,
+        ),
+        env.DB.prepare(
+          "UPDATE purchase_categories SET archived_at=? WHERE id=? AND archived_at IS NULL",
+        ).bind(archivedAt, input.id),
+      ]);
+    } catch (error) {
+      if (/UNIQUE constraint/.test(String(error)))
+        throw new HttpError(
+          409,
+          "Concurrent category change. Reload before archiving.",
+        );
+      throw error;
+    }
+    return json({
+      id: input.id,
+      revision: updated.revision,
+      archived_at: archivedAt,
+    });
   }
   if (path === "/api/processing/category-assignment" && method === "POST") {
     requireThat(
@@ -458,7 +573,7 @@ export async function processingRoute(
       "Reload a retained processed document before correcting its category.",
     );
     const category = await env.DB.prepare(
-      "SELECT id,name,description FROM purchase_categories WHERE id=?",
+      "SELECT id,name,description FROM purchase_categories WHERE id=? AND archived_at IS NULL",
     )
       .bind(input.category_id)
       .first<{ id: string; name: string; description: string }>();

@@ -69,6 +69,7 @@ export interface PurchaseCategory {
   name: string;
   description: string;
   revision?: number;
+  archived_at?: string | null;
 }
 export const financialTypes: readonly string[] = [
   "receipt",
