@@ -39,6 +39,99 @@ async function saveCapture() {
   return response.json<any>();
 }
 
+async function sha256(bytes: Uint8Array) {
+  return Array.from(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+  )
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function seedHistoricalOcr(
+  capture: any,
+  text: string,
+  createdAt: string,
+) {
+  const artifact = {
+    source: {
+      captureId: capture.id,
+      sha256: capture.sha256,
+      pixels: [1000, 1600],
+      rotation: 0,
+      region: { left: 0, top: 0, width: 1000, height: 1600 },
+    },
+    provenance: { engine: "PP-OCRv6" },
+    text,
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(artifact));
+  const digest = await sha256(bytes);
+  const key = `ocr/${capture.id}/${digest}`;
+  const db = await mf.getD1Database("DB");
+  await (await mf.getR2Bucket("BUCKET")).put(key, bytes);
+  await db
+    .prepare(
+      "INSERT INTO artifacts(key,capture_id,kind,sha256,created_at,content_type) VALUES(?,?,'ocr',?,?,'application/json')",
+    )
+    .bind(key, capture.id, digest, createdAt)
+    .run();
+  return digest;
+}
+
+async function processingTokenHash(token: string) {
+  return sha256(new TextEncoder().encode(token));
+}
+
+async function runBackfill(processingToken: string) {
+  const response = await mf.dispatchFetch(`${origin}/api/jev/backfill`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${processingToken}`,
+    },
+    body: "{}",
+  });
+  const result = await response.json<any>();
+  expect(response.status, JSON.stringify(result)).toBe(200);
+  return result;
+}
+
+async function matchingPaymentJevResponse(request: Request) {
+  const body = (await request.json()) as any;
+  const text = JSON.stringify(body.state);
+  const answers = Object.fromEntries(
+    Object.entries<any>(body.questions).map(([name, question]) => {
+      const choices = Object.keys(question.criteria);
+      const selected =
+        name === "page_role"
+          ? text.includes("PAYMENT SLIP")
+            ? "payment_evidence"
+            : "receipt"
+          : name === "document_role"
+            ? text.includes("PAYMENT SLIP") && !text.includes("SHOP RECEIPT")
+              ? "payment_evidence_only"
+              : "purchase_document"
+            : name === "purchase_category"
+              ? "unresolved"
+              : "payment_match";
+      return [
+        name,
+        {
+          type: "choice",
+          choice: selected,
+          probabilities: Object.fromEntries(
+            choices.map((choice) => [choice, choice === selected ? 1 : 0]),
+          ),
+          confidence: 1,
+        },
+      ];
+    }),
+  );
+  return Response.json({ model: "jev-1.13.0", answers });
+}
+
 async function syntheticJevResponse(request: Request) {
   const body = (await request.json()) as any;
   const answers = Object.fromEntries(
@@ -487,6 +580,123 @@ it("completes each page job without starving a multi-page document and binds the
   expect(summary.pages.map((page) => page.capture_id)).toEqual(
     captures.map((capture) => capture.id),
   );
+});
+
+it("discovers and processes only one historical OCR artifact per backfill request", async () => {
+  const processingToken = `rsc_${"b".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const captures = [await saveCapture(), await saveCapture()];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries()) {
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(`2026-01-01T00:00:0${index}.000Z`, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, "", `2026-01-01T00:00:0${index}.000Z`);
+  }
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 1,
+    blocked: 0,
+  });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_jobs").first(),
+  ).toEqual({ count: 1 });
+  expect(await db.prepare("SELECT capture_id FROM jev_jobs").first()).toEqual({
+    capture_id: captures[0].id,
+  });
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 0,
+    blocked: 0,
+  });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_jobs").first(),
+  ).toEqual({ count: 2 });
+});
+
+it("backfills a historical receipt before its later matching payment slip", async () => {
+  const processingToken = `rsc_${"c".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: matchingPaymentJevResponse,
+  });
+  const receipt = await saveCapture();
+  const payment = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:00.000Z", receipt.id)
+    .run();
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:01.000Z", payment.id)
+    .run();
+  await seedHistoricalOcr(
+    receipt,
+    "SHOP RECEIPT\nTOTAL 12.34",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    payment,
+    "PAYMENT SLIP\nTOTAL 12.34",
+    "2026-01-01T00:00:01.000Z",
+  );
+  expect(await runBackfill(processingToken)).toMatchObject({ remaining: 1 });
+  expect(await runBackfill(processingToken)).toMatchObject({ remaining: 0 });
+  const response = await mf.dispatchFetch(`${origin}/api/documents`, {
+    headers: ownerHeaders,
+  });
+  const catalog = await response.json<any>();
+  expect(response.status, JSON.stringify(catalog)).toBe(200);
+  const active = catalog.documents.filter(
+    (document: any) => !document.mergedInto && !document.duplicateOf,
+  );
+  expect(active).toHaveLength(1);
+  expect(active[0].pages.map((page: any) => page.captureId)).toEqual([
+    receipt.id,
+    payment.id,
+  ]);
+});
+
+it("does not let an older completed artifact hide a newer unqueued PP artifact", async () => {
+  const processingToken = `rsc_${"d".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const capture = await saveCapture();
+  const older = await seedHistoricalOcr(
+    capture,
+    "",
+    "2026-01-01T00:00:00.000Z",
+  );
+  expect(await runBackfill(processingToken)).toMatchObject({ remaining: 0 });
+  const newer = await seedHistoricalOcr(
+    capture,
+    " ",
+    "2026-01-01T00:00:01.000Z",
+  );
+  expect(newer).not.toBe(older);
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 0,
+  });
+  const db = await mf.getD1Database("DB");
+  expect(
+    await db
+      .prepare("SELECT ocr_sha256 FROM jev_page_heads WHERE capture_id=?")
+      .bind(capture.id)
+      .first(),
+  ).toEqual({ ocr_sha256: newer });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_jobs").first(),
+  ).toEqual({ count: 2 });
 });
 
 it("atomically owns a Jev job while upload and backfill overlap", async () => {

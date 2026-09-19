@@ -1304,28 +1304,12 @@ export async function jevRoute(
   }
   if (url.pathname === "/api/jev/backfill" && request.method === "POST") {
     const captures = await loadCaptures();
-    const current = new Set(
-      captures
-        .filter((capture) => capture.is_current)
-        .map((capture) => capture.id),
-    );
-    const rows = await env.DB.prepare(
-      "SELECT a.capture_id,a.sha256,a.key FROM artifacts a WHERE a.kind='ocr' ORDER BY a.created_at DESC,a.key DESC",
-    ).all<{ capture_id: string; sha256: string; key: string }>();
-    const latestPp = new Map<string, { sha256: string }>();
-    for (const row of rows.results) {
-      if (!current.has(row.capture_id) || latestPp.has(row.capture_id))
-        continue;
-      const object = await env.BUCKET.get(row.key);
-      if (!object) continue;
-      const value = await object.json<OcrArtifact>();
-      if (value?.provenance?.engine === "PP-OCRv6")
-        latestPp.set(row.capture_id, { sha256: row.sha256 });
-    }
-    for (const capture of captures.filter((item) => item.is_current)) {
-      const artifact = latestPp.get(capture.id);
-      if (artifact) await queueJevJob(env, capture.id, artifact.sha256);
-    }
+    const current = captures
+      .filter((capture) => capture.is_current)
+      .sort(
+        (a, b) =>
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      );
     await env.DB.prepare(
       "UPDATE jev_jobs SET status='failed',run_token=NULL,last_error='Interrupted Jev run; safe to retry.',updated_at=? WHERE status='running' AND unixepoch(updated_at)<unixepoch()-300",
     )
@@ -1334,9 +1318,66 @@ export async function jevRoute(
     await env.DB.prepare(
       "UPDATE jev_jobs SET status='blocked',run_token=NULL WHERE status='failed' AND attempts>=3",
     ).run();
-    const job = await env.DB.prepare(
+    let job = await env.DB.prepare(
       "SELECT id FROM jev_jobs WHERE status='pending' OR (status='failed' AND attempts<3) ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,attempts,updated_at,created_at,id LIMIT 1",
     ).first<{ id: string }>();
+    const running = await env.DB.prepare(
+      "SELECT 1 AS present FROM jev_jobs WHERE status='running' LIMIT 1",
+    ).first<{ present: number }>();
+    const backfillCandidates = async () => {
+      const artifacts = (
+        await env.DB.prepare(
+          "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr' ORDER BY created_at DESC,key DESC",
+        ).all<{ capture_id: string; sha256: string }>()
+      ).results;
+      const jobs = (
+        await env.DB.prepare(
+          "SELECT capture_id,ocr_sha256,status FROM jev_jobs",
+        ).all<{
+          capture_id: string;
+          ocr_sha256: string;
+          status: string;
+        }>()
+      ).results;
+      const jobByArtifact = new Map(
+        jobs.map((item) => [
+          `${item.capture_id}:${item.ocr_sha256}`,
+          item.status,
+        ]),
+      );
+      const artifactsByCapture = new Map<
+        string,
+        { capture_id: string; sha256: string }[]
+      >();
+      for (const artifact of artifacts) {
+        const rows = artifactsByCapture.get(artifact.capture_id) ?? [];
+        rows.push(artifact);
+        artifactsByCapture.set(artifact.capture_id, rows);
+      }
+      const candidates: { capture_id: string; sha256: string }[] = [];
+      for (const capture of current) {
+        for (const artifact of artifactsByCapture.get(capture.id) ?? []) {
+          const status = jobByArtifact.get(
+            `${artifact.capture_id}:${artifact.sha256}`,
+          );
+          if (!status) {
+            candidates.push(artifact);
+            break;
+          }
+          if (["complete", "pending", "running", "failed"].includes(status))
+            break;
+        }
+      }
+      return candidates;
+    };
+    if (!job && !running) {
+      const candidate = (await backfillCandidates())[0];
+      if (candidate) {
+        job = {
+          id: await queueJevJob(env, candidate.capture_id, candidate.sha256),
+        };
+      }
+    }
     let result: Record<string, unknown> | null = null;
     if (job)
       try {
@@ -1356,15 +1397,16 @@ export async function jevRoute(
               : "Jev processing failed.",
         };
       }
-    const remaining = await env.DB.prepare(
+    const remainingJobs = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM jev_jobs WHERE status IN ('pending','running','failed')",
     ).first<{ count: number }>();
+    const candidatesRemaining = await backfillCandidates();
     const blocked = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM jev_jobs WHERE status='blocked'",
     ).first<{ count: number }>();
     return json({
       result,
-      remaining: remaining?.count ?? 0,
+      remaining: (remainingJobs?.count ?? 0) + candidatesRemaining.length,
       blocked: blocked?.count ?? 0,
     });
   }
