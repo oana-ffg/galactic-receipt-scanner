@@ -171,6 +171,21 @@ class BatchGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(module.InputError, 'same document twice'):
                 guard.handle(dict(op='verify', run_id='b'*32))
 
+    def test_verification_rejects_a_run_that_mutated_an_already_verified_donor(self):
+        guard = self.guard()
+        guard.start(2)
+        first = dict(verified=True, batch_id=guard.state['batch_id'], run_id='a' * 32,
+                     document_id='retained-document', affected_document_ids=['retained-document'])
+        second = dict(verified=True, batch_id=guard.state['batch_id'], run_id='b' * 32,
+                      document_id='new-target', affected_document_ids=['new-target', 'retained-document'])
+        with patch.object(module, 'verify_run', return_value=first):
+            guard.handle(dict(op='verify', run_id='a' * 32))
+        with patch.object(module, 'verify_run', return_value=second):
+            with self.assertRaisesRegex(module.InputError, 'affect a document already verified'):
+                guard.handle(dict(op='verify', run_id='b' * 32))
+        self.assertEqual(guard.state['completed_count'], 1)
+        self.assertEqual(set(guard.state['verified_runs']), {'a' * 32})
+
     def test_previous_empty_or_released_claim_is_not_exhaustion(self):
         guard = self.guard()
         state = guard.start()

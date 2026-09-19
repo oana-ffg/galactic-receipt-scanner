@@ -489,6 +489,18 @@ export async function processingRoute(
       400,
       "Choose small or large processing stage.",
     );
+    const excludedDocumentIds = input.exclude_document_ids ?? [];
+    requireThat(
+      Array.isArray(excludedDocumentIds) &&
+        excludedDocumentIds.length <= 1000 &&
+        new Set(excludedDocumentIds).size === excludedDocumentIds.length &&
+        excludedDocumentIds.every(
+          (id: unknown) => typeof id === "string" && UUID.test(id),
+        ),
+      400,
+      "Batch document exclusions must contain unique document IDs.",
+    );
+    const excluded = new Set<string>(excludedDocumentIds);
     const targeted = input.document_id !== undefined;
     requireThat(
       targeted
@@ -511,6 +523,7 @@ export async function processingRoute(
     const candidates = docs
       .filter(
         (d) =>
+          !excluded.has(d.id) &&
           !d.mergedInto &&
           !d.duplicateOf &&
           d.pages.some((p) => current.has(p.captureId)) &&
@@ -538,7 +551,9 @@ export async function processingRoute(
           a.id.localeCompare(b.id),
       );
     const d = targeted
-      ? docs.find((doc) => doc.id === input.document_id)
+      ? docs.find(
+          (doc) => doc.id === input.document_id && !excluded.has(doc.id),
+        )
       : candidates[0];
     if (targeted) {
       requireThat(d, 404, "Review document not found.");
@@ -765,14 +780,38 @@ export async function processingRoute(
       .bind(input.token)
       .first<{ document_id: string; revision: number; payload: string }>();
     if (done) {
+      const prior = JSON.parse(done.payload);
       requireThat(
-        JSON.stringify(JSON.parse(done.payload).request) ===
-          JSON.stringify(input),
+        JSON.stringify(prior.request) === JSON.stringify(input),
         409,
         "This claim was already submitted with different data.",
       );
+      const saved =
+        prior.saved === undefined
+          ? [{ id: done.document_id, revision: done.revision }]
+          : prior.saved;
+      requireThat(
+        Array.isArray(saved) &&
+          saved.length > 0 &&
+          saved.length <= MAX_DOCUMENT_CHANGES &&
+          new Set(saved.map((item: any) => item?.id)).size === saved.length &&
+          saved.every(
+            (item: any) =>
+              item &&
+              typeof item.id === "string" &&
+              UUID.test(item.id) &&
+              Number.isSafeInteger(item.revision) &&
+              item.revision > 0,
+          ) &&
+          saved.some(
+            (item: any) =>
+              item.id === done.document_id && item.revision === done.revision,
+          ),
+        500,
+        "Stored processing acknowledgement is invalid.",
+      );
       return json({
-        saved: [{ id: done.document_id, revision: done.revision }],
+        saved,
         replayed: true,
       });
     }
@@ -1268,8 +1307,13 @@ export async function processingRoute(
     );
     d.processing!.ocr_comparison = comparison;
     d.processing!.seen_capture_count = captures.length;
+    const saved = changed.map((document) => ({
+      id: document.id,
+      revision: document.revision + 1,
+    }));
     const payload = JSON.stringify({
       request: input,
+      saved,
       independent_draft_token: lock.draft ? lock.token : null,
       confirmation_sha256: confirmation?.sha256 ?? null,
       arithmetic: arithmetic(input.extraction),

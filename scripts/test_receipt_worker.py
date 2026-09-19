@@ -52,6 +52,7 @@ class FakeScanner:
 
     def __init__(self):
         self.calls, self.submit_bytes = [], []
+        self.claim_bodies = []
         self.raw = {did: ("synthetic source " + did).encode() for did in (DID, OTHER)}
         self.documents = {}
         for did in (DID, OTHER):
@@ -75,7 +76,8 @@ class FakeScanner:
     def get(self, path):
         self.calls.append(("GET", path))
         if path == "/api/processing/access":
-            return {"version": 2, "queueClaims": True}
+            return {"version": 2, "queueClaims": True, "lunaReassessment": True,
+                    "batchDocumentExclusions": True}
         if path == "/api/processing/categories":
             return deepcopy(self.categories)
         if path.startswith("/api/processing/readings?"):
@@ -97,6 +99,7 @@ class FakeScanner:
             return json.dumps(self.documents[DID]["pdf"]).encode()
         body = json.loads(data)
         if path.endswith("/claim"):
+            self.claim_bodies.append(body)
             if self.lost_claim:
                 raise ClientError("Scanner connection failed; check connectivity and retry.")
             return json.dumps({"claim": dict(token=TOKEN, expires=time.time()*1000+1200000,
@@ -290,6 +293,14 @@ class WorkerTests(unittest.TestCase):
             result = self.worker.handle(dict(op='claim', viewer_checked=True))
         self.assertIn('different batch', result['input_error'])
         post.assert_not_called()
+
+    def test_claim_excludes_documents_already_verified_by_this_batch(self):
+        proof = dict(batch_id=self.batch.state['batch_id'], document_id=OTHER)
+        self.batch.save({**self.batch.state, 'verified_runs': {'a' * 32: proof}, 'completed_count': 1})
+        self.send('claim', viewer_checked=True)
+        self.assertEqual(self.fake.claim_bodies[-1], {
+            'stage': 'small', 'exclude_document_ids': [OTHER],
+        })
 
     def test_existing_claim_can_release_after_batch_stops(self):
         self.send('claim', viewer_checked=True)
@@ -908,6 +919,34 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.fake.submit_bytes[0], self.fake.submit_bytes[1])
         self.assertEqual(self.fake.documents[DID]["revision"], 3)
 
+    def test_grouped_retry_submit_retains_complete_guard_verification_acknowledgement(self):
+        import receipt_batch_verify
+
+        value = extraction()
+        value["vendor"] = None
+        grouping = {"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
+                    "evidence": "Synthetic grouped retry fixture."}
+        self.prepared(ids=(DID, OTHER), grouping=grouping, value=value)
+        self.fake.lost_submit = True
+        self.assertTrue(self.worker.handle({"op": "submit"})["blocking"])
+        self.worker.lock.close()
+        self.worker = self.make_worker(self.worker.state["run_id"])
+        self.send("retry-submit")
+        self.assertFalse(self.send("pdf")["pdf_applicable"])
+        self.fake.readings.update(attempt_saved=True, claim_active=False)
+
+        profile_path = self.repo / "worker-profile.json"
+        profile_path.write_text(json.dumps(self.profile), encoding="utf-8")
+        (self.repo / ".local" / "processing-host.json").write_text(
+            json.dumps({"worker_profile": str(profile_path)}), encoding="utf-8")
+        self.worker.lock.close()
+        with patch.object(receipt_batch_verify, "credentials", return_value={}), \
+             patch.object(receipt_batch_verify, "ScannerClient", return_value=self.fake):
+            result = self.batch.handle({"op": "verify", "run_id": self.worker.state["run_id"]})
+        self.assertTrue(result["verification"]["verified"])
+        self.assertEqual(result["verification"]["affected_document_ids"], [DID, OTHER])
+        self.assertEqual(result["completed_count"], 1)
+
     def test_new_process_refuses_unfinished_journal(self):
         self.claimed()
         self.worker.lock.close()
@@ -947,6 +986,23 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("input_error", result)
         self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
         self.assertNotIn("draft", self.worker.state)
+
+    def test_verified_document_cannot_be_reused_as_grouping_donor(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID, OTHER])
+        proof = dict(batch_id=self.batch.state['batch_id'], document_id=OTHER)
+        self.batch.save({**self.batch.state, 'verified_runs': {'b' * 32: proof}, 'completed_count': 1})
+        before = deepcopy(self.fake.documents)
+        result = self.worker.handle({
+            "op": "draft",
+            "extraction": extraction(),
+            "page_review": {"capture_ids": [DID, OTHER], "excluded": []},
+            "grouping": {"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
+                         "evidence": "Synthetic continuation candidate."},
+        })
+        self.assertIn("already verified", result["input_error"])
+        self.assertEqual(self.fake.documents, before)
+        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
 
     def test_grouping_preserves_sources_and_annotations(self):
         self.fake.documents[OTHER]["annotations"] = [{"captureId": OTHER, "text": "synthetic prior annotation"}]

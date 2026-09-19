@@ -68,6 +68,7 @@ class VerificationTests(unittest.TestCase):
         self.assertTrue(result['verified'])
         self.assertEqual(result['capture_ids'], [self.capture_id])
         self.assertEqual(result['page_count'], 1)
+        self.assertEqual(result['affected_document_ids'], [self.document_id])
         proof = json.loads(Path(result['verification_file']).read_text())
         self.assertEqual(proof, {k: v for k, v in result.items() if k != 'verification_file'})
         self.assertNotIn('synthetic-private-token', json.dumps(result))
@@ -182,6 +183,16 @@ class VerificationTests(unittest.TestCase):
     def test_worker_bound_to_another_batch_is_rejected(self):
         self.state['batch_id'] = 'd' * 32
         with self.assertRaisesRegex(InputError, 'different batch'):
+            self.verify()
+        self.client_factory.assert_not_called()
+
+    def test_submit_acknowledgement_must_cover_every_affected_document(self):
+        donor_id = '33333333-3333-4333-8333-333333333333'
+        self.state['draft']['documents'] = [
+            dict(id=self.document_id),
+            dict(id=donor_id),
+        ]
+        with self.assertRaisesRegex(InputError, 'omitted an affected document'):
             self.verify()
         self.client_factory.assert_not_called()
 

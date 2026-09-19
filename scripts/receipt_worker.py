@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
 from receipt_ppocr import PPBackend
 from receipt_locks import LockBusy, acquire_lock, lock_held
-from receipt_api import ScannerClient, ClientError, OCRRequired, AUTO_CROP, artifact_directory, credentials, write_new_file
+from receipt_api import ScannerClient, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
 WINDOWS_REPLACE_ATTEMPTS = 7
@@ -257,6 +257,24 @@ class Worker:
                 "Batch is stopped or its coordinator lock is gone; do not claim another document.")
         return batch
 
+    def verified_document_ids(self, batch=None):
+        """Return documents whose completion is already counted by this batch."""
+        if batch is None:
+            path = self.work.parent / "batch-state.json"
+            require(path.is_file() and not path.is_symlink(), "Batch state is unavailable; preserve the active claim.")
+            batch = json.loads(path.read_text(encoding="utf-8"))
+        require(batch.get("batch_id") == self.state.get("batch_id"),
+                "Worker belongs to a different batch; preserve the active claim.")
+        runs = batch.get("verified_runs", {})
+        require(isinstance(runs, dict), "Batch verification history is invalid; preserve the active claim.")
+        document_ids = set()
+        for proof in runs.values():
+            require(isinstance(proof, dict) and proof.get("batch_id") == batch["batch_id"]
+                    and isinstance(proof.get("document_id"), str) and UUID.fullmatch(proof["document_id"]),
+                    "Batch verification history is invalid; preserve the active claim.")
+            document_ids.add(proof["document_id"])
+        return document_ids
+
     def load(self, name):
         return json.loads((self.work / name).read_text(encoding="utf-8"))
 
@@ -399,6 +417,8 @@ class Worker:
         selected = selection.get("capture_ids", [p["captureId"] for p in target["pages"]])
         require(isinstance(donor_ids, list) and len(donor_ids) < 20 and len(set(donor_ids)) == len(donor_ids)
                 and target["id"] not in donor_ids, "Invalid grouping donors.")
+        require(not (set(donor_ids) & self.verified_document_ids()),
+                "A document already verified by this batch cannot be used as a grouping donor.")
         donors = [self.get_document(did) for did in donor_ids]
         before = deepcopy([target] + donors)
         require(all(not d["mergedInto"] and not d["duplicateOf"] for d in before), "Grouping requires retained documents.")
@@ -1092,16 +1112,19 @@ class Worker:
                 batch = self.active_batch(self.work.parent)
                 require(batch["batch_id"] == self.state.get("batch_id"),
                         "Worker belongs to a different batch; do not claim under a replacement coordinator.")
+                excluded = sorted(self.verified_document_ids(batch))
                 previous_state = deepcopy(self.state)
                 self.state["phase"] = "claim-uncertain"
                 self.state["claim_started"] = time.time()
                 self.checkpoint_intent(previous_state)
-                result = self.post("claim", {"stage": "small"})
+                result = self.post("claim", {"stage": "small", "exclude_document_ids": excluded})
                 self.state["claim"] = result["claim"]
                 self.state["phase"] = "claimed" if result["claim"] else "empty"
                 if result["claim"]:
                     self.discover(result["claim"]["document"])
                 self.record("claim-response", result)
+                verify(not result.get("claim") or result["claim"]["document"]["id"] not in excluded,
+                       "Scanner returned a document already verified by this batch; preserve the lease for reconciliation.")
                 return {**clean(result), **self.summary()}
         if op == "document":
             require(self.state["phase"] in {"claimed", "drafted", "submitted", "pdf", "complete"}, "No confirmed document is available.")
@@ -1368,6 +1391,8 @@ class Worker:
         access = self.client.get("/api/processing/access")
         require(access.get("version") == 2 and access.get("queueClaims") is True, "Scanner processing API v2 is required.")
         require(access.get("lunaReassessment") is True, "Deploy the Luna reassessment API before running this workflow.")
+        require(access.get("batchDocumentExclusions") is True,
+                "Deploy batch document exclusions before running this workflow.")
         if self.confirmation_provider == "ppocr":
             require(access.get("ppocrConfirmation") is True, "Deploy PP OCR confirmation support before processing.")
             require(access.get("ocrFirstOptionalVision") is True,

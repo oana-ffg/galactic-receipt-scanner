@@ -65,8 +65,10 @@ class BatchGuard:
             self.check_worker_closed()
             proof = verify_run(self.base.parent.parent, request.get("run_id"), self.owner)
             runs = dict(self.state.get("verified_runs", {}))
-            require(not any(p["document_id"] == proof["document_id"] and rid != proof["run_id"]
-                            for rid, p in runs.items()), "Do not count the same document twice in one batch.")
+            previously_verified = {p["document_id"] for rid, p in runs.items() if rid != proof["run_id"]}
+            affected = set(proof.get("affected_document_ids", [proof["document_id"]]))
+            require(not (previously_verified & affected),
+                    "Do not count the same document twice or affect a document already verified in one batch.")
             runs[proof["run_id"]] = proof
             state = self.save({**self.state, "verified_runs": runs, "completed_count": len(runs)})
             return {**state, "verification": proof, "next": "finish" if len(runs) >= state["requested_count"] else "dispatch"}

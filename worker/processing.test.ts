@@ -114,6 +114,37 @@ async function category() {
 async function claim(stage = "small") {
   return (await ok("/api/processing/claim", { stage }, true)).claim;
 }
+it("excludes documents already verified by the active local batch", async () => {
+  const first = await capture(),
+    second = await capture();
+  const lease = (
+    await ok(
+      "/api/processing/claim",
+      { stage: "small", exclude_document_ids: [first.id] },
+      true,
+    )
+  ).claim;
+  expect(lease.document.id).not.toBe(first.id);
+  expect(lease.document.pages.map((page: any) => page.captureId)).toEqual([
+    second.id,
+  ]);
+  await ok("/api/processing/release", { token: lease.token }, true);
+
+  for (const excluded of [
+    [first.id, first.id],
+    ["not-a-document-id"],
+    "not-an-array",
+  ])
+    expect(
+      (
+        await req(
+          "/api/processing/claim",
+          { stage: "small", exclude_document_ids: excluded },
+          true,
+        )
+      ).status,
+    ).toBe(400);
+});
 it("preserves unassessed handwriting on an OCR-first saved receipt", async () => {
   const c = await capture(),
     lease = await claim();
@@ -429,7 +460,7 @@ it("retargets merged and duplicate aliases when their retained document is absor
   expect(savedLeaf.pages).toEqual([]);
   expect(savedDuplicate.pages).toHaveLength(1);
   expect(await ok("/api/processing/submit", finalSubmit, true)).toEqual({
-    saved: [{ id: savedTarget.id, revision: savedTarget.revision }],
+    saved: result.saved,
     replayed: true,
   });
   expect((await ok(`/api/documents/${savedDonor.id}`)).document.revision).toBe(
@@ -441,6 +472,30 @@ it("retargets merged and duplicate aliases when their retained document is absor
   expect(
     (await ok(`/api/documents/${savedDuplicate.id}`)).document.revision,
   ).toBe(savedDuplicate.revision);
+});
+it("replays legacy processing attempts with the safely known primary document", async () => {
+  const c = await capture(),
+    lease = await claim(),
+    request = {
+      token: lease.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(),
+    };
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare(
+      "INSERT INTO processing_attempts(token,document_id,revision,stage,model,payload,created_at) VALUES(?,?,1,'small','gpt-5.6-luna',?,datetime('now'))",
+    )
+    .bind(lease.token, c.id, JSON.stringify({ request }))
+    .run();
+  await db
+    .prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
+    .bind(lease.token)
+    .run();
+  expect(await ok("/api/processing/submit", request, true)).toEqual({
+    saved: [{ id: c.id, revision: 1 }],
+    replayed: true,
+  });
 });
 it("rejects alias expansion beyond the 100-document atomic-save limit", async () => {
   const donorCapture = await capture();

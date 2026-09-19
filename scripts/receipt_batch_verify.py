@@ -44,8 +44,21 @@ def verify_run(repo, run_id, owner):
             and "/" not in submit_name and "\\" not in submit_name and ":" not in submit_name,
             "Submit response must name a journal file in this run.")
     submit = read_json(regular_path(work / submit_name))
+    saved_ids = [item["id"] for item in submit["saved"]]
+    require(len(saved_ids) == len(set(saved_ids))
+            and all(isinstance(did, str) and UUID.fullmatch(did) for did in saved_ids),
+            "Submit acknowledgement contains invalid affected documents.")
     saved = [d for d in submit["saved"] if d["id"] == document_id]
     require(len(saved) == 1, "Submit acknowledgement must identify this document exactly once.")
+    affected = state["draft"].get("documents")
+    drafted_ids = [document["id"] for document in affected] if affected is not None else [document_id]
+    require(len(drafted_ids) == len(set(drafted_ids))
+            and all(isinstance(did, str) and UUID.fullmatch(did) for did in drafted_ids)
+            and document_id in drafted_ids,
+            "Draft affected-document history is invalid.")
+    require(set(saved_ids) >= set(drafted_ids),
+            "Submit acknowledgement omitted an affected document.")
+    affected_ids = saved_ids
 
     host = read_json(regular_path(repo / ".local" / "processing-host.json"))
     profile_path = Path(host["worker_profile"])
@@ -89,6 +102,7 @@ def verify_run(repo, run_id, owner):
             require(document["checks"]["pdf"] is True and document["reviewedPdfSha256"] == pdf_hash,
                     "Final PDF visual attestation differs.")
     summary = dict(verified=True, batch_id=batch["batch_id"], batch_phase=batch["phase"], run_id=run_id, document_id=document_id,
+                   affected_document_ids=affected_ids,
                    capture_ids=actual, page_count=len(actual), status=document["status"],
                    revision=document["revision"], claim_closed=True, attempt_saved=True,
                    pdf_applicable=applicable, pdf_sha256=pdf_hash,
