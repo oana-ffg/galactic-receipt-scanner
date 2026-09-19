@@ -715,6 +715,51 @@ it("re-evaluates legacy ineligible jobs and classifies safe auto-cropped PP text
   ).toEqual({ count: 1 });
 });
 
+it("reports unprocessed legacy captures in the backfill remaining count", async () => {
+  const processingToken = `rsc_${"u".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const captures = [await saveCapture(), await saveCapture()];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries()) {
+    const digest = await seedHistoricalOcr(
+      capture,
+      `Synthetic shop ${index}\nTOTAL 12,34`,
+      `2026-01-01T00:00:0${index}.000Z`,
+      { left: 100, top: 100, width: 800, height: 1300 },
+    );
+    await queueJevJob({ DB: db } as any, capture.id, digest);
+  }
+  await db
+    .prepare(
+      "UPDATE jev_jobs SET status='ineligible',eligibility_version=1,ineligible_reason=NULL",
+    )
+    .run();
+
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "complete" },
+    remaining: 1,
+    blocked: 0,
+  });
+  let final: any = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    final = await runBackfill(processingToken);
+    if (final.remaining === 0) break;
+  }
+  expect(final).toMatchObject({
+    result: { status: "complete" },
+    remaining: 0,
+    blocked: 0,
+  });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_page_heads").first(),
+  ).toEqual({ count: 2 });
+});
+
 it("keeps completed Jev evidence pinned when a newer legacy artifact is rejected", async () => {
   const processingToken = `rsc_${"s".repeat(43)}`;
   await mf.dispose();

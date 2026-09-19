@@ -1590,12 +1590,20 @@ export async function jevRoute(
       "SELECT COUNT(*) AS count FROM jev_jobs WHERE status IN ('pending','running','failed')",
     ).first<{ count: number }>();
     const candidatesRemaining = await backfillCandidates();
+    const legacyCandidatesRemaining = await env.DB.prepare(
+      "SELECT COUNT(DISTINCT candidate.capture_id) AS count FROM jev_jobs candidate JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256 WHERE candidate.status='ineligible' AND candidate.eligibility_version<? AND NOT EXISTS (SELECT 1 FROM jev_jobs completed WHERE completed.capture_id=candidate.capture_id AND completed.status='complete')",
+    )
+      .bind(JEV_ELIGIBILITY_VERSION)
+      .first<{ count: number }>();
     const blocked = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM jev_jobs WHERE status='blocked'",
     ).first<{ count: number }>();
     return json({
       result,
-      remaining: (remainingJobs?.count ?? 0) + candidatesRemaining.length,
+      remaining:
+        (remainingJobs?.count ?? 0) +
+        candidatesRemaining.length +
+        (legacyCandidatesRemaining?.count ?? 0),
       blocked: blocked?.count ?? 0,
     });
   }
