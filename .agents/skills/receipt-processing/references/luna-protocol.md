@@ -119,6 +119,12 @@ guard's own `write_stdin` session:
 Require `verification.verified: true`. The guard verifies live saved state, records
 the unique completion and returns counts plus `next: dispatch` or `finish`. It rejects
 early finish unless this batch's worker actually received an empty/busy claim.
+Later matching slips may merge with whole receipts verified earlier in the batch.
+The guard verifies the new PDF, source preservation and donor revisions, archives the
+superseded proofs, and counts the consolidated result once. Follow its returned count
+and `next` action rather than a local total of completed Luna calls. At `finish` it
+rechecks every currently counted result. Ordinary queue claims still exclude documents
+already processed in this batch, including those whose proofs were superseded.
 The standalone `--verify RUN_ID` command remains a read-only recovery diagnostic; it
 does not increment a live guard's count. Luna must not launch either verification path.
 

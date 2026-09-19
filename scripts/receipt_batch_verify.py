@@ -19,6 +19,59 @@ def regular_path(path):
     return path
 
 
+def source_pages(document):
+    return [dict(capture_id=page['captureId'], sha256=page.get('sha256')) for page in document['pages']]
+
+
+def superseded_documents(base, batch, run_id, document, affected_documents):
+    """Prove that an earlier counted result was wholly absorbed, not merely touched."""
+    superseded = []
+    target_pages = document['pages']
+    target_ids = [page['captureId'] for page in target_pages]
+    absorbed = {did for did, value in affected_documents.items()
+                if value.get('mergedInto') == document['id'] and not value['pages']}
+    archived = {rid: item['proof'] for rid, item in batch.get('superseded_runs', {}).items()
+                if item['replaced_by'] == run_id}
+    require(all(proof['document_id'] in affected_documents for proof in archived.values()),
+            'A previously superseded document is missing from the replacement acknowledgement.')
+    previous_proofs = {**batch.get('verified_runs', {}), **archived}
+    for previous_run, proof in previous_proofs.items():
+        if previous_run == run_id or proof['document_id'] not in affected_documents:
+            continue
+        require(previous_run != run_id and len(previous_run) == 32
+                and all(c in '0123456789abcdef' for c in previous_run), 'Invalid previous verification run.')
+        require(proof['document_id'] != document['id'], 'Do not count the same document twice in one batch.')
+        previous = read_json(regular_path(regular_path(base / previous_run) / 'state.json'))
+        old = previous['document']
+        current = affected_documents[proof['document_id']]
+        require(previous['run_id'] == previous_run and previous['phase'] == 'complete'
+                and not previous.get('failed') and previous.get('batch_id', batch['batch_id']) == batch['batch_id']
+                and old['id'] == proof['document_id'] and old['revision'] == proof['revision']
+                and [page['captureId'] for page in old['pages']] == proof['capture_ids']
+                and current['revision'] == old['revision'] + 1,
+                'Affected previous completion changed outside this verified merge.')
+        require('source_pages' not in proof or source_pages(old) == proof['source_pages'],
+                'Previous source hashes differ from the archived verification proof.')
+        if old.get('duplicateOf') in absorbed:
+            require(current.get('duplicateOf') == document['id'] and not current.get('mergedInto')
+                    and current['pages'] == old['pages'],
+                    'A retargeted duplicate must preserve its original pages and retained destination.')
+        else:
+            require(old['pages'] and current['id'] in absorbed and not current.get('duplicateOf'),
+                    'An affected previous completion must be wholly merged into the new document.')
+            old_ids = [page['captureId'] for page in old['pages']]
+            start = target_ids.index(old_ids[0]) if old_ids[0] in target_ids else -1
+            retained = target_pages[start:start + len(old_ids)] if start >= 0 else []
+            require([page['captureId'] for page in retained] == old_ids
+                    and all(page.get('sha256') and page['sha256'] == other.get('sha256')
+                            for page, other in zip(old['pages'], retained)),
+                    'The new document must preserve every prior source hash and its consecutive page order.')
+        superseded.append(dict(run_id=previous_run, document_id=old['id'],
+                               from_revision=old['revision'], to_revision=current['revision'],
+                               relationship='duplicate' if old.get('duplicateOf') in absorbed else 'merged'))
+    return superseded
+
+
 def verify_run(repo, run_id, owner):
     require(isinstance(run_id, str) and len(run_id) == 32
             and all(c in "0123456789abcdef" for c in run_id), "Invalid worker run ID.")
@@ -44,6 +97,9 @@ def verify_run(repo, run_id, owner):
             and "/" not in submit_name and "\\" not in submit_name and ":" not in submit_name,
             "Submit response must name a journal file in this run.")
     submit = read_json(regular_path(work / submit_name))
+    require(isinstance(submit.get('saved'), list) and all(isinstance(item, dict)
+            and isinstance(item.get('id'), str) and type(item.get('revision')) is int and item['revision'] > 0
+            for item in submit['saved']), 'Invalid affected-document acknowledgement.')
     saved_ids = [item["id"] for item in submit["saved"]]
     require(len(saved_ids) == len(set(saved_ids))
             and all(isinstance(did, str) and UUID.fullmatch(did) for did in saved_ids),
@@ -101,8 +157,27 @@ def verify_run(repo, run_id, owner):
         else:
             require(document["checks"]["pdf"] is True and document["reviewedPdfSha256"] == pdf_hash,
                     "Final PDF visual attestation differs.")
+    affected_documents = {document_id: document}
+    for acknowledgement in submit['saved']:
+        did = acknowledgement['id']
+        if did == document_id:
+            continue
+        current = client.get('/api/documents/' + did)['document']
+        require(current['id'] == did and current['revision'] == acknowledgement['revision'],
+                'An affected document changed after submission.')
+        intended_document = next((item for item in affected or [] if item['id'] == did), None)
+        if intended_document is not None:
+            require(current['revision'] == intended_document['revision'] + 1
+                    and current['pages'] == intended_document['pages']
+                    and current.get('mergedInto') == intended_document.get('mergedInto')
+                    and current.get('duplicateOf') == intended_document.get('duplicateOf'),
+                    'Saved donor pages or relationships differ from the frozen merge.')
+        affected_documents[did] = current
+    superseded = superseded_documents(base, batch, run_id, document, affected_documents)
     summary = dict(verified=True, batch_id=batch["batch_id"], batch_phase=batch["phase"], run_id=run_id, document_id=document_id,
                    affected_document_ids=affected_ids,
+                   superseded_run_ids=[item['run_id'] for item in superseded],
+                   superseded_documents=superseded, source_pages=source_pages(document),
                    capture_ids=actual, page_count=len(actual), status=document["status"],
                    revision=document["revision"], claim_closed=True, attempt_saved=True,
                    pdf_applicable=applicable, pdf_sha256=pdf_hash,

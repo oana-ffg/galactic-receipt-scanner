@@ -35,7 +35,7 @@ class VerificationTests(unittest.TestCase):
         self.origin = 'https://scanner.example'
         self.document_id = '11111111-1111-4111-8111-111111111111'
         self.capture_id = '22222222-2222-4222-8222-222222222222'
-        self.page = dict(captureId=self.capture_id, crop=[0, 0, 100, 200], rotation=0)
+        self.page = dict(captureId=self.capture_id, sha256='1' * 64, crop=[0, 0, 100, 200], rotation=0)
         self.document = dict(id=self.document_id, revision=5, status='model-review',
                              filename='synthetic.pdf', pages=[self.page],
                              checks=dict(pdf=True), reviewedPdfSha256='b' * 64,
@@ -74,6 +74,156 @@ class VerificationTests(unittest.TestCase):
         self.assertNotIn('synthetic-private-token', json.dumps(result))
         self.assertNotIn('extraction', result)
         self.assertEqual(self.client.get.call_count, 2)
+
+    def merged_receipt(self):
+        donor_id = '33333333-3333-4333-8333-333333333333'
+        pages = [dict(self.page, captureId='44444444-4444-4444-8444-444444444444', sha256='4' * 64),
+                 dict(self.page, captureId='55555555-5555-4555-8555-555555555555', sha256='5' * 64)]
+        old = dict(id=donor_id, revision=7, pages=copy.deepcopy(pages), duplicateOf=None, mergedInto=None)
+        previous_run = 'b' * 32
+        previous_dir = self.work.parent / previous_run
+        previous_dir.mkdir()
+        self.write(previous_dir / 'state.json', dict(run_id=previous_run, phase='complete',
+                   batch_id='c' * 32, document=old))
+        self.write(self.work.parent / 'batch-state.json', dict(batch_id='c' * 32, started_at=100,
+                   phase='active', owner='synthetic-task', verified_runs={previous_run: dict(
+                       document_id=donor_id, revision=7, capture_ids=[p['captureId'] for p in pages],
+                       source_pages=module.source_pages(old))}))
+        self.document['pages'].extend(pages)
+        self.state['document'] = copy.deepcopy(self.document)
+        self.state['draft']['target']['pages'] = copy.deepcopy(self.document['pages'])
+        self.state['draft']['page_review']['capture_ids'] = [p['captureId'] for p in self.document['pages']]
+        self.state['pdf']['pages'] = 3
+        donor = dict(id=donor_id, revision=8, pages=[], mergedInto=self.document_id, duplicateOf=None)
+        self.state['draft']['documents'] = [dict(self.document, revision=3), dict(donor, revision=7)]
+        self.write(self.work / '0039-submit-response.json', dict(saved=[
+            dict(id=self.document_id, revision=4), dict(id=donor_id, revision=8)]))
+        self.client.get.side_effect = lambda url: (dict(claim_active=False, attempt_saved=True)
+            if url.startswith('/api/processing/readings?') else dict(document=donor if url.endswith(donor_id) else self.document))
+        return donor
+
+    def test_later_slip_verifies_whole_receipt_absorption_after_pdf_completion(self):
+        self.merged_receipt()
+        self.assertEqual(self.verify()['superseded_run_ids'], ['b' * 32])
+        self.document['pdf']['sha256'] = '0' * 64
+        with self.assertRaisesRegex(InputError, 'PDF attestation'):
+            self.verify()
+
+    def test_actual_guard_counts_a_late_merge_once_and_revalidates_it_at_finish(self):
+        from receipt_batch import BatchGuard
+        self.merged_receipt()
+        self.write(self.work / 'state.json', self.state)
+        path = self.work.parent / 'batch-state.json'
+        batch = json.loads(path.read_text())
+        self.write(path, {**batch, 'requested_count': 1, 'completed_count': 1})
+        guard = BatchGuard(self.work.parent, 'synthetic-task')
+        self.addCleanup(guard.close)
+        result = guard.handle(dict(op='verify', run_id=self.run_id))
+        self.assertEqual(result['completed_count'], 1)
+        self.assertEqual(set(result['verified_runs']), {self.run_id})
+        self.assertEqual(result['superseded_runs']['b' * 32]['proof'], batch['verified_runs']['b' * 32])
+        replay = guard.handle(dict(op='verify', run_id=self.run_id))
+        self.assertEqual(replay['completed_count'], 1)
+        finished = guard.handle(dict(op='finish'))
+        self.assertEqual(finished['phase'], 'complete')
+        for state in [replay, finished]:
+            proof = state['verified_runs'][self.run_id]
+            self.assertEqual(proof['superseded_run_ids'], ['b' * 32])
+            self.assertEqual(proof['superseded_documents'], result['verification']['superseded_documents'])
+            self.assertEqual(proof['source_pages'], module.source_pages(self.document))
+
+    def test_archived_merge_evidence_is_rechecked_on_repeat_and_finish(self):
+        from receipt_batch import BatchGuard
+        donor = self.merged_receipt()
+        self.write(self.work / 'state.json', self.state)
+        path = self.work.parent / 'batch-state.json'
+        batch = json.loads(path.read_text())
+        self.write(path, {**batch, 'requested_count': 1, 'completed_count': 1})
+        guard = BatchGuard(self.work.parent, 'synthetic-task')
+        self.addCleanup(guard.close)
+        guard.handle(dict(op='verify', run_id=self.run_id))
+        original_pages = copy.deepcopy(self.document['pages'])
+        previous_path = self.work.parent / ('b' * 32) / 'state.json'
+        previous = json.loads(previous_path.read_text())
+        for corruption in ['source', 'order', 'prior-proof', 'revision']:
+            with self.subTest(corruption=corruption):
+                pages = copy.deepcopy(original_pages)
+                old = copy.deepcopy(previous)
+                donor['revision'] = 8
+                if corruption == 'source':
+                    pages[1]['sha256'] = '0' * 64
+                elif corruption == 'order':
+                    pages[1], pages[2] = pages[2], pages[1]
+                elif corruption == 'prior-proof':
+                    old['document']['pages'][0]['sha256'] = pages[1]['sha256'] = '0' * 64
+                else:
+                    donor['revision'] = 9
+                self.write(previous_path, old)
+                self.document['pages'] = copy.deepcopy(pages)
+                self.state['document']['pages'] = copy.deepcopy(pages)
+                self.state['draft']['target']['pages'] = copy.deepcopy(pages)
+                self.state['draft']['page_review']['capture_ids'] = [p['captureId'] for p in pages]
+                self.state['draft']['documents'][1]['revision'] = donor['revision'] - 1
+                self.write(self.work / '0039-submit-response.json', dict(saved=[
+                    dict(id=self.document_id, revision=4), dict(id=donor['id'], revision=donor['revision'])]))
+                self.write(self.work / 'state.json', self.state)
+                for request in [dict(op='verify', run_id=self.run_id), dict(op='finish')]:
+                    with self.assertRaises(InputError):
+                        guard.handle(request)
+                    self.assertEqual(guard.state['phase'], 'active')
+
+    def test_retargeted_duplicate_preserves_its_pages_without_entering_the_pdf(self):
+        donor = self.merged_receipt()
+        alias_id = '66666666-6666-4666-8666-666666666666'
+        duplicate = dict(id=alias_id, revision=2, pages=[dict(self.page, captureId=alias_id)],
+                         duplicateOf=donor['id'], mergedInto=None)
+        old_run = 'd' * 32
+        old_dir = self.work.parent / old_run
+        old_dir.mkdir()
+        self.write(old_dir / 'state.json', dict(run_id=old_run, phase='complete', document=duplicate))
+        path = self.work.parent / 'batch-state.json'
+        batch = json.loads(path.read_text())
+        batch['verified_runs'][old_run] = dict(document_id=alias_id, revision=2, capture_ids=[alias_id])
+        self.write(path, batch)
+        alias = {**copy.deepcopy(duplicate), 'revision': 3, 'duplicateOf': self.document_id}
+        path = self.work / '0039-submit-response.json'
+        response = json.loads(path.read_text())
+        response['saved'].append(dict(id=alias_id, revision=3))
+        self.write(path, response)
+        self.client.get.side_effect = lambda url: (dict(claim_active=False, attempt_saved=True)
+            if url.startswith('/api/processing/readings?') else dict(document={
+                donor['id']: donor, alias_id: alias, self.document_id: self.document}[url.rsplit('/', 1)[1]]))
+        self.assertEqual(self.verify()['superseded_run_ids'], ['b' * 32, old_run])
+        alias['pages'][0]['rotation'] = 90
+        with self.assertRaisesRegex(InputError, 'duplicate must preserve'):
+            self.verify()
+
+    def test_merge_cannot_supersede_changed_sources_or_reordered_pages(self):
+        self.merged_receipt()
+        original = copy.deepcopy(self.document['pages'])
+        for pages in [[original[0], original[2], original[1]], original[:2],
+                      [original[0], dict(original[1], sha256='0' * 64), original[2]]]:
+            self.document['pages'] = copy.deepcopy(pages)
+            self.state['document']['pages'] = copy.deepcopy(pages)
+            self.state['draft']['target']['pages'] = copy.deepcopy(pages)
+            self.state['draft']['page_review']['capture_ids'] = [p['captureId'] for p in pages]
+            self.state['pdf']['pages'] = len(pages)
+            with self.assertRaisesRegex(InputError, 'prior source hash'):
+                self.verify()
+
+    def test_unrelated_or_stale_donor_change_cannot_replace_previous_proof(self):
+        donor = self.merged_receipt()
+        donor['mergedInto'] = self.capture_id
+        with self.assertRaisesRegex(InputError, 'relationships differ'):
+            self.verify()
+        donor['mergedInto'] = self.document_id
+        donor['revision'] += 1
+        with self.assertRaisesRegex(InputError, 'changed after submission'):
+            self.verify()
+        donor['revision'] -= 1
+        self.state['draft']['documents'][1]['revision'] -= 1
+        with self.assertRaisesRegex(InputError, 'relationships differ'):
+            self.verify()
 
     def test_failed_or_unfinished_run_cannot_count(self):
         for values in [dict(phase='submitted'), dict(failed=dict(error='synthetic'))]:

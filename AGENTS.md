@@ -14,6 +14,27 @@ desk and replaces receipts one by one, using a large desktop preview and red/amb
 feedback. The operator's work ends after scanning. Organisation, OCR review, PDF output
 and reporting belong to the downstream processing workflow, not to the operator.
 
+### Receipt organization is incremental
+
+One purchase can span several scans and pieces of paper. Long receipts are scanned in
+consecutive sections; payment slips may be adjacent or turn up much later. Match using
+vendor, date/time, amount and transaction references, preserving uncertainty where those
+conflict. Separate paper and an earlier processing pass are not reasons to reject a match.
+
+A later matching slip or continuation must be able to join a previously processed
+receipt, including within the same batch. Preserve whole existing page groups, regenerate
+the searchable PDF and verify the new result. Supersede the old completion proof while
+retaining its journal/history; count the resulting document once. Do not protect progress
+counters by freezing receipt membership or forbidding legitimate donor documents.
+Splitting or reordering an incorrect existing group is a separate reviewed operation.
+
+Batch guards, worker journals/locks and the actual automation configuration are operational
+state. Memory entries are historical notes, not locks or current stop instructions. Check
+the real state before declaring a block or requesting recovery; never resurrect a resolved
+incident because a memory entry still says it is blocked. Repair briefs must include both
+the failing integrity check and the intended receipt behavior, not just an instruction to
+prevent whatever triggered the check.
+
 The initial use is volunteer receipt digitisation for Kattekøbing. The source is intended
 for a **public GitHub repository**, so others can use it for similar work. Keep the
 implementation generic. Never put actual receipts, extracted text, financial information,

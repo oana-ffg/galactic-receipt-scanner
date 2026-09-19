@@ -65,12 +65,22 @@ class BatchGuard:
             self.check_worker_closed()
             proof = verify_run(self.base.parent.parent, request.get("run_id"), self.owner)
             runs = dict(self.state.get("verified_runs", {}))
-            previously_verified = {p["document_id"] for rid, p in runs.items() if rid != proof["run_id"]}
+            history = dict(self.state.get('superseded_runs', {}))
+            prior_targets = [p['document_id'] for rid, p in runs.items() if rid != proof['run_id']]
+            prior_targets.extend(item['proof']['document_id'] for item in history.values())
+            require(proof['document_id'] not in prior_targets, 'Do not count the same document twice in one batch.')
             affected = set(proof.get("affected_document_ids", [proof["document_id"]]))
-            require(not (previously_verified & affected),
-                    "Do not count the same document twice or affect a document already verified in one batch.")
+            overlaps = {rid for rid, previous in runs.items() if rid != proof['run_id']
+                        and previous['document_id'] in affected}
+            superseded = set(proof.get('superseded_run_ids', []))
+            archived = {rid for rid, item in history.items() if item['replaced_by'] == proof['run_id']}
+            require(superseded == overlaps | archived,
+                    'Every affected previous completion must have a verified whole-document replacement.')
+            for rid in overlaps:
+                history[rid] = dict(proof=runs.pop(rid), replaced_by=proof['run_id'], superseded_at=time.time())
             runs[proof["run_id"]] = proof
-            state = self.save({**self.state, "verified_runs": runs, "completed_count": len(runs)})
+            state = self.save({**self.state, "verified_runs": runs, 'superseded_runs': history,
+                               "completed_count": len(runs)})
             return {**state, "verification": proof, "next": "finish" if len(runs) >= state["requested_count"] else "dispatch"}
         if op == "finish":
             self.check_worker_closed()
@@ -92,7 +102,9 @@ class BatchGuard:
                 require(worker["run_id"] in runs, "Verify the last completed worker through this guard before finishing.")
             require(len(runs) >= self.state.get("requested_count", 10) or exhausted,
                     "Batch target not reached. Dispatch the next worker; only a recorded empty/busy claim can finish early.")
-            return self.save({**self.state, "phase": "complete", "stop_reason": "queue-empty-or-busy" if exhausted else "target-reached"})
+            refreshed = {rid: verify_run(self.base.parent.parent, rid, self.owner) for rid in runs}
+            return self.save({**self.state, 'verified_runs': refreshed, "phase": "complete",
+                              "stop_reason": "queue-empty-or-busy" if exhausted else "target-reached"})
         require(op == "block", "Expected status, verify, finish, or block.")
         reason = request.get("reason")
         require(isinstance(reason, str) and 0 < len(reason.strip()) <= 2000, "A non-sensitive failure reason is required.")

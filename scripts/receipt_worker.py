@@ -267,8 +267,11 @@ class Worker:
                 "Worker belongs to a different batch; preserve the active claim.")
         runs = batch.get("verified_runs", {})
         require(isinstance(runs, dict), "Batch verification history is invalid; preserve the active claim.")
+        history = batch.get('superseded_runs', {})
+        require(isinstance(history, dict) and all(isinstance(item, dict) and isinstance(item.get('proof'), dict)
+                for item in history.values()), 'Batch supersession history is invalid; preserve the active claim.')
         document_ids = set()
-        for proof in runs.values():
+        for proof in [*runs.values(), *(item['proof'] for item in history.values())]:
             require(isinstance(proof, dict) and proof.get("batch_id") == batch["batch_id"]
                     and isinstance(proof.get("document_id"), str) and UUID.fullmatch(proof["document_id"]),
                     "Batch verification history is invalid; preserve the active claim.")
@@ -417,8 +420,6 @@ class Worker:
         selected = selection.get("capture_ids", [p["captureId"] for p in target["pages"]])
         require(isinstance(donor_ids, list) and len(donor_ids) < 20 and len(set(donor_ids)) == len(donor_ids)
                 and target["id"] not in donor_ids, "Invalid grouping donors.")
-        require(not (set(donor_ids) & self.verified_document_ids()),
-                "A document already verified by this batch cannot be used as a grouping donor.")
         donors = [self.get_document(did) for did in donor_ids]
         before = deepcopy([target] + donors)
         require(all(not d["mergedInto"] and not d["duplicateOf"] for d in before), "Grouping requires retained documents.")

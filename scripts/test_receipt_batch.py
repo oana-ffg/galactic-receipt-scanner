@@ -159,7 +159,8 @@ class BatchGuardTests(unittest.TestCase):
             with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id=run, document_id=f'doc-{index}')):
                 result = guard.handle(dict(op='verify', run_id=run))
         self.assertEqual(result['next'], 'finish')
-        self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'target-reached')
+        with patch.object(module, 'verify_run', side_effect=lambda repo, rid, owner: guard.state['verified_runs'][rid]):
+            self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'target-reached')
 
     def test_verification_is_idempotent_and_different_run_cannot_double_count_document(self):
         guard = self.guard()
@@ -181,10 +182,49 @@ class BatchGuardTests(unittest.TestCase):
         with patch.object(module, 'verify_run', return_value=first):
             guard.handle(dict(op='verify', run_id='a' * 32))
         with patch.object(module, 'verify_run', return_value=second):
-            with self.assertRaisesRegex(module.InputError, 'affect a document already verified'):
+            with self.assertRaisesRegex(module.InputError, 'verified whole-document replacement'):
                 guard.handle(dict(op='verify', run_id='b' * 32))
         self.assertEqual(guard.state['completed_count'], 1)
         self.assertEqual(set(guard.state['verified_runs']), {'a' * 32})
+
+    def test_later_merge_supersedes_multiple_completions_and_keeps_history(self):
+        guard = self.guard()
+        guard.start(3)
+        for rid, did in [('a', 'receipt'), ('b', 'continuation'), ('c', 'unrelated')]:
+            proof = dict(verified=True, run_id=rid * 32, document_id=did)
+            with patch.object(module, 'verify_run', return_value=proof):
+                guard.handle(dict(op='verify', run_id=rid * 32))
+        merged = dict(verified=True, run_id='d' * 32, document_id='slip',
+                      affected_document_ids=['slip', 'receipt', 'continuation'],
+                      superseded_run_ids=['a' * 32, 'b' * 32])
+        with patch.object(module, 'verify_run', return_value=merged):
+            result = guard.handle(dict(op='verify', run_id='d' * 32))
+        self.assertEqual(result['completed_count'], 2)
+        self.assertEqual(result['next'], 'dispatch')
+        self.assertEqual(set(guard.state['verified_runs']), {'c' * 32, 'd' * 32})
+        self.assertEqual(guard.state['superseded_runs']['a' * 32]['proof']['document_id'], 'receipt')
+        replay = dict(merged)
+        with patch.object(module, 'verify_run', return_value=replay):
+            self.assertEqual(guard.handle(dict(op='verify', run_id='d' * 32))['completed_count'], 2)
+        with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id='e' * 32, document_id='receipt')):
+            with self.assertRaisesRegex(module.InputError, 'same document twice'):
+                guard.handle(dict(op='verify', run_id='e' * 32))
+        again = dict(verified=True, run_id='f' * 32, document_id='later-slip',
+                     affected_document_ids=['later-slip', 'slip'], superseded_run_ids=['d' * 32])
+        with patch.object(module, 'verify_run', return_value=again):
+            self.assertEqual(guard.handle(dict(op='verify', run_id='f' * 32))['completed_count'], 2)
+        self.assertEqual(set(guard.state['superseded_runs']), {'a' * 32, 'b' * 32, 'd' * 32})
+
+    def test_finish_rechecks_current_completions_and_refuses_drift(self):
+        guard = self.guard()
+        guard.start(1)
+        proof = dict(verified=True, run_id='a' * 32, document_id='receipt')
+        with patch.object(module, 'verify_run', return_value=proof):
+            guard.handle(dict(op='verify', run_id='a' * 32))
+        with patch.object(module, 'verify_run', side_effect=module.InputError('Saved document revision differs')):
+            with self.assertRaisesRegex(module.InputError, 'revision differs'):
+                guard.handle(dict(op='finish'))
+        self.assertEqual(guard.state['phase'], 'active')
 
     def test_previous_empty_or_released_claim_is_not_exhaustion(self):
         guard = self.guard()

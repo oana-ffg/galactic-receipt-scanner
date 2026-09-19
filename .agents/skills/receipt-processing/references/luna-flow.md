@@ -61,6 +61,10 @@ running for hours. A wait timeout is not a deadline or a reason to abandon this 
    Include each chosen document's entire page group in its existing order. Attach a
    matching payment slip to the whole receipt, never just its lower section. A separate
    sheet is not by itself a reason to exclude a matching slip.
+   A receipt processed earlier, even in this batch, can still receive matching pages.
+   Submit the whole-document merge normally; Python verifies the new result and the
+   parent guard supersedes the earlier completion proof. Do not keep a known match
+   separate merely to preserve a batch counter.
    Fill the returned exclusion rows with specific reasons; remove a row if you retain
    that page instead. Context summaries alone are not inspected OCR/images and do not
    need exclusion rows. Python validates and saves the immutable initial reading/layout,

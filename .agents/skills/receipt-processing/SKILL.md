@@ -22,6 +22,13 @@ end with "skill loaded" or ask which batch/range when none was specified. Announ
 default and begin connection preparation and worker dispatch. An explicit request to
 explain, inspect or edit this skill is not a processing run.
 
+Before treating any previous incident as a blocker, read the current
+`.local/receipt-worker/batch-state.json` and relevant worker state/lock evidence.
+That file is the state read and updated by `receipt_batch.py`; automation memory is
+historical context, not a block. Check the automation's actual configuration for its
+schedule status. A complete batch needs no further resolution even if an old note says
+blocked. A genuinely active/blocked batch still requires the documented recovery path.
+
 **Delegated Luna: read [Luna's short flow](references/luna-flow.md), then execute the
 parent's verified handoff. Stop reading this entrypoint here.** The remaining sections
 are coordinator/Astra guidance. Luna does not repeat connection/ownership verification,
@@ -91,7 +98,12 @@ deferred-finance flag with Astra or invoke Qwen/Mistral during this first pass.
    and keeping its pages together. It cannot take only one page from another receipt.
    Python expands a neighboring scan to its entire current document when fetching OCR.
    A matching slip can join the whole receipt; being a separate sheet alone is not a
-   reason to exclude it. Splitting/reordering an existing document is separate Astra
+   reason to exclude it. Previously processed receipts remain eligible donors, including
+   receipts verified earlier in this batch. After a later merge, the guard replaces the
+   earlier completion proof with the verified merged result, preserves the old proof in
+   history and counts the resulting document once. A count can decrease when two counted
+   receipts join; continue until the guard reports the target reached or actual exhaustion.
+   Splitting/reordering an existing document is separate Astra
    regrouping review, using the existing detach workflow after an independent checkpoint.
    On `regrouping_required`, keep the claimed document intact, explain the disputed
    association in `uncertainties` and `evidence`, and finish with that review flag.

@@ -987,7 +987,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
         self.assertNotIn("draft", self.worker.state)
 
-    def test_verified_document_cannot_be_reused_as_grouping_donor(self):
+    def test_verified_document_can_receive_a_later_matching_slip(self):
         self.claimed()
         self.send("previews", capture_ids=[DID, OTHER])
         proof = dict(batch_id=self.batch.state['batch_id'], document_id=OTHER)
@@ -1000,9 +1000,17 @@ class WorkerTests(unittest.TestCase):
             "grouping": {"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
                          "evidence": "Synthetic continuation candidate."},
         })
-        self.assertIn("already verified", result["input_error"])
+        self.assertTrue(result['ok'], result)
         self.assertEqual(self.fake.documents, before)
-        self.assertNotIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.assertIn(("POST", "/api/processing/draft"), self.fake.calls)
+        self.assertEqual(self.worker.state['draft']['page_review']['capture_ids'], [DID, OTHER])
+
+    def test_superseded_receipts_remain_excluded_from_fresh_queue_claims(self):
+        self.batch.save({**self.batch.state, 'superseded_runs': {
+            'a' * 32: {'proof': {'batch_id': self.batch.state['batch_id'], 'document_id': OTHER},
+                       'replaced_by': 'b' * 32}}})
+        self.send('claim', viewer_checked=True)
+        self.assertEqual(self.fake.claim_bodies[-1]['exclude_document_ids'], [OTHER])
 
     def test_grouping_preserves_sources_and_annotations(self):
         self.fake.documents[OTHER]["annotations"] = [{"captureId": OTHER, "text": "synthetic prior annotation"}]
