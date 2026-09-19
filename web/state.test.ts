@@ -262,3 +262,52 @@ it("an explicit retake of a forced shape retains identity when no outline is det
     paused: true,
   });
 });
+
+it("keeps a rejected original without recapturing it or linking the next receipt", () => {
+  const s = new CaptureState();
+  s.control("start");
+  const id = crypto.randomUUID();
+  s.failed("Blurred", "retake", id);
+  expect(s.canKeep(id)).toBe(true);
+  s.kept(crypto.randomUUID(), 9);
+  expect(s.value.needsAttention).toBe(true);
+  s.kept(id, 9);
+  expect(s.value).toMatchObject({
+    count: 9,
+    lastSaved: id,
+    armed: false,
+    retakeOf: null,
+    paused: false,
+    needsAttention: false,
+    phase: "amber",
+  });
+  for (const t of [0, 500, 1000, 1500]) expect(s.observe(clear, t)).toBeNull();
+  s.observe({ ...clear, empty: true, ok: false }, 2000);
+  s.observe({ ...clear, empty: true, ok: false }, 2500);
+  expect(s.value.armed).toBe(true);
+  for (const t of [3000, 3400, 3700]) expect(s.observe(clear, t)).toBeNull();
+  expect(s.observe(clear, 4000)).toBeTypeOf("string");
+  expect(s.value.retakeOf).toBeNull();
+});
+
+it("can keep after removal, but never during an upload or after choosing another retake", () => {
+  const s = new CaptureState();
+  s.control("start");
+  const id = crypto.randomUUID();
+  s.failed("Blurred", "retake", id);
+  s.observe({ ...clear, empty: true, ok: false }, 0);
+  s.observe({ ...clear, empty: true, ok: false }, 500);
+  expect(s.value.lastCapture).toBeNull();
+  expect(s.canKeep(id)).toBe(true);
+  s.kept(id, 10);
+  expect(s.value).toMatchObject({
+    armed: true,
+    lastCapture: null,
+    retakeOf: null,
+  });
+  s.failed("Upload failed", "upload", id);
+  expect(s.canKeep(id)).toBe(false);
+  s.failed("Blurred", "retake", id);
+  s.control(`retake:${crypto.randomUUID()}`);
+  expect(s.canKeep(id)).toBe(false);
+});

@@ -44,7 +44,7 @@ if (location.pathname === "/agent-access") {
     ${isCamera ? "" : '<p id="connection-warning" class="connection-warning" role="status"></p>'}
     <div class="workspace"><section class="capture-panel"><div class="preview" id="preview"><${isCamera ? "video autoplay muted playsinline" : "canvas"} id="feed"></${isCamera ? "video" : "canvas"}>${isCamera ? "" : '<video id="live-feed" autoplay muted playsinline hidden></video>'}<span id="empty-preview">${isCamera ? "Enable the rear camera to begin" : "Waiting for phone preview"}</span></div>
     <p id="detail" class="detail">Keep one receipt on a dark, matte background, with all edges visible.</p>
-    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label><button id="test-audio" class="secondary">Test audio</button>'}<button id="force" class="secondary" disabled>Force take</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
+    <div class="controls">${isCamera ? '<button id="retake" class="secondary" disabled>Retake photo</button><button id="recover" disabled>Retry upload</button>' : '<button id="start">Start scanning</button><button id="pause" class="secondary">Pause</button><button id="retry" class="secondary">Retake photo</button><button id="recover" class="secondary">Retry upload</button><label class="toggle"><input id="audio" type="checkbox"> Audio</label><button id="test-audio" class="secondary">Test audio</button>'}<button id="keep" class="secondary" hidden disabled>Keep anyway — best available</button><button id="force" class="secondary" disabled>Force take</button><button id="clear-background" class="secondary" hidden disabled>Disable empty-desk calibration</button><button id="cancel-retake" class="secondary" hidden>Cancel retake</button></div>
     ${isCamera ? "" : '<p id="audio-warning" class="error" role="status"></p>'}
     <p id="background-status" class="detail" role="status" hidden></p>
     <p id="save-recovery" class="error save-recovery" role="alert" hidden></p><p id="error" class="error" role="alert"></p>${isCamera ? '<p id="connection-warning" class="connection-warning" role="status"></p>' : ""}</section>
@@ -103,6 +103,13 @@ function renderState(state: ScanState): void {
     Boolean(state.activeId) ||
     state.recovery === "upload" ||
     Boolean(retakePending);
+  element<HTMLButtonElement>("keep").hidden = !state.rejectedCapture;
+  element<HTMLButtonElement>("keep").disabled =
+    !state.supportsKeep ||
+    !state.cameraConnected ||
+    Boolean(state.activeId) ||
+    state.recovery !== "retake" ||
+    state.saveRecovery?.blocked === true;
   // Keep reset available for an already-open phone running the old client.
   element<HTMLButtonElement>("clear-background").hidden =
     !state.backgroundReady || !state.supportsBackgroundReset;
@@ -130,7 +137,9 @@ function renderState(state: ScanState): void {
         ? state.detectorReady
           ? "RECONNECTING"
           : "CAMERA STOPPED"
-        : state.manualReview && !state.activeId
+        : (state.manualReview ||
+              (state.keptCapture && state.lastCapture === state.keptCapture)) &&
+            !state.activeId
           ? "SAVED FOR REVIEW"
           : state.needsAttention
             ? "NEEDS ATTENTION"
@@ -204,6 +213,7 @@ function disconnected(reason = "Connection lost. Waiting to reconnect…"): void
     "retry",
     "recover",
     "force",
+    "keep",
     "cancel-retake",
     "clear-background",
   ]) {
@@ -264,6 +274,7 @@ function mountCamera(): void {
   element("recover").onclick = () => void camera.recover();
   element("retake").onclick = () => camera.retake();
   element("force").onclick = () => void camera.force();
+  element("keep").onclick = () => void camera.keep();
   element("cancel-retake").onclick = () =>
     void api("/api/control/cancel-retake", { method: "POST" }).catch(
       (problem) => error(messageOf(problem)),
@@ -623,12 +634,23 @@ function mountDashboard(): void {
     "retry",
     "recover",
     "force",
+    "keep",
     "cancel-retake",
     "clear-background",
   ]) {
     element(id).onclick = async () => {
       error("");
       try {
+        if (id === "keep") {
+          const captureId = lastState?.rejectedCapture;
+          if (!captureId) throw new Error("No rejected photo selected.");
+          if (direct.command(`keep:${captureId}`)) return;
+          await api("/api/control/keep", {
+            method: "POST",
+            body: JSON.stringify({ captureId }),
+          });
+          return;
+        }
         const command = id === "recover" ? "retry-upload" : id;
         if (direct.command(command)) return;
         await api(`/api/control/${command}`, {

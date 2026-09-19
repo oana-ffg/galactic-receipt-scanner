@@ -43,6 +43,14 @@ export const captures = sqliteTable(
     ),
   ],
 );
+export const captureKeeps = sqliteTable("capture_keeps", {
+  capture_id: text("capture_id")
+    .primaryKey()
+    .references(() => captures.id),
+  source_sha256: text("source_sha256").notNull(),
+  reason: text("reason").notNull(),
+  created_at: text("created_at").notNull(),
+});
 export const artifacts = sqliteTable(
   "artifacts",
   {

@@ -24,7 +24,11 @@ import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
 import { authorizeProcessor } from "./processing-access";
 import { connectionRoute } from "./connections";
-import { isControlCommand, retakeTarget } from "../web/control-command";
+import {
+  isControlCommand,
+  retakeTarget,
+  keepTarget,
+} from "../web/control-command";
 const APP_PAGES = new Set([
   "/",
   "/camera",
@@ -143,6 +147,8 @@ interface CaptureRow {
   pdf_available?: number;
   accepted_count?: number;
   manual_outline?: string | null;
+  kept?: string | null;
+  effective_status?: string;
 }
 function publicCapture(row: CaptureRow) {
   return {
@@ -154,7 +160,9 @@ function publicCapture(row: CaptureRow) {
     current_capture_id: row.current_capture_id,
     acceptedCount: row.accepted_count,
     created_at: row.created_at,
-    status: row.status,
+    status: row.effective_status ?? row.status,
+    source_status: row.status,
+    kept: row.kept ? JSON.parse(row.kept) : null,
     sha256: row.sha256,
     bytes: row.bytes,
     content_type: row.content_type,
@@ -188,15 +196,17 @@ async function captureAcknowledgement(row: CaptureRow) {
     ),
   };
 }
-// Legacy rows with no receipt_id use their own ID without rewriting source metadata.
-// Selection is derived from immutable take numbers, so retries and rejected retakes
-// cannot demote an accepted source. One accepted take represents each receipt.
-const currentTake =
-  "captures.status IN ('accepted','manual-review') AND NOT EXISTS (SELECT 1 FROM captures newer WHERE (newer.receipt_id=COALESCE(captures.receipt_id,captures.id) OR newer.id=COALESCE(captures.receipt_id,captures.id)) AND newer.status IN ('accepted','manual-review') AND ((newer.status='accepted' AND captures.status='manual-review') OR (newer.status=captures.status AND newer.take_number>captures.take_number)))";
-const receiptCount =
-  "SELECT COUNT(DISTINCT COALESCE(receipt_id,id)) FROM captures WHERE status IN ('accepted','manual-review')";
-const captureSelection = `SELECT captures.*, (${currentTake}) AS is_current,
-  (SELECT id FROM captures accepted WHERE (accepted.receipt_id=COALESCE(captures.receipt_id,captures.id) OR accepted.id=COALESCE(captures.receipt_id,captures.id)) AND accepted.status IN ('accepted','manual-review') ORDER BY (accepted.status='accepted') DESC,accepted.take_number DESC LIMIT 1) AS current_capture_id,
+// Keep decisions are separate from immutable upload status and acknowledgement hashes.
+const effectiveStatus = (alias: string) =>
+  `(CASE WHEN ${alias}.status='rejected' AND EXISTS(SELECT 1 FROM capture_keeps k WHERE k.capture_id=${alias}.id) THEN 'manual-review' ELSE ${alias}.status END)`;
+const currentStatus = effectiveStatus("captures");
+const newerStatus = effectiveStatus("newer");
+const acceptedStatus = effectiveStatus("accepted");
+const currentTake = `${currentStatus} IN ('accepted','manual-review') AND NOT EXISTS (SELECT 1 FROM captures newer WHERE (newer.receipt_id=COALESCE(captures.receipt_id,captures.id) OR newer.id=COALESCE(captures.receipt_id,captures.id)) AND ${newerStatus} IN ('accepted','manual-review') AND ((${newerStatus}='accepted' AND ${currentStatus}='manual-review') OR (${newerStatus}=${currentStatus} AND newer.take_number>captures.take_number)))`;
+const receiptCount = `SELECT COUNT(DISTINCT COALESCE(receipt_id,id)) FROM captures WHERE ${currentStatus} IN ('accepted','manual-review')`;
+const captureSelection = `SELECT captures.*, ${currentStatus} AS effective_status, (${currentTake}) AS is_current,
+  (SELECT json_object('source_sha256',k.source_sha256,'reason',k.reason,'created_at',k.created_at) FROM capture_keeps k WHERE k.capture_id=captures.id) AS kept,
+  (SELECT id FROM captures accepted WHERE (accepted.receipt_id=COALESCE(captures.receipt_id,captures.id) OR accepted.id=COALESCE(captures.receipt_id,captures.id)) AND ${acceptedStatus} IN ('accepted','manual-review') ORDER BY (${acceptedStatus}='accepted') DESC,accepted.take_number DESC LIMIT 1) AS current_capture_id,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='image') AS image_available,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='pdf') AS pdf_available`;
@@ -545,6 +555,30 @@ async function route(
       .run();
     return json({ id, kind, sha256: sha });
   }
+  const keep = path.match(/^\/api\/captures\/([^/]+)\/keep$/);
+  if (keep && method === "POST") {
+    const id = keep[1];
+    requireThat(UUID.test(id), 400, "Invalid capture ID.");
+    const row = await captureRow(env, id);
+    const input = await bodyJson(request);
+    requireThat(
+      input.sha256 === row.sha256 && input.reason === "best-available",
+      400,
+      "Confirm this exact original as best available.",
+    );
+    requireThat(
+      row.status === "rejected",
+      409,
+      "Only a completed rejected photo can be kept this way.",
+    );
+    await verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes);
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO capture_keeps(capture_id,source_sha256,reason,created_at) VALUES(?,?,?,?)",
+    )
+      .bind(id, row.sha256, "best-available", new Date().toISOString())
+      .run();
+    return json(publicCapture(await captureRow(env, id)));
+  }
   const finalize = path.match(/^\/api\/captures\/([^/]+)\/finalize$/);
   if (finalize && method === "POST") {
     const id = finalize[1];
@@ -853,7 +887,7 @@ async function route(
   if (path.startsWith("/api/control/") && method === "POST") {
     let command = path.slice("/api/control/".length);
     requireThat(!command.includes(":"), 400, "Unknown command.");
-    if (command === "retake") {
+    if (command === "retake" || command === "keep") {
       const { captureId } = await bodyJson(request);
       requireThat(
         typeof captureId === "string" && UUID.test(captureId),
@@ -866,11 +900,12 @@ async function route(
         409,
         "Wait for the original upload to finish before retaking.",
       );
-      command = `retake:${captureId}`;
+      command = `${command}:${captureId}`;
     }
     requireThat(isControlCommand(command), 400, "Unknown command.");
     const station = await stationRow(env);
     if (
+      keepTarget(command) ||
       retakeTarget(command) ||
       command === "cancel-retake" ||
       command === "force" ||
@@ -881,16 +916,25 @@ async function route(
       requireThat(
         station.expires > Date.now() &&
           station.updated > Date.now() - 5000 &&
-          (command === "clear-background"
-            ? state?.supportsBackgroundReset
-            : command === "set-background"
-              ? state?.supportsBackground
-              : command === "force"
-                ? state?.supportsForce
-                : state?.supportsTargetedRetake) === true,
+          (keepTarget(command)
+            ? state?.supportsKeep
+            : command === "clear-background"
+              ? state?.supportsBackgroundReset
+              : command === "set-background"
+                ? state?.supportsBackground
+                : command === "force"
+                  ? state?.supportsForce
+                  : state?.supportsTargetedRetake) === true,
         409,
         "Enable or reload the phone camera before using this control.",
       );
+      if (keepTarget(command))
+        requireThat(
+          state?.rejectedCapture === keepTarget(command) &&
+            state?.recovery === "retake",
+          409,
+          "This is no longer the failed photo on the phone.",
+        );
       // Targeted retakes are queued until the phone finishes any pending upload.
       // Its live state is authoritative; the stored heartbeat can lag a save acknowledgement.
       if (!retakeTarget(command))

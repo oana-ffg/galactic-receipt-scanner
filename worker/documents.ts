@@ -306,6 +306,17 @@ export async function documentRoute(
         }
       }
     }
+    if (!d.mergedInto && !d.duplicateOf) {
+      for (const [index, page] of d.pages.entries()) {
+        const source = captures.find((c) => c.id === page.captureId);
+        if (source?.kept) {
+          state.reasons.push(
+            `Page ${index + 1}: kept by the owner as best available despite failed quality checks. Original warning: ${source.metadata.quality?.reason ?? "Quality check failed."}`,
+          );
+          if (state.status === "ready") state.status = "review";
+        }
+      }
+    }
     function requireProcessing(reason: string) {
       state.reasons.push(reason);
       if (state.status === "ready") state.status = "processing";

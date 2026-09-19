@@ -85,6 +85,9 @@ export interface ScanState {
   supportsTargetedRetake?: boolean;
   selectedRetake?: boolean;
   supportsForce?: boolean;
+  supportsKeep?: boolean;
+  rejectedCapture?: string | null;
+  keptCapture?: string | null;
   supportsBackground?: boolean;
   supportsBackgroundReset?: boolean;
   backgroundReady?: boolean;
@@ -145,6 +148,8 @@ export interface Capture {
   ocr_error: string | null;
   outputs: { image: boolean; pdf: boolean };
   acceptedCount?: number;
+  source_status?: Capture["status"];
+  kept?: { source_sha256: string; reason: string; created_at: string } | null;
   manual_outline?: {
     id: string;
     source_sha256: string;

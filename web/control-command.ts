@@ -5,6 +5,14 @@ export function retakeTarget(command: string): string | null {
   return targetPattern.exec(command)?.[1] ?? null;
 }
 
+export function keepTarget(command: string): string | null {
+  return (
+    /^keep:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
+      command,
+    )?.[1] ?? null
+  );
+}
+
 export function isControlCommand(command: unknown): command is string {
   return (
     typeof command === "string" &&
@@ -18,6 +26,7 @@ export function isControlCommand(command: unknown): command is string {
       "set-background",
       "clear-background",
     ].includes(command) ||
-      retakeTarget(command) !== null)
+      retakeTarget(command) !== null ||
+      keepTarget(command) !== null)
   );
 }

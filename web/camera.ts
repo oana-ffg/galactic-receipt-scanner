@@ -4,7 +4,7 @@ import { SaveRecovery } from "./save-recovery";
 import { api } from "./api";
 import { messageOf, RequestError } from "./errors";
 import { pendingCaptures, savePending, type PendingCapture } from "./pending";
-import { retakeTarget } from "./control-command";
+import { retakeTarget, keepTarget } from "./control-command";
 import { CaptureState } from "./state";
 import { Vision } from "./vision";
 import { CameraFrames } from "./camera-frames";
@@ -58,6 +58,7 @@ export class PhoneCamera {
       if (!this.running || !this.connected || this.busy) return;
       if (command === "retry-upload") void this.recover();
       else if (command === "force") void this.force();
+      else if (keepTarget(command)) void this.keep(keepTarget(command)!);
       else this.machine.control(command);
       this.emitState();
     },
@@ -183,6 +184,45 @@ export class PhoneCamera {
     this.machine.control("retry");
     this.emitState();
   }
+  async keep(id = this.machine.value.rejectedCapture) {
+    if (
+      !id ||
+      !this.running ||
+      !this.connected ||
+      this.busy ||
+      !this.machine.canKeep(id)
+    )
+      return;
+    this.busy = true;
+    const generation = this.generation;
+    try {
+      const source = await api<import("./types").Capture>(
+        `/api/captures/${id}`,
+      );
+      const kept = await api<import("./types").Capture>(
+        `/api/captures/${id}/keep`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            sha256: source.sha256,
+            reason: "best-available",
+          }),
+        },
+      );
+      if (this.generation !== generation) return;
+      if (!kept.kept || kept.acceptedCount === undefined)
+        throw new Error("Keep acknowledgement is incomplete. Try again.");
+      this.machine.kept(id, kept.acceptedCount);
+    } catch (error) {
+      if (this.generation === generation)
+        this.machine.value.message = `Could not confirm keeping this photo: ${messageOf(error)}. Try Keep anyway again.`;
+    } finally {
+      if (this.generation === generation) {
+        this.busy = false;
+        this.emitState();
+      }
+    }
+  }
   private async keepAwake() {
     try {
       this.wakeLock = (await navigator.wakeLock?.request("screen")) ?? null;
@@ -285,6 +325,8 @@ export class PhoneCamera {
           this.sequence = result.sequence;
           if (result.command === "retry-upload") void this.recover();
           else if (result.command === "force") void this.force();
+          else if (keepTarget(result.command))
+            void this.keep(keepTarget(result.command)!);
           else this.machine.control(result.command);
         }
       } catch (error) {

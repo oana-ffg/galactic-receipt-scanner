@@ -14,6 +14,8 @@ export class CaptureState {
     retakeOf: null,
     supportsTargetedRetake: true,
     supportsForce: true,
+    supportsKeep: true,
+    rejectedCapture: null,
     supportsBackground: false,
     supportsBackgroundReset: false,
     selectedRetake: false,
@@ -91,6 +93,7 @@ export class CaptureState {
       this.value.paused = true;
       this.value.recovery = undefined;
       this.value.needsAttention = false;
+      this.value.rejectedCapture = null;
       this.value.phase = "red";
       this.value.message = target
         ? "Retake selected. Place that same receipt under the camera, then choose Start scanning."
@@ -115,6 +118,7 @@ export class CaptureState {
       this.value.message = "Paused.";
     }
     if (action === "start" || action === "retry") {
+      this.value.rejectedCapture = null;
       this.value.needsAttention = false;
       this.value.recovery = undefined;
       this.value.paused = false;
@@ -142,6 +146,7 @@ export class CaptureState {
     this.feedback = null;
     this.value.retakeOf ??= this.value.lastCapture;
     this.value.activeId = crypto.randomUUID();
+    this.value.rejectedCapture = null;
     this.value.manualReview = false;
     this.value.needsAttention = false;
     this.value.phase = "amber";
@@ -216,6 +221,7 @@ export class CaptureState {
     return null;
   }
   saved(id: string, count?: number, manual = false) {
+    this.value.rejectedCapture = null;
     this.value.removalDiagnostics = undefined;
     this.feedback = null;
     if (count !== undefined) this.value.count = count;
@@ -225,6 +231,7 @@ export class CaptureState {
     this.value.needsAttention = false;
     this.value.activeId = null;
     this.value.lastSaved = id;
+    this.value.keptCapture = null;
     this.value.lastCapture = id;
     this.value.retakeOf = null;
     this.value.selectedRetake = false;
@@ -241,6 +248,8 @@ export class CaptureState {
     this.reset();
   }
   failed(message: string, recovery?: "retake" | "upload", retainedId?: string) {
+    this.value.rejectedCapture =
+      recovery === "retake" ? (retainedId ?? null) : null;
     this.value.removalDiagnostics = undefined;
     if (retainedId) {
       this.value.lastCapture = retainedId;
@@ -266,6 +275,37 @@ export class CaptureState {
     // Re-establish stability and continuous paper removal after a connection gap.
     // Keep saved/failed captures and the removal latch intact.
     this.removal.reset();
+    this.reset();
+  }
+
+  canKeep(id: string): boolean {
+    return (
+      this.value.rejectedCapture === id &&
+      this.value.recovery === "retake" &&
+      !this.value.activeId &&
+      !this.value.saveRecovery?.blocked
+    );
+  }
+
+  kept(id: string, count: number) {
+    if (!this.canKeep(id)) return;
+    this.value.rejectedCapture = null;
+    this.value.count = count;
+    this.value.countKnown = true;
+    this.value.lastSaved = id;
+    this.value.keptCapture = id;
+    this.value.retakeOf = null;
+    this.value.selectedRetake = false;
+    this.value.recovery = undefined;
+    this.value.needsAttention = false;
+    this.value.manualReview = false;
+    this.value.paused = false;
+    this.value.phase = "amber";
+    this.value.message =
+      "Kept as best available; quality warning retained. Remove this receipt, then scan the next.";
+    // Preserve the removal gate: the same stationary receipt must not be captured again.
+    this.latched = false;
+    this.feedback = null;
     this.reset();
   }
 }
