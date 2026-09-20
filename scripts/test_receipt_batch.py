@@ -232,6 +232,81 @@ class BatchGuardTests(unittest.TestCase):
         self.assertEqual(result["phase"], "complete")
         worker.lock.close.assert_called_once_with()
 
+    def test_controller_contains_unexpected_completion_error_and_preserves_exact_claim(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "ready"}
+        worker.client.get.return_value = []
+        def prepare(_categories):
+            worker.state["phase"] = "claimed"
+            return {
+                "ok": True, "run_id": "a" * 32, "task_path": "/private/task.json",
+                "result_path": "/private/result.json", "pages": 1,
+            }
+
+        worker.prepare_luna_task.side_effect = prepare
+        worker.mutex = threading.RLock()
+        worker.stop_heartbeat = threading.Event()
+        worker.heartbeat.side_effect = lambda: worker.stop_heartbeat.wait()
+        worker.lock = Mock()
+        worker.work = self.base / ("a" * 32)
+        completion_calls = 0
+
+        def complete():
+            nonlocal completion_calls
+            completion_calls += 1
+            if completion_calls == 1:
+                worker.state["phase"] = "drafted"
+                raise TypeError("private implementation detail")
+            worker.state["phase"] = "complete"
+            return {"ok": True}
+
+        worker.complete_luna_task.side_effect = complete
+        worker.record.return_value = "0001-controller-completion-error.json"
+        proof = {"verified": True, "run_id": "a" * 32, "document_id": "receipt"}
+        with patch.object(module, "Worker", return_value=worker), \
+             patch.object(module, "verify_run", return_value=proof):
+            guard.handle({"op": "next"})
+            result = guard.handle({"op": "complete", "run_id": "a" * 32})
+            self.assertEqual(result["next"], "retry-controller")
+            self.assertEqual(result["retry_request"], {"op": "complete", "run_id": "a" * 32})
+            self.assertEqual(result["completion"]["error_type"], "TypeError")
+            self.assertTrue(result["completion"]["blocking"])
+            self.assertNotIn("private implementation detail", str(result))
+            self.assertNotIn("failed", worker.state)
+            self.assertFalse(worker.stop_heartbeat.is_set())
+            self.assertTrue(guard.worker_thread.is_alive())
+            self.assertIs(guard.worker, worker)
+            worker.failure.assert_not_called()
+            diagnostic = worker.record.call_args.args[1]
+            self.assertEqual(diagnostic["error_type"], "TypeError")
+            self.assertIn("private implementation detail", diagnostic["traceback"])
+
+            completed = guard.handle(result["retry_request"])
+
+        self.assertEqual(completed["phase"], "complete")
+        self.assertEqual(completed["completed_count"], 1)
+        self.assertNotIn("controller_failure", completed)
+        worker.release.assert_not_called()
+        worker.lock.close.assert_called_once_with()
+
+    def test_guard_close_does_not_release_recoverable_worker_after_process_error(self):
+        guard = self.guard()
+        worker = Mock()
+        worker.state = {"run_id": "a" * 32, "phase": "drafted"}
+        worker.stop_heartbeat = threading.Event()
+        worker.lock = Mock()
+        guard.worker = worker
+
+        guard.close()
+
+        worker.release.assert_not_called()
+        worker.lock.close.assert_called_once_with()
+
     def test_verified_completion_can_finish_after_transient_final_refresh_failure(self):
         lease = FakeLease()
         guard = module.BatchGuard(self.base, 'synthetic-task', lease)

@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+import traceback
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -265,7 +266,34 @@ class BatchGuard:
                 return {**self.state, "verification": self.state["verified_runs"][run_id], "next": "dispatch"}
             require(run_id == self.worker.state["run_id"], "Complete the exact active Luna task.")
             with self.worker.mutex:
-                result = self.worker.complete_luna_task()
+                try:
+                    result = self.worker.complete_luna_task()
+                except (OSError, KeyError, TypeError, ValueError) as error:
+                    # A deterministic completion bug must not escape the controller:
+                    # main() would exit and its finalizer could otherwise release a
+                    # still-recoverable, unsubmitted claim. Keep Worker.failed clear
+                    # so its heartbeat and exact idempotent completion retry remain
+                    # usable after the implementation is repaired. The traceback is
+                    # private journal evidence and is never returned to the coordinator.
+                    diagnostic_name = self.worker.record("controller-completion-error", {
+                        "operation": "complete",
+                        "error_type": type(error).__name__,
+                        "traceback": traceback.format_exc(),
+                    })
+                    message = "Deterministic completion failed; private journal retained. Retry this exact controller operation after repair."
+                    state = self.save({**self.state, "controller_failure": {
+                        "operation": "complete",
+                        "error": message,
+                        "error_type": type(error).__name__,
+                        "diagnostic_file": str(self.worker.work / diagnostic_name),
+                    }})
+                    return {**state, "completion": {
+                        "ok": False,
+                        "blocking": True,
+                        "phase": self.worker.state["phase"],
+                        "error": message,
+                        "error_type": type(error).__name__,
+                    }, "next": "retry-controller", "retry_request": {"op": "complete", "run_id": run_id}}
             if result.get("correction_required"):
                 return {**self.state, **result, "next": "correct-luna-result"}
             if result.get("ok") is not True or self.worker.state["phase"] != "complete":
@@ -330,9 +358,11 @@ class BatchGuard:
         for rid in overlaps:
             history[rid] = dict(proof=runs.pop(rid), replaced_by=proof["run_id"], superseded_at=time.time())
         runs[proof["run_id"]] = proof
-        return self.save({**self.state, "verified_runs": runs, "superseded_runs": history,
-                          "completed_count": len(runs), "active_run_id": None,
-                          "active_task_path": None})
+        state = {**self.state, "verified_runs": runs, "superseded_runs": history,
+                 "completed_count": len(runs), "active_run_id": None,
+                 "active_task_path": None}
+        state.pop("controller_failure", None)
+        return self.save(state)
 
     def finish_batch(self, reason, **values):
         self.check_worker_closed()
@@ -419,7 +449,10 @@ class BatchGuard:
         return result
 
     def close(self):
-        self.close_worker(release=True)
+        # Explicit protocol transitions own claim release.  A process-level
+        # exception must preserve the exact worker checkpoint for reconciliation
+        # instead of silently converting it into a released replacement job.
+        self.close_worker(release=False)
         if self.lease is not None:
             self.lease.close()
         self.lock.close()
