@@ -78,11 +78,15 @@ def discover(config=None, profile=None):
         candidates = [descriptor, REPO / '.local' / 'processing-host.json']
         for candidate in candidates:
             if candidate.exists() and candidate.is_file() and not candidate.is_symlink() and not candidate.is_junction():
-                value = json.loads(candidate.read_text(encoding='utf-8')).get('worker_profile')
+                host = json.loads(candidate.read_text(encoding='utf-8'))
+                value = host.get('worker_profile')
                 if isinstance(value, str):
                     settings = json.loads(Path(value).read_text(encoding='utf-8'))
                     if isinstance(settings.get('ppocr'), dict):
                         profile = value
+                        descriptor_config = host.get('client_config')
+                        if isinstance(descriptor_config, str):
+                            config = descriptor_config
                         break
     settings = json.loads(Path(profile).read_text(encoding='utf-8')) if profile else {}
     config = config or settings.get('client_config')
@@ -178,7 +182,7 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
     return str(prepared)
 
 
-def publish_host_descriptor(profile, python=None, *, name='receipt-ocr-host.json'):
+def publish_host_descriptor(profile, python=None, *, config=None, name='receipt-ocr-host.json'):
     """Publish only a locally verified profile and fixed worker executable paths."""
     profile_path = Path(profile)
     if (not profile_path.is_absolute() or not profile_path.is_file()
@@ -194,7 +198,16 @@ def publish_host_descriptor(profile, python=None, *, name='receipt-ocr-host.json
     artifact_directory(descriptor.parent)
     if descriptor.exists() and (not descriptor.is_file() or descriptor.is_symlink() or descriptor.is_junction()):
         raise ClientError('Processing host descriptor must be a regular file.')
-    body = json.dumps(dict(python=str(worker_python), worker_profile=str(profile_path))).encode()
+    settings = json.loads(profile_path.read_text(encoding='utf-8'))
+    config_value = config or settings.get('client_config')
+    if not isinstance(config_value, str):
+        raise ClientError('Use an explicit prepared client configuration.')
+    config_path = Path(config_value)
+    if (not config_path.is_absolute() or not config_path.is_file()
+            or config_path.is_symlink() or config_path.is_junction()):
+        raise ClientError('Use a prepared regular absolute client configuration.')
+    body = json.dumps(dict(python=str(worker_python), worker_profile=str(profile_path),
+                           client_config=str(config_path))).encode()
     candidate = descriptor.parent / ('processing-host-' + os.urandom(6).hex() + '.json')
     write_new_file(candidate, body)
     try:
@@ -214,7 +227,8 @@ def main():
     args = parser.parse_args()
     config, profile = discover(args.config, args.worker_profile)
     profile = ensure_profile(config, profile, force_cpu=args.cpu, node=args.node)
-    descriptor = publish_host_descriptor(profile, args.worker_python, name='receipt-ocr-host.json')
+    descriptor = publish_host_descriptor(profile, args.worker_python, config=config,
+                                         name='receipt-ocr-host.json')
     print(json.dumps({'profile': profile, 'descriptor': descriptor}))
 
 

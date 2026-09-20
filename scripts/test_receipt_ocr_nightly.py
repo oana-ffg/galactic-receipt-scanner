@@ -12,13 +12,13 @@ from contextlib import redirect_stdout
 
 from receipt_api import ClientError, ScannerClient
 import receipt_ocr_nightly as nightly
-from receipt_ocr_nightly import CachedBackend, day_window, drain, fingerprint, inventory, read_requirement, prepare_requirement
+from receipt_ocr_nightly import CachedBackend, day_window, drain, fingerprint, inventory, needs_ocr, read_requirement, prepare_requirement
 from receipt_ppocr_setup import install_models, MODELS, check_node
 
 
 def capture(cid='one', created='2026-09-16T12:00:00Z'):
     return dict(id=cid, sha256='a' * 64, created_at=created, is_current=True,
-                status='accepted', artifacts=[], metadata={})
+                status='accepted', ocr_status='awaiting Work', artifacts=[], metadata={})
 
 
 def result():
@@ -74,6 +74,31 @@ class NightlyTests(unittest.TestCase):
         with self.assertRaisesRegex(ClientError, 'source hash changed'):
             prepare_requirement(self.client, value, self.root)
         self.client.prepare.assert_not_called()
+
+    def test_main_drains_only_inventory_pages_awaiting_ocr(self):
+        completed = {**capture('completed'), 'ocr_status': 'unverified'}
+        missing = capture('missing')
+        self.client.origin = 'https://synthetic.example'
+        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts']}
+        summary = dict(complete=True, selected=1, verified=1, reused=0, retired=0,
+                       failures={}, remaining=0)
+
+        with patch.object(nightly, 'REPO', self.root), patch.object(nightly.os, 'chdir'), \
+                patch.object(nightly, 'discover', return_value=('config', 'profile')), \
+                patch.object(nightly, 'credentials', return_value={}), \
+                patch.object(nightly, 'ScannerClient', return_value=self.client), \
+                patch.object(nightly, 'ensure_profile', return_value='profile'), \
+                patch.object(nightly, 'inventory', return_value=[completed, missing]), \
+                patch.object(nightly, 'drain', return_value=summary) as drained, \
+                patch('sys.argv', ['receipt_ocr_nightly.py', '--date', '2026-09-16']), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(nightly.main(), 0)
+
+        self.assertEqual(drained.call_args.args[1], [missing])
+        saved = json.loads(next((self.root / '.local' / 'receipt-ocr-nightly').glob('*/last-run.json')).read_text())
+        self.assertEqual(saved['eligible'], 2)
+        self.assertEqual(saved['ocr_available'], 1)
+        self.assertEqual(saved['ocr_missing'], 1)
 
     def test_catchup_inventory_includes_today_without_future_scans(self):
         now = datetime(2026, 9, 17, 15, tzinfo=timezone.utc)
@@ -154,6 +179,14 @@ class NightlyTests(unittest.TestCase):
         scan['artifacts'] = []
         self.assertEqual(self.run_drain([scan])['verified'], 1)
         self.client.prepare.assert_called_once()
+
+    def test_inventory_ocr_status_selects_only_missing_pages(self):
+        missing = capture('missing')
+        completed = {**capture('completed'), 'ocr_status': 'unverified'}
+        self.assertTrue(needs_ocr(missing))
+        self.assertFalse(needs_ocr(completed))
+        with self.assertRaisesRegex(ClientError, 'invalid OCR status'):
+            needs_ocr({**capture('invalid'), 'ocr_status': 'complete'})
 
     def test_scan_retaken_after_inventory_is_skipped(self):
         self.client.get.return_value = {**capture(), 'is_current': False}

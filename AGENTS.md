@@ -7,6 +7,12 @@ human review, read [.agents/skills/receipt-processing/SKILL.md](.agents/skills/r
 It applies to both Codex and ChatGPT Work; the authenticated `/review` page exposes the
 document tools. Processing never runs in the camera capture loop.
 
+For unattended nightly OCR and OCR backlog recovery, read
+[.agents/skills/receipt-ocr-nightly/SKILL.md](.agents/skills/receipt-ocr-nightly/SKILL.md).
+The Codex automation prompt must be exactly `/receipt-ocr-nightly`, with no additional
+inline instructions. The tracked skill and repository scripts are the reviewed source of
+truth for its behavior; do not duplicate operational policy in the scheduled task.
+
 ## Purpose and ownership of the work
 
 Build a fast, hands-free receipt capture station. The operator mounts a phone above a

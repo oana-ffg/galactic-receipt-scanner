@@ -64,6 +64,13 @@ def inventory(client, end):
     return sorted(found.values(), key=lambda item: (item['created_at'], item['id']))
 
 
+def needs_ocr(capture):
+    status = capture.get('ocr_status')
+    if status not in {'awaiting Work', 'unverified'}:
+        raise ClientError('Capture inventory returned an invalid OCR status.')
+    return status == 'awaiting Work'
+
+
 class CachedBackend:
     """Reuse a generated artifact after uncertain/failed upload, even across restarts."""
     engine = 'PP-OCRv6'
@@ -229,9 +236,11 @@ def main():
     if requirement:
         end = now.astimezone(timezone.utc)
     captures = inventory(client, end)
+    awaiting_ocr = [capture for capture in captures if needs_ocr(capture)]
     summary = dict(scan_day=day.isoformat(), timezone=args.timezone, cutoff=end.isoformat(), eligible=len(captures),
                    scanned_that_day=sum(utc(c['created_at']) >= start for c in captures),
-                   older_backlog_checked=sum(utc(c['created_at']) < start for c in captures))
+                   older_backlog_checked=sum(utc(c['created_at']) < start for c in captures),
+                   ocr_available=len(captures) - len(awaiting_ocr), ocr_missing=len(awaiting_ocr))
     print(json.dumps(dict(event='inventory', **summary)), flush=True)
     if args.inventory_only:
         return 0
@@ -245,7 +254,7 @@ def main():
         state = json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else dict(origin=client.origin, completed={})
         if state['origin'] != client.origin:
             raise ClientError('OCR progress belongs to a different Site.')
-        selected = captures[:args.limit] if args.limit else captures
+        selected = awaiting_ocr[:args.limit] if args.limit else awaiting_ocr
         # Save the immutable snapshot before starting; an interrupted run remains diagnosable.
         write_new_file(root / ('inventory-' + os.urandom(6).hex() + '.json'), json.dumps(captures).encode())
         result = drain(client, selected, root, state)
@@ -259,7 +268,7 @@ def main():
             if not result['required_ocr']['verified']:
                 result['complete'] = False
         result.update(summary)
-        result['limited'] = args.limit is not None and len(selected) < len(captures)
+        result['limited'] = args.limit is not None and len(selected) < len(awaiting_ocr)
         if result['limited']:
             result['complete'] = False
         save_json(root / 'last-run.json', result)

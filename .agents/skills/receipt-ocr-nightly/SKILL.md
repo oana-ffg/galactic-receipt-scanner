@@ -5,11 +5,14 @@ description: Run unattended PP-OCRv6 over the previous scan day and unfinished o
 
 # Nightly receipt OCR
 
-A bare `$receipt-ocr-nightly` means execute now, not explain or make a plan. Process every
-current accepted/manual-review scan through the previous calendar day in Europe/Copenhagen,
-including older unfinished scans. An explicit date/timezone overrides these defaults.
-There is no ten-document limit and no Luna/model pass. Superseded retakes and rejected
-captures remain untouched. Saved PP is unverified evidence, not a human-approved reading.
+A bare `/receipt-ocr-nightly` means execute now, not explain or make a plan. Process every
+current accepted/manual-review scan **without an OCR artifact** through the previous calendar
+day in Europe/Copenhagen, including older unfinished scans. An explicit date/timezone
+overrides these defaults. Already-OCRed captures are inventory counts, not work: do not
+fetch or revalidate each one. Outline corrections discovered by Jev or Luna use the exact
+request recovery path below instead of a nightly rescan. There is no ten-document limit
+and no Luna/model pass. Superseded retakes and rejected captures remain untouched. Saved PP
+is unverified evidence, not a human-approved reading.
 
 Use the repository scripts; they live outside this skill so you can inspect, repair and
 test them when needed. The runner verifies original hashes, uses the saved document outline
@@ -39,6 +42,38 @@ path, completion status, remaining failures and `required_ocr.verified`. Full su
 requires `complete: true` and `limited: false`. Access/approval failures or an unresolved
 required artifact are blockers, never success.
 
+## Scheduled automation contract
+
+The Codex automation's entire prompt is exactly `/receipt-ocr-nightly`. Do not add setup,
+monitoring, fallback or recovery prose to the automation itself. Keep those reviewed
+instructions here and the implementation in source-controlled repository scripts.
+
+On a Windows OCR host, `Receipt Scanner Nightly OCR` in Windows Task Scheduler is the
+durable producer owner. Its action runs `scripts/receipt_ocr_scheduled.py` from this
+repository with the prepared Python executable and no diagnostic-only arguments. Configure
+it daily at 02:00 local time, enabled, start-when-available, network-required, wake-to-run,
+allowed on battery, `IgnoreNew`, a 12-hour execution limit, and three 15-minute restart
+attempts. Use a limited interactive owner principal so its authorized private connection
+and local GPU profile remain available. Do not put secrets or machine-specific paths in
+this tracked skill.
+
+When this skill is invoked by Codex on that host:
+
+1. Inspect the Windows task, `.local/receipt-ocr-scheduler/last-run.json`, its referenced
+   private log, the OCR lock, and the authoritative nightly `last-run.json`.
+2. If the task is already running, observe that same process until it finishes. Never
+   launch a direct competitor, replace its lock, or call a quiet wait an OCR failure.
+3. If today's scheduled attempt did not start, start the existing Windows task once and
+   observe it. If the task is absent or misconfigured, repair it to the reviewed contract
+   above before starting it; preserve any live OCR process.
+4. Require Task Scheduler result `0`, wrapper `phase: "finished"`, wrapper
+   `outcome: "success"`, and wrapper exit code `0`, in addition to the nightly completion
+   checks below. A chat/tool timeout is never evidence that the owned process stopped.
+
+On a supported non-Windows host without an OS task, run
+`python scripts/receipt_ocr_scheduled.py` synchronously and keep its session until the
+wrapper finishes. The wrapper, not the chat turn, owns and waits for the OCR child.
+
 ## Run
 
 1. Work from the receipt-scanner repository. Read `AGENTS.md` and
@@ -48,23 +83,29 @@ required artifact are blockers, never success.
    is accepted only when its profile actually contains `ppocr`. Otherwise provision this environment's own connection
    through the owner's signed-in `/agent-access` page. Verify the destination against the
    owner's Site metadata. Never depend on another person's secret store or machine paths.
-2. Run `python scripts/receipt_ocr_nightly.py` using the available Python 3.12/3.13 runtime.
-   On a fresh host pass `--config` with the actual private client-config path. The script
-   installs missing PP packages/models into an ignored isolated environment and defaults
-   to CPU there. It can reuse an existing working GPU profile. `--cpu` explicitly selects
-   CPU. Setup can also be run separately with `scripts/receipt_ppocr_setup.py`; it writes
-   `receipt-ocr-host.json`, never Luna's `processing-host.json`.
+2. For a normal run, use the scheduled automation contract above. The durable wrapper
+   takes no setup or scope arguments and invokes `scripts/receipt_ocr_nightly.py` using the
+   available Python 3.12/3.13 runtime. On a fresh host, first run
+   `scripts/receipt_ppocr_setup.py --config PRIVATE_CLIENT_CONFIG`; add `--cpu` only when
+   CPU is explicitly required. Setup installs missing PP packages/models into an ignored
+   isolated environment, defaults to CPU for a newly prepared runtime, can reuse an
+   existing working GPU profile, and publishes `receipt-ocr-host.json`, never Luna's
+   `processing-host.json`. After setup succeeds, start the argument-free task/wrapper.
+   Explicit `--request`, `--date` or `--timezone` operations invoke
+   `scripts/receipt_ocr_nightly.py` directly on the OCR host while respecting the same OCR
+   lock; the scheduled wrapper does not forward those exceptional scope arguments.
    Install compatible Python/Node and project dependencies if absent; use the host's
    available package/runtime tools. No paid or remote model API, Tesseract fallback, or
    dependency on GPU hardware. Model downloads are from Paddle's official host and hash-pinned.
-3. Let the command finish. Keep its terminal/session ID and poll it; a tool timeout is
+3. Let the task/wrapper finish. Keep its terminal/session ID and poll it; a tool timeout is
    not process completion. The runner emits per-scan progress, checkpoints successful
    uploads and retains pending OCR so a retry need not repeat inference. Default runs
    are unlimited; do not add `--limit` or silently narrow the day/backlog to finish early.
-4. Inspect the final summary and private `last-run.json`/`failures.json` under
+4. Inspect the wrapper state and final summary plus private `last-run.json`/`failures.json` under
    `.local/receipt-ocr-nightly/`. Require `complete: true`, `remaining: 0`, and `limited: false`
-   before reporting full completion. Report verified/reused scans and unresolved failures
-   separately. An empty OCR reading is preserved honestly and remains reviewable.
+   before reporting full completion. Report inventory `ocr_available`/`ocr_missing`, newly
+   verified scans and unresolved failures separately. An empty OCR reading is preserved
+   honestly and remains reviewable.
 
 ## Keep working through failures
 
