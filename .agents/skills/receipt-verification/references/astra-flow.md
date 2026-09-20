@@ -36,12 +36,11 @@ already holds the batch guard; do not acquire another or claim an unrelated rece
    category and confidence explicitly in evidence. For a numerically disputed OCR value
    resolved from pixels, supply a concrete `ocr_resolution`; unresolved discrepancies
    cannot be marked high. Do not overwrite the independent draft or any earlier reading.
-   If PP needed for comparison/PDF is missing or broken, delegate
-   [receipt-ocr-nightly](../../receipt-ocr-nightly/SKILL.md) to Sol after the blind draft,
-   keep renewing this claim, and wait for verified OCR. Probe saved OCR with
-   `client.prepare(..., allow_inference=False)`; on `OCRRequired`, save its `request`
-   dictionary privately and hand its path to Sol for the OCR skill's `--request` mode.
-   This includes today's backlog and the exact required layout. Do not install or debug PP yourself.
+   Probe saved OCR with `client.prepare(..., allow_inference=False)`. If exact-layout PP
+   needed for comparison/PDF is missing or broken, do not infer it or delegate OCR from
+   this host. Release the claim, report the eligibility-gate drift to the parent, and stop
+   the batch. The dedicated OCR workflow catches up independently; a later Astra run
+   can reclaim the document after the gate is satisfied.
 5. Submit the reconciled extraction through the large-stage API. Omit `documents` when
    grouping/layout is unchanged. Copy actual current records for any justified layout
    correction, preserving hashes and annotations. For missing/wrongly attached pages,

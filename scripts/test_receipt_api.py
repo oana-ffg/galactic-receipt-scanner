@@ -36,6 +36,30 @@ class ClientTests(unittest.TestCase):
                 with patch.object(Path, "is_junction", return_value=True):
                     with self.assertRaises(ClientError): self.client.configure_ppocr(profile)
 
+    def test_saved_pp_profile_binds_without_an_inference_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            node = root / "node.exe"
+            node.write_bytes(b"synthetic executable; never run")
+            profile = root / "profile.json"
+            settings = {"origin": self.client.origin,
+                        "repository": str(Path(__file__).resolve().parent.parent),
+                        "node": str(node), "confirmation_provider": "ppocr"}
+            profile.write_text(json.dumps(settings))
+            self.client.configure_saved_ppocr(profile)
+            self.assertEqual(self.client.ocr_backend.engine, "PP-OCRv6")
+            self.assertFalse(hasattr(self.client.ocr_backend, "run"))
+            self.assertEqual(self.client.node, str(node))
+            self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
+            self.client.get = Mock(return_value={"artifacts": []})
+            with self.assertRaises(OCRRequired):
+                self.client.prepare(self.id, root / "work", crop=[1, 2, 90, 180])
+            for bad in ({**settings, "confirmation_provider": "qwen"},
+                        {**settings, "ppocr": {"python": "must-not-be-present"}}):
+                profile.write_text(json.dumps(bad))
+                with self.assertRaisesRegex(ClientError, "contain no OCR runtime"):
+                    self.client.configure_saved_ppocr(profile)
+
     def setUp(self):
         self.client = ScannerClient({"origin": "https://scanner.example.test", "sites_token": "synthetic-sites", "processing_token": "rsc_" + "s" * 43})
         self.client.source_region = Mock(return_value=[0,0,100,200])
@@ -121,6 +145,7 @@ class ClientTests(unittest.TestCase):
         self.client.request = Mock(side_effect=[
             json.dumps({"result": {"status": "complete"}, "remaining": 1, "blocked": 0}).encode(),
             json.dumps({"result": {"status": "complete"}, "remaining": 0, "blocked": 0}).encode(),
+            json.dumps({"result": None, "remaining": 0, "blocked": 0}).encode(),
         ])
         with patch("receipt_api.credentials", return_value={}), \
                 patch("receipt_api.ScannerClient", return_value=self.client), \
@@ -128,6 +153,7 @@ class ClientTests(unittest.TestCase):
             main()
         self.assertEqual(json.loads(output.getvalue())["processed"], 2)
         self.assertEqual(self.client.request.call_args_list, [
+            call("/api/jev/backfill", b"{}"),
             call("/api/jev/backfill", b"{}"),
             call("/api/jev/backfill", b"{}"),
         ])

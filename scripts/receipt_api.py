@@ -33,6 +33,12 @@ class OCRRequired(ClientError):
                             source_sha256=source['sha256'], crop=source['crop'], rotation=source['rotation'])
 
 
+class SavedPPArtifacts:
+    """Match stored PP-OCRv6 artifacts without providing an inference runtime."""
+
+    engine = "PP-OCRv6"
+
+
 def matches_ocr_region(value, crop):
     if crop is AUTO_CROP:
         return True
@@ -150,6 +156,33 @@ class ScannerClient:
             raise ClientError("Configure PP-OCRv6 before processing; Tesseract is not a fallback.")
         from receipt_ppocr import PPBackend
         self.ocr_backend = PPBackend(profile_path, profile["ppocr"])
+        self.node = str(node)
+
+    def configure_saved_ppocr(self, profile_path):
+        """Bind a saved-PP consumer profile that can never run OCR inference."""
+        profile_path = Path(profile_path)
+        if (not profile_path.is_absolute() or profile_path.is_symlink()
+                or profile_path.is_junction() or not profile_path.is_file()):
+            raise ClientError("Use a prepared regular saved-PP worker profile.")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        repo = Path(__file__).resolve().parent.parent
+        if not isinstance(profile, dict):
+            raise ClientError("Use a prepared saved-PP worker profile object.")
+        repository = profile.get("repository")
+        if (profile.get("origin") != self.origin or not isinstance(repository, str)
+                or not Path(repository).is_absolute() or Path(repository).resolve() != repo
+                or Path(repository).is_symlink() or Path(repository).is_junction()
+                or profile.get("confirmation_provider") != "ppocr"
+                or "ppocr" in profile):
+            raise ClientError("Saved-PP profile must match this scanner and contain no OCR runtime.")
+        node_value = profile.get("node")
+        if not isinstance(node_value, str):
+            raise ClientError("Saved-PP profile needs the prepared absolute Node executable.")
+        node = Path(node_value)
+        if (not node.is_absolute() or not node.is_file() or node.is_symlink()
+                or node.is_junction() or node.name.lower() not in {"node", "node.exe"}):
+            raise ClientError("Saved-PP profile needs the prepared absolute Node executable.")
+        self.ocr_backend = SavedPPArtifacts()
         self.node = str(node)
 
     def request(self, path, data=None, content_type="application/json"):
@@ -330,7 +363,7 @@ class ScannerClient:
                 continue
             if matches_prepared_ocr(value, capture_id, original["sha256"], crop, self.ocr_backend, rotation):
                 return {**original, "ocr_path": str(destination.absolute()), "ocr_sha256": sha}
-        if not allow_inference:
+        if not allow_inference or not hasattr(self.ocr_backend, "run"):
             raise OCRRequired(self.origin, original)
         run = root / (capture_id + "-" + os.urandom(8).hex())
         manifest = run.with_suffix(".source.json")
@@ -349,7 +382,8 @@ class ScannerClient:
         pinned = self.file(f"/api/files/{capture_id}/ocr?version={sha}", sha, root / (capture_id + "-" + sha + ".ocr.json"))
         return {**original, "ocr_path": pinned["path"], "ocr_sha256": sha}
 
-    def pdf(self, document_id, directory=".local/receipt-api", before_upload=None, *, prepared=None):
+    def pdf(self, document_id, directory=".local/receipt-api", before_upload=None, *, prepared=None,
+            allow_inference=False):
         if not UUID.fullmatch(document_id):
             raise ClientError("Invalid document ID.")
         document = self.get("/api/documents/" + document_id)["document"]
@@ -360,7 +394,8 @@ class ScannerClient:
         for page in document["pages"]:
             source = (prepared or {}).get(page["captureId"])
             if source is None:
-                source = self.prepare(page["captureId"], directory, crop=page["crop"], rotation=page["rotation"])
+                source = self.prepare(page["captureId"], directory, crop=page["crop"],
+                                      rotation=page["rotation"], allow_inference=allow_inference)
             elif (source.get("crop") != page["crop"] or source.get("rotation") != page["rotation"]
                   or hashlib.sha256(Path(source["ocr_path"]).read_bytes()).hexdigest() != source["ocr_sha256"]):
                 raise ClientError("Prepared OCR differs from the frozen source/layout.")
@@ -399,7 +434,7 @@ class ScannerClient:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=".local/processing-access.json")
-    parser.add_argument("--worker-profile", help="Prepared PP profile; otherwise discover .local/processing-host.json for prepare/pdf")
+    parser.add_argument("--worker-profile", help="Prepared worker profile; otherwise discover the command-specific local host descriptor")
     parser.add_argument("--credentials-stdin", action="store_true", help="Read credentials from a secure provider pipe, never a command argument")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
@@ -435,13 +470,17 @@ def main():
     if args.command in {"prepare", "pdf"}:
         profile_path = args.worker_profile
         if not profile_path:
-            descriptor = Path(__file__).resolve().parent.parent / ".local" / "processing-host.json"
+            name = "receipt-ocr-host.json" if args.command == "prepare" else "processing-host.json"
+            descriptor = Path(__file__).resolve().parent.parent / ".local" / name
             if descriptor.is_symlink() or descriptor.is_junction() or not descriptor.is_file():
-                raise ClientError("Configure the PP processing host before OCR or PDF generation.")
+                raise ClientError("Configure the command's dedicated receipt host before continuing.")
             profile_path = json.loads(descriptor.read_text(encoding="utf-8")).get("worker_profile")
         if not isinstance(profile_path, str) or not Path(profile_path).is_absolute():
-            raise ClientError("Use a prepared absolute PP profile path.")
-        client.configure_ppocr(profile_path)
+            raise ClientError("Use a prepared absolute worker profile path.")
+        if args.command == "prepare":
+            client.configure_ppocr(profile_path)
+        else:
+            client.configure_saved_ppocr(profile_path)
     if args.command == "status":
         result = {**client.get("/api/processing/access"), "origin": client.origin}
     elif args.command == "jev-backfill":
@@ -481,7 +520,7 @@ def main():
     elif args.command == "prepare":
         result = client.prepare(args.capture_id)
     elif args.command == "pdf":
-        result = client.pdf(args.document_id)
+        result = client.pdf(args.document_id, allow_inference=False)
     elif args.command == "original":
         result = client.original(args.capture_id, args.directory)
     elif args.command == "file":

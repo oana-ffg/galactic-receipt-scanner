@@ -1,0 +1,110 @@
+"""Synthetic setup tests; no production access, package installation, or model downloads."""
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from receipt_api import ClientError
+import receipt_ppocr_setup as setup
+import receipt_processing_setup as processing_setup
+
+
+class PPSetupTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.repo = Path(self.directory.name)
+
+    def executable(self, name):
+        path = self.repo / name
+        path.write_bytes(b'prepared synthetic executable')
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return path
+
+    def test_fresh_profile_publishes_private_ocr_descriptor_without_pdf_dependencies(self):
+        config = self.repo / 'client.json'
+        config.write_text('{}', encoding='utf-8')
+        runtime = self.repo / '.local' / 'receipt-ppocr-runtime'
+        pp_python = runtime / 'cpu-venv' / 'bin' / 'python'
+        pp_python.parent.mkdir(parents=True)
+        pp_python.write_bytes(b'prepared synthetic executable')
+        pp_python.chmod(pp_python.stat().st_mode | stat.S_IXUSR)
+        node = self.executable('node')
+        worker_python = self.executable(f'python{sys.version_info.major}.{sys.version_info.minor}')
+        client = Mock(origin='https://synthetic.example')
+        client.ocr_backend.preflight.return_value = None
+
+        with patch.object(setup, 'REPO', self.repo), \
+                patch.object(setup, 'credentials', return_value={}), \
+                patch.object(setup, 'ScannerClient', return_value=client), \
+                patch.object(setup, 'run_logged'), patch.object(setup, 'install_models'), \
+                patch.object(setup, 'check_node'), patch.object(setup, 'check_layout'):
+            profile = setup.ensure_profile(str(config), node=str(node))
+            descriptor = setup.publish_host_descriptor(profile, str(worker_python))
+
+        value = json.loads(Path(profile).read_text(encoding='utf-8'))
+        self.assertNotIn('renderer', value)
+        self.assertEqual(value['client_config'], str(config.resolve()))
+        self.assertEqual(value['ppocr']['python'], str(pp_python))
+        pointer = json.loads(Path(descriptor).read_text(encoding='utf-8'))
+        self.assertEqual(pointer, {'python': str(worker_python.resolve()), 'worker_profile': profile})
+        if os.name != 'nt':
+            self.assertEqual(stat.S_IMODE(Path(descriptor).stat().st_mode), 0o600)
+
+    def test_descriptor_rejects_redirected_profile_and_descriptor(self):
+        target = self.repo / 'profile-target.json'
+        target.write_text('{}', encoding='utf-8')
+        profile = self.repo / 'profile.json'
+        profile.symlink_to(target)
+        worker_python = self.executable(f'python{sys.version_info.major}.{sys.version_info.minor}')
+        with patch.object(setup, 'REPO', self.repo):
+            with self.assertRaisesRegex(ClientError, 'regular absolute worker profile'):
+                setup.publish_host_descriptor(str(profile), str(worker_python))
+
+        profile.unlink()
+        profile.write_text('{}', encoding='utf-8')
+        local = self.repo / '.local'
+        local.mkdir()
+        descriptor_target = self.repo / 'descriptor-target.json'
+        descriptor_target.write_text('{}', encoding='utf-8')
+        (local / 'receipt-ocr-host.json').symlink_to(descriptor_target)
+        with patch.object(setup, 'REPO', self.repo):
+            with self.assertRaisesRegex(ClientError, 'descriptor must be a regular file'):
+                setup.publish_host_descriptor(str(profile), str(worker_python))
+
+    def test_processing_profile_contains_no_ocr_runtime(self):
+        config = self.repo / 'client.json'
+        config.write_text('{}', encoding='utf-8')
+        node = self.executable('node')
+        renderer = self.executable('pdftoppm')
+        client = Mock(origin='https://synthetic.example')
+        with patch.object(processing_setup, 'REPO', self.repo), \
+                patch.object(processing_setup, 'credentials', return_value={}), \
+                patch.object(processing_setup, 'ScannerClient', return_value=client), \
+                patch.object(processing_setup, 'check_node'), \
+                patch.object(processing_setup, 'check_renderer', return_value=str(renderer.resolve())), \
+                patch.object(processing_setup, 'check_layout'):
+            profile = processing_setup.ensure_consumer_profile(
+                str(config), node=str(node), renderer=str(renderer))
+        value = json.loads(Path(profile).read_text(encoding='utf-8'))
+        self.assertEqual(value['confirmation_provider'], 'ppocr')
+        self.assertNotIn('ppocr', value)
+        client.configure_saved_ppocr.assert_called_once()
+
+    def test_renderer_must_be_fixed_executable_and_pass_preflight(self):
+        renderer = self.executable('pdftoppm')
+        with patch.object(setup.subprocess, 'run', return_value=Mock(returncode=0)) as run:
+            self.assertEqual(setup.check_renderer(str(renderer)), str(renderer))
+        run.assert_called_once_with([str(renderer), '-v'], capture_output=True, timeout=30)
+        redirected = self.repo / 'redirected-pdftoppm'
+        redirected.symlink_to(renderer)
+        with self.assertRaisesRegex(ClientError, 'prepared absolute pdftoppm'):
+            setup.check_renderer(str(redirected))
+
+
+if __name__ == '__main__':
+    unittest.main()

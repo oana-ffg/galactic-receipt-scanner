@@ -67,8 +67,11 @@ rotating the shared gateway token or affecting other connections.
 
 Terra coordinates using compact metadata and authorizes access through WebMCP. Fresh
 Luna workers inspect images, with independent Astra workers reviewing exceptions.
-Ordinary CPU OCR and PDF helpers run outside the capture/save path. Count complete
-documents, including all their pages, toward the batch limit.
+OCR production and PDF consumption are separate host roles outside the capture/save path.
+The OCR host uses `.local/receipt-ocr-host.json` and may run PP-OCR; the Luna processing
+host uses `.local/processing-host.json`, contains no OCR runtime, and only consumes exact
+saved PP artifacts while generating PDFs. Count complete documents, including all their
+pages, toward the batch limit.
 
 After first enabling Jev, run `python scripts/receipt_api.py --config PRIVATE_CONFIG
 jev-backfill`. It queues only the latest PP-OCR artifact for each current capture and

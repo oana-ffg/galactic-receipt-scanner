@@ -129,8 +129,10 @@ and vendors, group non-adjacent pages, mark duplicates, check invoice totals and
 named multi-page PDFs. Unknown readings remain in review; failed processing and inconsistent
 totals are broken. Every decision has revision history. Give Work/Codex the project
 [receipt-processing skill](.agents/skills/receipt-processing/SKILL.md) to process a batch.
-PP-OCR runs locally. The hosted backend uses the owner's private TypeSafe key for Jev
-page/document classification and grouping before Luna can claim a receipt.
+PP-OCR runs on the separately configured OCR host (normally the GPU worker). The hosted
+backend uses the owner's private TypeSafe key for Jev page/document classification and
+grouping before Luna can claim a receipt. Luna consumes saved PP artifacts and never
+installs or invokes an OCR engine on its processing host.
 
 To ask Codex to investigate a parsing mistake, select the receipt and choose
 **Copy for Codex**. Paste into your task and describe what looks wrong. The copied

@@ -74,17 +74,17 @@ or a cloud capability to assume. Never put an owner's paths or connection in tra
 
 ## Reuse the existing client
 
-For a later Astra audit on the current PP host, the coordinator also supplies
+For a later Astra audit on the saved-PP processing host, the coordinator also supplies
 `RECEIPT_WORKER_PROFILE`. After constructing `client` in the common prelude, configure
-the already prepared backend before any OCR or PDF call:
+the artifact-only reader before any saved-OCR or PDF call:
 
 ```python
 profile_path = os.environ["RECEIPT_WORKER_PROFILE"]
-client.configure_ppocr(profile_path)
+client.configure_saved_ppocr(profile_path)
 ```
 
-This reuses PP artifacts and the prepared runtime. An unconfigured standalone client
-refuses OCR/PDF generation; Tesseract is never an automatic fallback.
+This can only reuse saved PP artifacts; the profile contains no inference runtime. An
+unconfigured standalone client refuses OCR/PDF generation; Tesseract is never a fallback.
 
 The Python API exposes the same implementation as the CLI, with less shell quoting and
 no model copying of tokens/hashes. Keep this prelude in a private worker script/session.
@@ -201,12 +201,13 @@ related candidates as required by the grouping rules; leave unrelated pages unco
 After visual grouping and saving `extraction-first-reading.json`, call `preview_pages`
 on exactly the retained ordered pages to freeze the image-only document PDF. Save its
 layouts into the copied document page records. Only then run
-`client.prepare(capture_id, work / "ocr", crop=final_page["crop"], rotation=final_page["rotation"])` for every retained
-page and save the returned metadata. This reuses source/region-matched OCR or runs the
-prepared PP-OCRv6, uploads its
-artifact and verifies readback. Read only the OCR `text`/`lines` needed for comparison,
-never dump `text_only_pdf_layers`. Do not separately run/save OCR again after prepare
-succeeds. No installation or model download is part of this phase.
+`client.prepare(capture_id, work / "ocr", crop=final_page["crop"],
+rotation=final_page["rotation"], allow_inference=False)` for every retained page and save
+the returned metadata. This reuses only source/region-matched saved PP-OCRv6 and verifies
+its readback. Read only the OCR `text`/`lines` needed for comparison, never dump
+`text_only_pdf_layers`. Missing exact-layout PP stops the review and returns the claim to
+the queue; the dedicated OCR host handles it separately. No OCR inference, installation
+or model download is part of this phase.
 
 For more lookahead, use `urlencode` with the existing token and `after_capture`.
 For historical candidates add source-read `date`, `total_minor`, `currency`.

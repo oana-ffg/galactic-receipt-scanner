@@ -11,8 +11,10 @@ Load credentials through the private connection config; never paste them into pr
 command arguments, logs or source.
 
 Reuse coordinator-supplied paths or the repository's ignored
-`.local/processing-host.json` (`python`, `worker_profile`). The referenced worker profile
-contains the existing private `client_config` and prepared runtimes. Keep this descriptor
+`.local/processing-host.json` (`python`, `worker_profile`) for Luna/Astra processing. The
+referenced saved-PP consumer profile contains the existing private `client_config`, Node
+and renderer, but no OCR engine/models. OCR production separately uses
+`.local/receipt-ocr-host.json`. Keep these descriptors
 local to its host; do not commit it or ask the owner to supply paths that it already stores.
 
 The coordinator starts with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
@@ -73,10 +75,11 @@ for every processing operation. It uses this client internally and keeps tokens 
 
 ## Process and save
 
-For routine work prefer `prepare CAPTURE_ID`: it verifies the original, reuses source-matched
-PP-OCRv6 or runs the prepared PP pass, saves and verifies the OCR artifact, and returns only
-paths/hashes. Inspect the original image and read the OCR JSON's text/lines without printing
-its embedded PDF base64. `pdf DOCUMENT_ID` prepares missing OCR, generates from the saved page
+For OCR-producer work under the receipt-ocr-nightly skill, `prepare CAPTURE_ID` verifies the
+original, reuses source-matched PP-OCRv6 or runs the dedicated prepared PP pass, saves and
+verifies the OCR artifact, and returns only paths/hashes. Luna uses its bounded worker's
+saved-PP reader instead and never invokes inference. `pdf DOCUMENT_ID` requires matching
+saved OCR and generates from the saved page
 order, uploads it, and verifies the server-computed hash and acknowledged revision,
 returning the generated local path and acknowledged hash without downloading it again.
 These deterministic helpers make no model calls. Astra uses `original` alone before its blind
@@ -97,13 +100,14 @@ expired/stale claim requires rereading the current assignment, never force-savin
 
 `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` stores an immutable ordinary OCR artifact.
 PP-OCRv6 is the standard for all new OCR and searchable PDFs. `prepare` and `pdf`
-use the prepared profile from `.local/processing-host.json`, or the global
-`--worker-profile PRIVATE_PROFILE` option before the subcommand. Python callers must
-first call `client.configure_ppocr(profile_path)`. Missing PP configuration is an
-actionable setup error; never fall back to Tesseract or install a new engine during
-a receipt run. Retain older Tesseract artifacts as historical evidence. Browser PDF
+use distinct profiles: `prepare` discovers `.local/receipt-ocr-host.json` and may infer;
+`pdf` discovers `.local/processing-host.json` and can only consume saved PP. Python OCR
+producers call `client.configure_ppocr(profile_path)`; Luna consumers call
+`client.configure_saved_ppocr(profile_path)`. Missing matching PP is an OCR-queue item,
+never permission to fall back to Tesseract or install an engine during a receipt run.
+Retain older Tesseract artifacts as historical evidence. Browser PDF
 generation only reads matching saved PP and reports pending when PP has not run.
-The processing host produces new OCR; there is no browser OCR button or tool.
+Only the dedicated OCR host produces new OCR; there is no browser OCR button or tool.
 Read back the saved artifact using its hash. Do not print the PDF-layer base64 payload.
 
 `node scripts/receipt_pdf.mjs PRIVATE_PAGES_JSON PRIVATE_PDF` generates a searchable PDF.
@@ -133,8 +137,8 @@ goes **before** the subcommand.
 | `get API_PATH` | Parsed JSON; construct token-bearing paths inside Python instead of shell arguments. |
 | `post PROCESSING_API_PATH PRIVATE_JSON_FILE` | POSTs the saved JSON bytes; use /api/processing/ routes. |
 | `original CAPTURE_ID --directory PRIVATE_DIRECTORY` | Verified original path/hash; --directory is optional here. |
-| `prepare CAPTURE_ID` | Verified original and stored OCR paths/hashes. **No --directory CLI option.** |
-| `pdf DOCUMENT_ID` | Generated local PDF with server-acknowledged hash/revision; no repeated download. **No --directory CLI option.** |
+| `prepare CAPTURE_ID` | OCR-host operation: verified original and stored OCR paths/hashes, using `receipt-ocr-host.json`. **No --directory CLI option.** |
+| `pdf DOCUMENT_ID` | Saved-PP consumer operation: generated local PDF with server-acknowledged hash/revision; it never infers OCR. **No --directory CLI option.** |
 | `file API_PATH SHA256 PRIVATE_DESTINATION` | Hash-verified bytes for a pinned artifact. |
 | `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` | Advanced manual upload; prepare already does this. |
 | `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` | Advanced manual upload; pdf already does this. |

@@ -19,7 +19,6 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
-from receipt_ppocr import PPBackend
 from receipt_locks import LockBusy, acquire_lock, lock_held
 from receipt_api import ScannerClient, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, write_new_file
 
@@ -119,6 +118,11 @@ def verify(condition, message):
         raise ClientError(message)
 
 
+def is_windows():
+    """Keep platform checks injectable without mutating Python's process-wide os module."""
+    return os.name == "nt"
+
+
 def replace_journal_file(temporary, destination):
     """Replace a journal file, retrying only transient Windows sharing/access failures."""
     for attempt in range(WINDOWS_REPLACE_ATTEMPTS):
@@ -126,7 +130,7 @@ def replace_journal_file(temporary, destination):
             os.replace(temporary, destination)
             return
         except OSError as error:
-            transient = (os.name == "nt"
+            transient = (is_windows()
                          and error.errno in WINDOWS_TRANSIENT_REPLACE_ERRNOS
                          and getattr(error, "winerror", None) in (None, *WINDOWS_TRANSIENT_REPLACE_WINERRORS))
             if not transient or attempt == WINDOWS_REPLACE_ATTEMPTS - 1:
@@ -195,10 +199,11 @@ class Worker:
         self.node = str(Path(profile["node"]).resolve(strict=True))
         self.renderer = str(Path(profile["renderer"]).resolve(strict=True))
         self.client = ScannerClient(credentials(profile["client_config"]))
-        self.confirmation_provider = "ppocr" if "ppocr" in profile else "qwen"
+        self.confirmation_provider = profile.get("confirmation_provider", "ppocr" if "ppocr" in profile else "qwen")
+        require(self.confirmation_provider in {"ppocr", "qwen"}, "Unknown confirmation provider.")
         if self.confirmation_provider == "ppocr":
-            require(profile_path is not None, "PP OCR requires the prepared profile file.")
-            self.client.ocr_backend = PPBackend(profile_path, profile["ppocr"])
+            require(profile_path is not None, "Saved PP requires the prepared consumer profile file.")
+            self.client.configure_saved_ppocr(profile_path)
         require(self.client.origin == profile["origin"], "Configured scanner differs from the approved origin.")
         self.env = {k: v for k, v in os.environ.items() if k not in {"NODE_OPTIONS", "NODE_PATH", "PYTHONPATH"}}
         self.env["PATH"] = str(Path(self.node).parent) + os.pathsep + self.env.get("PATH", "")
@@ -1222,7 +1227,8 @@ class Worker:
                     require(cid in self.state["sources"], "Fetch and view original pixels before OCR preparation.")
                     retained = {layout["captureId"]: layout for layout in self.state["draft"]["layouts"]}
                     require(cid in retained, "Prepare only pages retained in the frozen Luna draft.")
-                    source = self.client.prepare(cid, self.work / "ocr", crop=retained[cid]["crop"], rotation=retained[cid]["rotation"])
+                    source = self.client.prepare(cid, self.work / "ocr", crop=retained[cid]["crop"],
+                                                 rotation=retained[cid]["rotation"], allow_inference=False)
                     verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR original differs from the claimed source hash.")
                     source["crop"] = retained[cid]["crop"]
                     self.state["prepared"][cid] = source
@@ -1352,7 +1358,8 @@ class Worker:
             self.checkpoint_intent(previous_state)
             pdf = self.client.pdf(doc["id"], self.work / "pdf",
                                   before_upload=lambda value: self.pdf_intent(value, previous_state),
-                                  prepared=self.state["prepared"] if self.state.get("input_mode") == "ppocr-first" else None)
+                                  prepared=self.state["prepared"] if self.state.get("input_mode") == "ppocr-first" else None,
+                                  allow_inference=False)
             require(pdf["revision"] == doc["revision"], "Document changed before PDF generation; reconcile.")
             self.state["pdf"] = pdf
             self.state["phase"] = "pdf"
@@ -1416,7 +1423,7 @@ class Worker:
             if self.confirmation_provider != "ppocr":
                 receipt_qwen.preflight()
         self.check("validate", extraction={})
-        # Verify prepared packages and model assets without fetching/installing anything.
+        # Verify saved-PP/PDF dependencies without fetching or installing anything.
         program = '''await import("pdf-lib"); await import("esbuild");'''
         if self.confirmation_provider == "qwen":
             program += '''import {readFileSync} from "node:fs"; import {createHash} from "node:crypto";
@@ -1427,7 +1434,7 @@ class Worker:
         console.log("ready");'''
         result = subprocess.run([self.node, "--input-type=module", "-e", program], capture_output=True, cwd=self.repo, env=self.env, timeout=60)
         if result.returncode:
-            raise ClientError("Prepared OCR/PDF dependencies are unavailable; no download attempted.")
+            raise ClientError("Prepared PDF dependencies are unavailable; no download attempted.")
         result = subprocess.run([self.renderer, "-v"], capture_output=True, timeout=15, env=self.env)
         require(result.returncode == 0, "Prepared PDF renderer is unavailable.")
         return {"ready": True, "origin": self.client.origin, "confirmation_provider": self.confirmation_provider, **self.summary()}
@@ -1455,13 +1462,12 @@ class Worker:
         except ProtocolInputError as error:
             return {"ok": False, "input_error": str(error), "op": op}
         except OCRRequired as error:
-            # No document write has started: keep this claim alive while Sol fills the backlog.
-            if self.state['phase'] != 'claimed':
-                return self.failure(op, str(error), prior_failure)
-            request_file = self.record('ocr-needed', error.request)
-            return {'ok': False, 'ocr_required': True, 'blocking': False, 'op': op,
-                    'request_file': str(self.work / request_file), 'retry_op': op,
-                    'next': 'Run receipt-ocr-nightly with a Sol subagent, then retry this same request in this session.'}
+            return self.failure(
+                op,
+                "Required saved PP-OCR is missing for the frozen layout. Release this claim and stop the batch; "
+                "the dedicated OCR host must complete it before Luna retries. Do not run OCR on this host.",
+                prior_failure,
+            )
         except InputError as error:
             if isinstance(error, WorkerStopped):
                 # A background renewal failure is terminal, even while waiting for OCR.

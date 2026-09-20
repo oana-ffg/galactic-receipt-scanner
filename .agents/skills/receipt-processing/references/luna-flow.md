@@ -26,8 +26,9 @@ request merely because it is still running.
    - a filled `review` request template;
    - optional crop/original image requests.
 
-   Missing PP or Jev means there is no eligible Luna claim. The coordinator runs the OCR/
-   Jev catch-up; Luna must not work around the gate or substitute another OCR artifact.
+   Missing PP or Jev means there is no eligible Luna claim. The dedicated OCR/Jev workers
+   catch up independently; this Luna host must not install or invoke OCR, work around the
+   gate, or substitute another artifact.
 
 2. Extract the fields from the PP text. Images are permitted but normally unnecessary.
    Open the relevant crop or original when PP confidence is low, text is ambiguous, a

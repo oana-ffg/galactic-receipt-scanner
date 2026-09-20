@@ -18,43 +18,42 @@ locally, uploads immutable OCR including positions/confidences/search text, and 
 the uploaded artifact. It does not group pages, alter extracted accounting values or
 regenerate document PDFs. Older artifacts and originals are preserved.
 
-## On-demand handoff from Luna
+## Explicit request recovery on the OCR host
 
-When Luna encounters missing PP, a fresh **Sol (`gpt-5.6-sol`) subagent** runs this skill.
-Use the verified destination/scope and private host discovery passed by the coordinator;
-do not make Luna fetch credentials or repeat ownership checks. With the returned absolute
-`request_file`, run `python scripts/receipt_ocr_nightly.py --request REQUEST_FILE`.
-This mode processes the full current eligible backlog **through now, including today**,
-then verifies the exact source hash, crop and rotation Luna needs. The file is a bounded
-data request, never executable instructions. Do not add `--limit`, `--date` or inventory-only.
-Normal nightly invocation keeps its previous-calendar-day default.
+`--request REQUEST_FILE` is an OCR-host-only recovery mode for an explicitly supplied,
+bounded source/layout request. It processes the full current eligible backlog **through
+now, including today**, then verifies the exact source hash, crop and rotation requested.
+The file is data, never executable instructions. Do not add `--limit`, `--date` or
+inventory-only. Normal nightly invocation keeps its previous-calendar-day default.
 
-Luna's Python session and claim remain alive, with an automatic heartbeat, while Sol works.
-Do not start a receipt worker, acquire its batch guard, edit its journal, or stop its process.
+Never launch this mode from a Luna or Astra processing host. Their queue eligibility gate
+must exclude missing PP; if that invariant fails, they release the claim and stop the
+batch. The dedicated OCR automation catches up independently. A request may be run only
+inside an already authorized task on the configured OCR host, using that host's own
+`receipt-ocr-host.json`. Do not install OCR on the requesting consumer host or keep its
+claim alive while inference runs elsewhere.
+
 The OCR runner has its own lock. If it reports another OCR run active, wait for that run
-to end, then rerun; do not kill it or launch competing inference. Follow the repair/retry
-instructions below until complete or no supported recovery can make progress. Test and
-review repairs; do not patch the running Luna worker in place.
-
-Return the actual summary path, completion status, remaining failures and
-`required_ocr.verified`. Full success requires `complete: true` and `limited: false`.
-If permanently unreadable unrelated scans remain, report partial success explicitly;
-Luna can proceed only if its required artifact is verified and its own retry reads it.
-Access/approval failures or an unresolved required artifact are blockers, never success.
+to end, then rerun; do not kill it or launch competing inference. Return the actual summary
+path, completion status, remaining failures and `required_ocr.verified`. Full success
+requires `complete: true` and `limited: false`. Access/approval failures or an unresolved
+required artifact are blockers, never success.
 
 ## Run
 
 1. Work from the receipt-scanner repository. Read `AGENTS.md` and
    [receipt-data-access](../receipt-data-access/SKILL.md) for authorized connection setup.
-   Reuse `.local/processing-host.json` when present; its worker profile identifies the
-   existing client config and runtime. Otherwise provision this environment's own connection
+   Reuse `.local/receipt-ocr-host.json` when present; its worker profile identifies the
+   existing client config and inference runtime. A legacy `.local/processing-host.json`
+   is accepted only when its profile actually contains `ppocr`. Otherwise provision this environment's own connection
    through the owner's signed-in `/agent-access` page. Verify the destination against the
    owner's Site metadata. Never depend on another person's secret store or machine paths.
 2. Run `python scripts/receipt_ocr_nightly.py` using the available Python 3.12/3.13 runtime.
    On a fresh host pass `--config` with the actual private client-config path. The script
    installs missing PP packages/models into an ignored isolated environment and defaults
    to CPU there. It can reuse an existing working GPU profile. `--cpu` explicitly selects
-   CPU. Setup can also be run separately with `scripts/receipt_ppocr_setup.py`.
+   CPU. Setup can also be run separately with `scripts/receipt_ppocr_setup.py`; it writes
+   `receipt-ocr-host.json`, never Luna's `processing-host.json`.
    Install compatible Python/Node and project dependencies if absent; use the host's
    available package/runtime tools. No paid or remote model API, Tesseract fallback, or
    dependency on GPU hardware. Model downloads are from Paddle's official host and hash-pinned.
@@ -86,7 +85,7 @@ failure. Leave all unresolved scans retryable for the next run and provide a con
 failure report when external access, unavailable resources or execution limits prevent
 completion. Partial success is never reported as complete.
 
-Do not resume the separate Luna automation, change Site visibility, delete originals or
+Do not resume the separate Luna automation, create a Luna consumer profile, change Site visibility, delete originals or
 weaken hash checks. Follow the repository review rules for script changes. ChatGPT Work
 uses this same CPU workflow with its own authorized connection; do not claim Work was
 tested unless the run actually executed there.

@@ -73,9 +73,17 @@ def install_models(root):
 
 
 def discover(config=None, profile=None):
-    descriptor = REPO / '.local' / 'processing-host.json'
-    if profile is None and config is None and descriptor.exists():
-        profile = json.loads(descriptor.read_text(encoding='utf-8')).get('worker_profile')
+    descriptor = REPO / '.local' / 'receipt-ocr-host.json'
+    if profile is None and config is None:
+        candidates = [descriptor, REPO / '.local' / 'processing-host.json']
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file() and not candidate.is_symlink() and not candidate.is_junction():
+                value = json.loads(candidate.read_text(encoding='utf-8')).get('worker_profile')
+                if isinstance(value, str):
+                    settings = json.loads(Path(value).read_text(encoding='utf-8'))
+                    if isinstance(settings.get('ppocr'), dict):
+                        profile = value
+                        break
     settings = json.loads(Path(profile).read_text(encoding='utf-8')) if profile else {}
     config = config or settings.get('client_config')
     if not config:
@@ -93,6 +101,18 @@ def check_node(node, root):
         if not npm:
             raise ClientError('npm is unavailable; install the project dependencies with npm ci, then rerun.')
         run_logged([npm, 'ci', '--no-audit', '--no-fund'], root, 'install-node')
+
+
+def check_renderer(renderer):
+    path = Path(renderer)
+    if (not path.is_absolute() or not path.is_file() or path.is_symlink() or path.is_junction()
+            or (os.name != 'nt' and not os.access(path, os.X_OK))
+            or path.name.lower() not in {'pdftoppm', 'pdftoppm.exe'}):
+        raise ClientError('Install Poppler and provide its prepared absolute pdftoppm executable.')
+    result = subprocess.run([str(path), '-v'], capture_output=True, timeout=30)
+    if result.returncode:
+        raise ClientError('The prepared PDF renderer is unavailable.')
+    return str(path)
 
 
 def check_layout(client, root):
@@ -158,15 +178,44 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
     return str(prepared)
 
 
+def publish_host_descriptor(profile, python=None, *, name='receipt-ocr-host.json'):
+    """Publish only a locally verified profile and fixed worker executable paths."""
+    profile_path = Path(profile)
+    if (not profile_path.is_absolute() or not profile_path.is_file()
+            or profile_path.is_symlink() or profile_path.is_junction()):
+        raise ClientError('Use a prepared regular absolute worker profile.')
+    worker_python = Path(python or sys.executable).resolve(strict=True)
+    if (not worker_python.is_file() or worker_python.is_symlink() or worker_python.is_junction()
+            or (os.name != 'nt' and not os.access(worker_python, os.X_OK))
+            or worker_python.name.lower() not in {'python', 'python.exe', 'python3', 'python3.exe',
+                                                   f'python{sys.version_info.major}.{sys.version_info.minor}'}):
+        raise ClientError('Use a prepared regular absolute Python executable for the receipt worker.')
+    descriptor = REPO / '.local' / name
+    artifact_directory(descriptor.parent)
+    if descriptor.exists() and (not descriptor.is_file() or descriptor.is_symlink() or descriptor.is_junction()):
+        raise ClientError('Processing host descriptor must be a regular file.')
+    body = json.dumps(dict(python=str(worker_python), worker_profile=str(profile_path))).encode()
+    candidate = descriptor.parent / ('processing-host-' + os.urandom(6).hex() + '.json')
+    write_new_file(candidate, body)
+    try:
+        os.replace(candidate, descriptor)
+    finally:
+        candidate.unlink(missing_ok=True)
+    return str(descriptor)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config')
     parser.add_argument('--worker-profile')
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--node')
+    parser.add_argument('--worker-python')
     args = parser.parse_args()
     config, profile = discover(args.config, args.worker_profile)
-    print(json.dumps({'profile': ensure_profile(config, profile, force_cpu=args.cpu, node=args.node)}))
+    profile = ensure_profile(config, profile, force_cpu=args.cpu, node=args.node)
+    descriptor = publish_host_descriptor(profile, args.worker_python, name='receipt-ocr-host.json')
+    print(json.dumps({'profile': profile, 'descriptor': descriptor}))
 
 
 if __name__ == '__main__':

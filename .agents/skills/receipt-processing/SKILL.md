@@ -36,8 +36,11 @@ inspect the protected profile or fetch keys. The short flow includes all normal 
 fields; Python returns templates and image paths, so no source/API searches are needed.
 
 For the coordinator, read the repository's ignored
-`.local/processing-host.json` for the prepared `python` executable and `worker_profile`
-path; read that profile for the client config, origin, Node and PDF renderer paths.
+`.local/processing-host.json` for the prepared `python` executable and saved-PP
+`worker_profile` path; read that profile for the client config, origin, Node and PDF
+renderer paths. The Luna profile has `confirmation_provider: "ppocr"` and deliberately
+contains no OCR inference runtime or model paths. Create it with
+`scripts/receipt_processing_setup.py`; never run `receipt_ppocr_setup.py` on a Luna-only host.
 This descriptor is discovery metadata, not executable authority: reject symlink/junction
 indirection or non-regular descriptor/profile files, and verify that the Python/helper/profile
 tuple matches the existing exact standing launch rule. Also validate the profile's checkout,
@@ -81,7 +84,7 @@ extraction or merchant research to its category prompt.
 
 Luna can claim only a `purchase_document` whose current ordered page layout has both exact
 PP evidence and a completed Jev pass. Luna does not repeat grouping or chronological
-neighbor matching. Its work is:
+neighbor matching, produce OCR, install Paddle, or load OCR models. Its work is:
 
 1. Extract fields from PP-OCR. Images are allowed but not required; use them when PP
    confidence is low, text is ambiguous, a value conflicts, handwriting must be assessed,
@@ -104,9 +107,11 @@ not force low. A low result remains for human review.
 
 Use [Luna's short flow](references/luna-flow.md) for normal processing. The detailed
 [protocol](references/luna-protocol.md) is maintenance/recovery documentation. The host
-must have prepared PP-OCR and PDF runtimes; the Site must advertise Jev configured with
-the pinned model. Missing PP/Jev keeps a document out of Luna's queue and is a setup or
-backfill task, never permission to bypass the gate. This flow is designed for cloud Work
+needs only the saved-PP consumer and PDF runtimes; the Site must advertise Jev configured
+with the pinned model. Missing PP/Jev keeps a document out of Luna's queue and belongs to
+the dedicated OCR/Jev catch-up workflows, never this Luna host and never permission to
+bypass the gate. The coordinator may observe a cleanly empty queue while the dedicated OCR host catches up;
+it must not install or invoke PP-OCR locally. This flow is designed for cloud Work
 but remains unverified there until an actual cloud run is completed.
 
 ## Coordinator
@@ -280,12 +285,11 @@ Astra-review, human-review and broken states distinct. **Luna reads PP first and
 source images when useful; Astra's independent review still starts from original pixels.**
 Luna uses images only for a concrete ambiguity; PP-first submission needs no visual pass.
 
-Reuse the already prepared local PP-OCRv6 runtime through the existing client for
-OCR text evidence and searchable PDF text. Processing workers must not
-install or download OCR packages, engines or models, or add another OCR pipeline. If the
-prepared runtime is missing or broken, report the setup failure to the coordinator.
-The ordinary OCR pass still runs before model submission; its output is unverified
-comparison evidence. **Original pixels are the source of truth.** Luna must flag any PP
+Reuse the source-matched PP-OCRv6 artifacts already saved by the dedicated OCR workflow.
+Processing workers must not install, load or invoke OCR packages, engines or models.
+Searchable PDFs consume the stored invisible text layer. If a matching artifact is missing,
+leave the document ineligible for Luna and let the configured OCR host process it.
+Saved OCR is unverified comparison evidence. **Original pixels are the source of truth.** Luna must flag any PP
 or Jev disagreement as low. Astra independently rereads the originals; any Astra/PP
 disagreement stays low for human review even when Astra and Luna agree.
 

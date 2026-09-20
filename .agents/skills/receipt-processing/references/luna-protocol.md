@@ -20,12 +20,11 @@ only `python` and `worker_profile` absolute paths, not credentials. Create/updat
 ignored descriptor when configuring a host so future invocations can reuse its setup.
 Missing configuration is a setup task; an omitted batch range uses the skill default.
 
-Provide the verified absolute Python/helper/profile paths. The private profile contains
-`repository`, `client_config`, the owner-verified `origin`, `node`, and `renderer`.
-The current first-pass profile also contains `ppocr` with prepared absolute `python`
-and `models` paths plus `device` (`cpu` or `gpu:0`). Setup installs and verifies these
-dependencies once; a processing worker never installs packages or model files. The
-model directory holds PP-OCRv6 medium detection and recognition inference directories.
+Provide the verified absolute Python/helper/profile paths. The private Luna profile contains
+`repository`, `client_config`, the owner-verified `origin`, `node`, `renderer`, and
+`confirmation_provider: "ppocr"`. It deliberately contains no `ppocr`, model, device or
+inference-Python fields. Create it with `scripts/receipt_processing_setup.py`. PP-OCR
+production belongs to the dedicated OCR host and its separate `receipt-ocr-host.json`.
 Use prepared runtimes; credentials stay in the existing protected connection. Keep the
 profile and its machine-specific approval rule outside tracked source. The rule allows
 only the exact Python executable, `-X utf8 -B -I`, absolute `scripts/receipt_worker.py`,
@@ -100,8 +99,9 @@ zero before reporting completion; do not send `quit` to an already exited proces
 Use `quit` for early closure or an older still-running helper. A terminal result alone
 does not authorize starting the next worker while its process is still running.
 
-The helper prints one ready response after checking access, prepared dependencies and
-the renderer and reassessment API. Saved-PP consumers do not load OCR models. Require the ready response
+The helper prints one ready response after checking access, PDF dependencies and
+the renderer and reassessment API. Saved-PP consumers cannot load or invoke OCR models.
+Require the ready response
 to advertise `confirmation_provider: ppocr`; a legacy Qwen profile needs setup before
 this first-pass workflow. OCR-first begin needs no image-viewer preflight. The synthetic
 viewer image remains available for visual workflows. All artifacts live under the repository's ignored

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import receipt_worker as module
 from receipt_api import ClientError
@@ -33,7 +33,7 @@ def windows_replace_failure(*, fail_at, retry_once=False):
             raise PermissionError(errno.EACCES, "synthetic access denied")
         return real_replace(temporary, destination)
 
-    with patch.object(module.os, "name", "nt"), patch.object(module.os, "replace", side_effect=replace), patch.object(module.time, "sleep"):
+    with patch.object(module, "is_windows", return_value=True), patch.object(module.os, "replace", side_effect=replace), patch.object(module.time, "sleep"):
         yield lambda: calls
 
 
@@ -67,12 +67,17 @@ class FakeScanner:
         self.lost_pdf_before_storage = False
         self.pdf_uploads = []
         self.pdf_calls = 0
+        self.pdf_allow_inference = []
+        self.prepare_allow_inference = []
         self.lost_claim = False
         self.categories = []
         self.jev_ready = False
         self.next_images = []
         self.previous_images = []
         self.readings = {"draft_saved": False, "attempt_saved": False, "claim_active": False}
+
+    def configure_saved_ppocr(self, profile_path):
+        self.saved_pp_profile = str(profile_path)
 
     def get(self, path):
         self.calls.append(("GET", path))
@@ -171,6 +176,7 @@ class FakeScanner:
                     pages=len(pages), layouts=layouts, searchable=False)
 
     def prepare(self, cid, directory, *, crop=None, rotation=0, allow_inference=True):
+        self.prepare_allow_inference.append(allow_inference)
         result = self.original(cid, directory)
         ocr = Path(directory) / (cid + ".json")
         ocr.write_text(json.dumps({"text": "Synthetic text", "lines": [], "text_only_pdf_layers": [{"base64": "must-not-escape"}]}))
@@ -184,8 +190,9 @@ class FakeScanner:
         result.pop('path')
         return {**result, 'pixels': [10, 20]}
 
-    def pdf(self, did, directory, before_upload=None, *, prepared=None):
+    def pdf(self, did, directory, before_upload=None, *, prepared=None, allow_inference=False):
         self.pdf_calls += 1
+        self.pdf_allow_inference.append(allow_inference)
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "synthetic.pdf"
@@ -230,8 +237,8 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(self.batch.close)
         self.worker = self.make_worker()
 
-    def make_worker(self, resume=None):
-        worker = module.Worker(self.profile, resume)
+    def make_worker(self, resume=None, *, profile_path=None):
+        worker = module.Worker(self.profile, resume, profile_path=profile_path)
         self.addCleanup(worker.lock.close)
         worker.check = lambda operation, **values: (
             {"errors": [] if "type" in values["extraction"] else ["Invalid extraction"], "arithmetic": {}}
@@ -839,6 +846,40 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.state["draft"]["extraction"], self.worker.state["assessment"]["extraction"])
         self.send("submit")
         self.assertEqual(len(self.fake.submit_bytes), 1)
+
+    def test_saved_pp_consumer_profile_never_configures_or_runs_inference(self):
+        self.worker.lock.close()
+        profile = {**self.profile, "confirmation_provider": "ppocr"}
+        profile_path = self.repo / "saved-pp-profile.json"
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+        self.profile = profile
+        self.worker = self.make_worker(profile_path=profile_path)
+        self.assertEqual(self.worker.confirmation_provider, "ppocr")
+        self.assertEqual(self.fake.saved_pp_profile, str(profile_path))
+        self.worker.check = lambda operation, **values: (
+            {"errors": [] if "type" in values["extraction"] else ["Invalid extraction"], "arithmetic": {}}
+            if operation == "validate" else [])
+        self.worker.preflight = lambda: {"ready": True}
+        with patch.object(module.receipt_qwen, "extract", side_effect=AssertionError("Qwen must not run")):
+            self.prepared()
+        self.send("submit")
+        self.send("pdf")
+        self.assertEqual(self.fake.prepare_allow_inference, [False])
+        self.assertEqual(self.fake.pdf_allow_inference, [False])
+
+    def test_missing_saved_pp_stops_batch_without_local_ocr_handoff(self):
+        self.claimed()
+        self.send("previews", capture_ids=[DID])
+        self.send("draft", extraction=extraction())
+        request = dict(capture_id=DID, sha256=self.fake.documents[DID]["pages"][0]["sha256"],
+                       crop=[1, 2, 9, 18], rotation=0)
+        self.fake.prepare = Mock(side_effect=module.OCRRequired(self.fake.origin, request))
+        result = self.worker.handle({"op": "prepare", "capture_ids": [DID]})
+        self.assertTrue(result["blocking"])
+        self.assertIn("dedicated OCR host", result["error"])
+        self.assertIn("Do not run OCR on this host", result["error"])
+        self.assertNotIn("Sol", json.dumps(result))
+        self.assertTrue(self.send("release")["released"])
 
     def test_explicit_raw_preview_freezes_full_original_pixel_bounds(self):
         self.claimed()
