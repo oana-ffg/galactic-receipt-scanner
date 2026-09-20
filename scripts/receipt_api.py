@@ -435,6 +435,76 @@ class ScannerClient:
         return {**result, "path": str(output.absolute()), "pages": len(pages), "searchable": True}
 
 
+def _checked_jev_blocked(response):
+    blocked = response.get("blocked", 0)
+    if not isinstance(blocked, int) or blocked < 0:
+        raise ClientError("Jev backfill returned an invalid blocked count.")
+    return blocked
+
+
+def run_jev_backfill(client, *, sleep=time.sleep):
+    """Advance the serialized Jev pipeline until two stable zero-work responses."""
+    processed = 0
+    last = None
+    stable_complete = False
+    while True:
+        try:
+            last = json.loads(client.request("/api/jev/backfill", b"{}"))
+        except (ValueError, TypeError) as error:
+            raise ClientError("Jev backfill returned invalid JSON.") from error
+        if not isinstance(last, dict):
+            raise ClientError("Jev backfill returned an invalid response.")
+        if last.get("result") is not None:
+            processed += 1
+        if last.get("waiting") is True:
+            remaining = last.get("remaining")
+            if remaining != 0:
+                raise ClientError("Jev backfill returned an invalid waiting response.")
+            return {
+                "complete": False,
+                "waiting": True,
+                "processed": processed,
+                "remaining": 0,
+                "phase": last.get("phase"),
+                "blocked": _checked_jev_blocked(last),
+                "last": last,
+            }
+        if last.get("busy"):
+            remaining = last.get("remaining")
+            if not isinstance(remaining, int) or remaining <= 0:
+                raise ClientError("Jev backfill returned an invalid busy response.")
+            return {
+                "complete": False,
+                "deferred": True,
+                "processed": processed,
+                "remaining": remaining,
+                "phase": last.get("phase"),
+                "blocked": _checked_jev_blocked(last),
+                "last": last,
+            }
+        remaining = last.get("remaining")
+        if remaining == 0:
+            if stable_complete:
+                break
+            stable_complete = True
+            continue
+        stable_complete = False
+        if not isinstance(remaining, int) or remaining < 0:
+            raise ClientError("Jev backfill returned an invalid remaining count.")
+        if last.get("result") is None:
+            sleep(0.25)
+    blocked = _checked_jev_blocked(last)
+    if blocked:
+        raise ClientError(f"Jev backfill left {blocked} blocked job(s); inspect status before retrying.")
+    return {
+        "complete": True,
+        "processed": processed,
+        "remaining": 0,
+        "blocked": 0,
+        "last": last,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=".local/processing-access.json")
@@ -488,42 +558,7 @@ def main():
     if args.command == "status":
         result = {**client.get("/api/processing/access"), "origin": client.origin}
     elif args.command == "jev-backfill":
-        processed = 0
-        last = None
-        stable_complete = False
-        deferred = False
-        while True:
-            last = json.loads(client.request("/api/jev/backfill", b"{}"))
-            if last.get("busy"):
-                remaining = last.get("remaining")
-                if not isinstance(remaining, int) or remaining <= 0:
-                    raise ClientError("Jev backfill returned an invalid busy response.")
-                deferred = True
-                break
-            if last.get("result") is not None:
-                processed += 1
-            remaining = last.get("remaining")
-            if remaining == 0:
-                if stable_complete:
-                    break
-                stable_complete = True
-                continue
-            stable_complete = False
-            if not isinstance(remaining, int) or remaining < 0:
-                raise ClientError("Jev backfill returned an invalid remaining count.")
-            if last.get("result") is None:
-                time.sleep(0.25)
-        blocked = last.get("blocked", 0)
-        if not isinstance(blocked, int) or blocked < 0:
-            raise ClientError("Jev backfill returned an invalid blocked count.")
-        if deferred:
-            result = {"complete": False, "deferred": True, "processed": processed,
-                      "remaining": last["remaining"], "phase": last.get("phase"),
-                      "blocked": blocked, "last": last}
-        else:
-            if blocked:
-                raise ClientError(f"Jev backfill left {blocked} blocked job(s); inspect status before retrying.")
-            result = {"complete": True, "processed": processed, "remaining": 0, "blocked": 0, "last": last}
+        result = run_jev_backfill(client)
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":

@@ -32,7 +32,7 @@ class NightlyTests(unittest.TestCase):
         request = self.root / 'request.json'
         request.write_text(json.dumps(requirement))
         self.client.origin = requirement['origin']
-        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts']}
+        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}
         scans = [capture('older', '2026-01-01T00:00:00Z'), capture('recent')]
         for blocked in (False, True):
             summary = dict(complete=not blocked, selected=2, verified=0, reused=0, retired=0,
@@ -47,6 +47,8 @@ class NightlyTests(unittest.TestCase):
                     patch.object(nightly, 'inventory', return_value=scans) as listed, \
                     patch.object(nightly, 'drain', return_value=summary) as drained, \
                     patch.object(nightly, 'prepare_requirement', return_value={'verified': True}) as required, \
+                    patch.object(nightly, 'finish_jev', return_value={'complete': True, 'processed': 1,
+                        'remaining': 0, 'blocked': 0}) as jev, \
                     patch('sys.argv', ['receipt_ocr_nightly.py', '--request', str(request)]), redirect_stdout(io.StringIO()):
                 before = datetime.now(timezone.utc)
                 self.assertEqual(nightly.main(), 1 if blocked else 0)
@@ -54,8 +56,10 @@ class NightlyTests(unittest.TestCase):
                 self.assertGreaterEqual(listed.call_args.args[1], before)
                 if blocked:
                     required.assert_not_called()
+                    jev.assert_not_called()
                 else:
                     required.assert_called_once_with(self.client, requirement, drained.call_args.args[2])
+                    jev.assert_called_once_with(self.client)
 
     def test_luna_requirement_matches_origin_source_and_exact_layout(self):
         value = dict(origin='https://synthetic.example', capture_id='00000000-0000-4000-8000-000000000001',
@@ -79,7 +83,7 @@ class NightlyTests(unittest.TestCase):
         completed = {**capture('completed'), 'ocr_status': 'unverified'}
         missing = capture('missing')
         self.client.origin = 'https://synthetic.example'
-        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts']}
+        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}
         summary = dict(complete=True, selected=1, verified=1, reused=0, retired=0,
                        failures={}, remaining=0)
 
@@ -90,6 +94,8 @@ class NightlyTests(unittest.TestCase):
                 patch.object(nightly, 'ensure_profile', return_value='profile'), \
                 patch.object(nightly, 'inventory', return_value=[completed, missing]), \
                 patch.object(nightly, 'drain', return_value=summary) as drained, \
+                patch.object(nightly, 'finish_jev', return_value={'complete': True, 'processed': 1,
+                    'remaining': 0, 'blocked': 0}) as jev, \
                 patch('sys.argv', ['receipt_ocr_nightly.py', '--date', '2026-09-16']), \
                 redirect_stdout(io.StringIO()):
             self.assertEqual(nightly.main(), 0)
@@ -99,6 +105,29 @@ class NightlyTests(unittest.TestCase):
         self.assertEqual(saved['eligible'], 2)
         self.assertEqual(saved['ocr_available'], 1)
         self.assertEqual(saved['ocr_missing'], 1)
+        self.assertTrue(saved['jev']['complete'])
+        jev.assert_called_once_with(self.client)
+
+    def test_incomplete_jev_makes_an_ocr_complete_run_fail_for_retry(self):
+        self.client.origin = 'https://synthetic.example'
+        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}
+        ocr = dict(complete=True, selected=0, verified=0, reused=0, retired=0,
+                   failures={}, remaining=0)
+        deferred = dict(complete=False, deferred=True, processed=0, remaining=1,
+                        phase='group', blocked=0)
+        with patch.object(nightly, 'REPO', self.root), patch.object(nightly.os, 'chdir'), \
+                patch.object(nightly, 'discover', return_value=('config', 'profile')), \
+                patch.object(nightly, 'credentials', return_value={}), \
+                patch.object(nightly, 'ScannerClient', return_value=self.client), \
+                patch.object(nightly, 'ensure_profile', return_value='profile'), \
+                patch.object(nightly, 'inventory', return_value=[]), \
+                patch.object(nightly, 'drain', return_value=ocr), \
+                patch.object(nightly, 'finish_jev', return_value=deferred), \
+                patch('sys.argv', ['receipt_ocr_nightly.py']), redirect_stdout(io.StringIO()):
+            self.assertEqual(nightly.main(), 1)
+        saved = json.loads(next((self.root / '.local' / 'receipt-ocr-nightly').glob('*/last-run.json')).read_text())
+        self.assertFalse(saved['complete'])
+        self.assertEqual(saved['jev'], deferred)
 
     def test_catchup_inventory_includes_today_without_future_scans(self):
         now = datetime(2026, 9, 17, 15, tzinfo=timezone.utc)

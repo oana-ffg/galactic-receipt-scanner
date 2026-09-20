@@ -1050,6 +1050,20 @@ async function latestPipelineRun(env: Env) {
   ).first<JevPipelineRun>();
 }
 
+async function currentWaitingCaptureCount(env: Env, captures: Capture[]) {
+  const current = new Set(
+    captures
+      .filter((capture) => capture.is_current)
+      .map((capture) => capture.id),
+  );
+  const waiting = (
+    await env.DB.prepare(
+      "SELECT DISTINCT capture_id FROM jev_jobs WHERE status='waiting'",
+    ).all<{ capture_id: string }>()
+  ).results;
+  return waiting.filter((job) => current.has(job.capture_id)).length;
+}
+
 async function pipelineNeedsRun(
   env: Env,
   current: Capture[],
@@ -1779,7 +1793,16 @@ async function markDocumentsWaitingForOcr(
   for (let index = 0; index < captureIds.length; index += 99) {
     const chunk = captureIds.slice(index, index + 99);
     await env.DB.prepare(
-      `UPDATE jev_jobs SET status='waiting',updated_at=? WHERE status='classified' AND capture_id IN (${chunk.map(() => "?").join(",")})`,
+      `UPDATE jev_jobs
+       SET status='waiting',updated_at=?
+       WHERE status IN ('classified','complete')
+         AND capture_id IN (${chunk.map(() => "?").join(",")})
+         AND EXISTS (
+           SELECT 1
+           FROM jev_page_heads head
+           WHERE head.capture_id=jev_jobs.capture_id
+             AND head.ocr_sha256=jev_jobs.ocr_sha256
+         )`,
     )
       .bind(now, ...chunk)
       .run();
@@ -2119,10 +2142,15 @@ export async function jevRoute(
       "SELECT COALESCE(ineligible_reason,'unspecified') AS reason,COUNT(*) AS count FROM jev_jobs WHERE status='ineligible' GROUP BY COALESCE(ineligible_reason,'unspecified') ORDER BY reason",
     ).all<{ reason: string; count: number }>();
     const pipeline = await latestPipelineRun(env);
+    const waitingCurrentCaptures = await currentWaitingCaptureCount(
+      env,
+      await loadCaptures(),
+    );
     return json({
       configured: Boolean(env.TYPESAFE_API_KEY),
       jobs: counts.results,
       ineligible_reasons: ineligibleReasons.results,
+      waiting_current_captures: waitingCurrentCaptures,
       pipeline: pipeline
         ? {
             version: pipeline.version,
@@ -2249,6 +2277,7 @@ export async function jevRoute(
           phase: "complete",
           remaining: 0,
           busy: false,
+          waiting: (await currentWaitingCaptureCount(env, captures)) > 0,
           blocked: blocked?.count ?? 0,
         });
       run = await startPipelineRun(env, current);
@@ -2258,6 +2287,7 @@ export async function jevRoute(
           phase: "complete",
           remaining: 0,
           busy: false,
+          waiting: (await currentWaitingCaptureCount(env, captures)) > 0,
           blocked: blocked?.count ?? 0,
         });
     }

@@ -186,6 +186,32 @@ class ClientTests(unittest.TestCase):
         })
         self.client.request.assert_called_once_with("/api/jev/backfill", b"{}")
 
+    def test_jev_backfill_preserves_waiting_for_ocr_as_incomplete(self):
+        output = io.StringIO()
+        waiting = {
+            "result": {"status": "waiting-for-ocr"},
+            "phase": "complete",
+            "remaining": 0,
+            "waiting": True,
+            "busy": False,
+            "blocked": 0,
+        }
+        self.client.request = Mock(return_value=json.dumps(waiting).encode())
+        with patch("receipt_api.credentials", return_value={}), \
+                patch("receipt_api.ScannerClient", return_value=self.client), \
+                patch("sys.argv", ["receipt_api.py", "jev-backfill"]), redirect_stdout(output):
+            main()
+        self.assertEqual(json.loads(output.getvalue()), {
+            "complete": False,
+            "waiting": True,
+            "processed": 1,
+            "remaining": 0,
+            "phase": "complete",
+            "blocked": 0,
+            "last": waiting,
+        })
+        self.client.request.assert_called_once_with("/api/jev/backfill", b"{}")
+
     def test_jev_backfill_fails_closed_when_jobs_are_blocked(self):
         self.client.request = Mock(return_value=json.dumps({
             "result": None, "remaining": 0, "blocked": 2
@@ -194,6 +220,14 @@ class ClientTests(unittest.TestCase):
                 patch("receipt_api.ScannerClient", return_value=self.client), \
                 patch("sys.argv", ["receipt_api.py", "jev-backfill"]):
             with self.assertRaisesRegex(ClientError, "2 blocked"):
+                main()
+
+    def test_jev_backfill_rejects_a_non_object_response(self):
+        self.client.request = Mock(return_value=b"[]")
+        with patch("receipt_api.credentials", return_value={}), \
+                patch("receipt_api.ScannerClient", return_value=self.client), \
+                patch("sys.argv", ["receipt_api.py", "jev-backfill"]):
+            with self.assertRaisesRegex(ClientError, "invalid response"):
                 main()
 
     def test_snapshot_metadata_avoids_per_image_lookup_but_still_verifies_bytes(self):

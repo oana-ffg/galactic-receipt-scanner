@@ -1365,6 +1365,19 @@ it("leaves the open tail unclassified until the following raw capture has PP OCR
       .first(),
   ).toEqual({ status: "waiting" });
 
+  const statusResponse = await mf.dispatchFetch(`${origin}/api/jev/status`, {
+    headers: { ...ownerHeaders, Authorization: `Bearer ${processingToken}` },
+  });
+  expect(statusResponse.status).toBe(200);
+  expect((await statusResponse.json<any>()).waiting_current_captures).toBe(1);
+
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: null,
+    phase: "complete",
+    remaining: 0,
+    waiting: true,
+  });
+
   await seedHistoricalOcr(
     captures[2],
     "SECOND SHOP RECEIPT PAGE 2\nTOTAL 20.00",
@@ -1465,6 +1478,26 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
       .bind(first.id)
       .first(),
   ).toBeNull();
+  expect(
+    await db
+      .prepare("SELECT status FROM jev_jobs WHERE capture_id=?")
+      .bind(first.id)
+      .first(),
+  ).toEqual({ status: "waiting" });
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: null,
+    phase: "complete",
+    remaining: 0,
+    waiting: true,
+  });
+  const statusResponse = await mf.dispatchFetch(`${origin}/api/jev/status`, {
+    headers: {
+      ...ownerHeaders,
+      Authorization: `Bearer ${processingToken}`,
+    },
+  });
+  expect(statusResponse.status).toBe(200);
+  expect((await statusResponse.json<any>()).waiting_current_captures).toBe(1);
 });
 
 it("marks an open tail larger than the D1 parameter limit as waiting", async () => {

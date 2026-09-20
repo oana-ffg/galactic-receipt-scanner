@@ -19,8 +19,10 @@ Use the repository scripts; they live outside this skill so you can inspect, rep
 test them when needed. The runner verifies original hashes, uses the saved document outline
 (manual correction takes precedence), reuses matching PP artifacts, performs inference
 locally, uploads immutable OCR including positions/confidences/search text, and verifies
-the uploaded artifact. It does not group pages, alter extracted accounting values or
-regenerate document PDFs. Older artifacts and originals are preserved.
+the uploaded artifact. After all OCR attempts, the deterministic runner drains the hosted,
+serialized Jev pipeline to two stable zero-work responses. Jev owns page grouping and
+document classification; the OCR model and agent do not. The runner does not alter extracted
+accounting values or regenerate document PDFs. Older artifacts and originals are preserved.
 
 ## Explicit request recovery on the OCR host
 
@@ -40,8 +42,8 @@ claim alive while inference runs elsewhere.
 The OCR runner has its own lock. If it reports another OCR run active, wait for that run
 to end, then rerun; do not kill it or launch competing inference. Return the actual summary
 path, completion status, remaining failures and `required_ocr.verified`. Full success
-requires `complete: true` and `limited: false`. Access/approval failures or an unresolved
-required artifact are blockers, never success.
+requires `complete: true`, `limited: false` and `jev.complete: true`. Access/approval
+failures, an unresolved required artifact, or incomplete Jev work are never success.
 
 ## Scheduled automation contract
 
@@ -102,8 +104,13 @@ wrapper finishes. The wrapper, not the chat turn, owns and waits for the OCR chi
    not process completion. The runner emits per-scan progress, checkpoints successful
    uploads and retains pending OCR so a retry need not repeat inference. Default runs
    are unlimited; do not add `--limit` or silently narrow the day/backlog to finish early.
+   After the OCR attempts it invokes the existing Jev backfill endpoint until two stable
+   zero-work responses. A current `waiting-for-ocr` tail remains incomplete and retryable;
+   it is never mistaken for an idle completed pipeline. Backend pipeline ownership prevents
+   overlapping Jev mutations.
 4. Inspect the wrapper state and final summary plus private `last-run.json`/`failures.json` under
-   `.local/receipt-ocr-nightly/`. Require `complete: true`, `remaining: 0`, and `limited: false`
+   `.local/receipt-ocr-nightly/`. Require `complete: true`, `remaining: 0`, `limited: false`,
+   and `jev.complete: true`
    before reporting full completion. Report inventory `ocr_available`/`ocr_missing`, newly
    verified scans and unresolved failures separately. An empty OCR reading is preserved
    honestly and remains reviewable.

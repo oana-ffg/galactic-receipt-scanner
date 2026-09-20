@@ -165,8 +165,11 @@ Where supported, the open dashboard exposes these WebMCP tools:
 - `save_receipt_transcription`: save source-backed text, provenance, explicit uncertainties and original-pixel regions after visual inspection.
 
 OCR runs through PP-OCR outside the browser. Saving exact-layout PP triggers the hosted
-Jev pass; blank OCR is classified as misc without an external call. The review page displays
-saved OCR and model readings; PDF generation reuses saved OCR matching the current page layout.
+Jev page-role pass; blank OCR is classified as misc without an external call. At the end
+of the nightly OCR run, the same deterministic runner drains Jev's serialized grouping,
+detached-payment and final-document pipeline to two stable zero-work responses. The review
+page displays saved OCR and model readings; PDF generation reuses saved OCR matching the
+current page layout.
 
 Follow [POST_PROCESSING.md](POST_PROCESSING.md) for batch processing and source reconciliation.
 

@@ -12,7 +12,8 @@ import time
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from receipt_api import ClientError, ScannerClient, SHA, UUID, artifact_directory, credentials, matches_prepared_ocr, write_new_file
+from receipt_api import (ClientError, ScannerClient, SHA, UUID, artifact_directory,
+                         credentials, matches_prepared_ocr, run_jev_backfill, write_new_file)
 from receipt_locks import acquire_lock, LockBusy
 from receipt_ppocr_setup import REPO, discover, ensure_profile
 
@@ -142,6 +143,13 @@ def prepare_requirement(client, value, root):
     return dict(capture_id=cid, ocr_sha256=prepared['ocr_sha256'], verified=True)
 
 
+def finish_jev(client):
+    """Drain hosted Jev work without copying document identifiers into the OCR summary."""
+    result = run_jev_backfill(client)
+    fields = ('complete', 'deferred', 'waiting', 'processed', 'remaining', 'phase', 'blocked')
+    return {key: result[key] for key in fields if key in result}
+
+
 def drain(client, captures, root, state, *, attempts=3, sleep=time.sleep, emit=print):
     """Try every scan before retrying individual failures; an access loss blocks further writes."""
     pending = captures
@@ -225,7 +233,8 @@ def main():
     client = ScannerClient(credentials(config))
     requirement = read_requirement(args.request, client.origin) if args.request else None
     access = client.get('/api/processing/access')
-    if 'save_ocr_artifacts' not in access.get('capabilities', []):
+    capabilities = set(access.get('capabilities', []))
+    if not {'save_ocr_artifacts', 'jev_classification'} <= capabilities:
         raise ClientError('Processing access was not confirmed.')
     # Only public timezone data is installed here; no receipt is sent to an inference provider.
     try:
@@ -276,6 +285,16 @@ def main():
         result['limited'] = args.limit is not None and len(selected) < len(awaiting_ocr)
         if result['limited']:
             result['complete'] = False
+        if result.get('blocked'):
+            result['jev'] = dict(complete=False, skipped=True, reason=result['blocked'])
+        else:
+            try:
+                result['jev'] = finish_jev(client)
+            except ClientError as error:
+                result['jev'] = dict(complete=False, error=str(error))
+        if not result['jev'].get('complete'):
+            result['complete'] = False
+        print(json.dumps(dict(event='jev_finished', **result['jev'])), flush=True)
         save_json(root / 'last-run.json', result)
         print(json.dumps(dict(event='finished', **result)), flush=True)
         return 0 if result['complete'] else 1

@@ -73,9 +73,11 @@ host uses `.local/processing-host.json`, contains no OCR runtime, and only consu
 saved PP artifacts while generating PDFs. Count complete documents, including all their
 pages, toward the batch limit.
 
-After first enabling Jev, run `python scripts/receipt_api.py --config PRIVATE_CONFIG
-jev-backfill`. It queues only the latest PP-OCR artifact for each current capture and
-processes retryable jobs one at a time. Inspect `/api/jev/documents?disagreements=1`
+The scheduled OCR runner drains Jev after its OCR attempts and requires two stable
+zero-work responses before reporting full success. For an explicit standalone repair,
+run `python scripts/receipt_api.py --config PRIVATE_CONFIG jev-backfill`. It queues only
+the latest PP-OCR artifact for each current capture and processes retryable jobs one at a
+time. Inspect `/api/jev/documents?disagreements=1`
 before accepting any Jev/Luna category or document-role disagreement. This endpoint is
 paginated: follow every non-null `next` value with `after`, even when a filtered page's
 `documents` array is empty, until `next` is null.
