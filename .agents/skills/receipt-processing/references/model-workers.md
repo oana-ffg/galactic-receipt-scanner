@@ -1,8 +1,7 @@
 # Managed model workers
 
-Use a fresh context. Luna uses only the [bounded helper protocol](luna-protocol.md)
-for calls and the [Parse section](processing-api.md#parse) for extraction fields.
-Do not mix raw HTTP request bodies with helper requests. The older
+Use a fresh context. Luna uses only [the short flow](luna-flow.md) and the prepared task's
+complete extraction template. It never reads API routes or helper operations. The older
 [worker runbook](worker-runbook.md) is for Astra. Normal processing needs no
 application-source reading or CLI discovery.
 All private source manifests, OCR artifacts and results stay under ignored `.local/`.
@@ -10,30 +9,13 @@ The first pass uses prepared local PP-OCRv6 and Luna only; no paid/cloud inferen
 
 ## Luna: one document
 
-Default scope: organization. Prioritize page association, vendor, date and descriptive
-purchase category. Read enough item content to classify the purchase. Exhaustive line
-transcription and reconciliation are deferred; keep schema keys with null/empty deferred
-values and an explicit "Detailed financial verification deferred" uncertainty. Save
-readable totals when useful for finding payment-slip matches. The comprehensive financial
-rules below govern any amounts you do retain, not a requirement to audit every row now.
-Use [the supermarket rules](supermarket-classification.md) for supermarket receipts;
-other categories keep their definitions. Sorting by plausible use does not assign actual
-ownership, reimbursement or bank allocation. In existing extraction `evidence` notes,
-write Category with supporting items and, below high certainty, Confidence with specific
-uncertain fields and reasons. Refresh reassessed notes without rewriting the initial reading.
+Default scope: organization. The deterministic helper has already selected and claimed the
+document, retrieved its exact PP-OCR evidence, loaded Jev's page/document/category decisions,
+and frozen the grouped page order before Luna sees the startup task. Do not acquire locks,
+search the queue, inspect neighboring documents, classify pages, regroup pages, run OCR,
+manage files, submit HTTP requests directly, or operate the PDF pipeline.
 
-1. Claim the small stage. Read the first claimed page's PP text/coordinates alone and
-   record `observe` with its own identifying values before retrieving context or other
-   pages. Then read the next available scan's OCR and possible matches through the bounded
-   protocol. Use raw originals only when uncertain. Confirm paper margins and save
-   crop/rotation with the final page layout.
-   Continue only while pages belong together; leave the
-   first unrelated lookahead in the pool. Preserve the claimed document as the retained
-   target when grouping; include existing source documents in the atomic submit.
-2. Classify each page and the document. A receipt may also have an attached payment slip.
-   Card details printed on a main receipt do not imply a separate attached slip. Detect
-   handwriting presence only; no handwritten transcription. Preserve prior annotations.
-3. Extract financial fields from PP text/positions, opening crops when useful: vendor/date/reference/currency,
+1. Extract financial fields from the prepared PP text/positions, opening returned crops only when useful: vendor/date/reference/currency,
    printed quantities, unit prices, line amounts, adjustments, purchase and charged totals,
    VAT and tax basis. Unknown values are null; do not invent quantity 1 or unit prices
    simply because they can be inferred. Included VAT and informational savings are not
@@ -41,30 +23,21 @@ uncertain fields and reasons. Refresh reassessed notes without rewriting the ini
    amounts; store signed VAT in vat_minor only, which the server adds exactly once.
    Missing VAT remains null; preserve printed signs on credit notes.
    Printed purchase total and charged amount may differ by card fees.
-4. Search candidate receipts/slips by date, total and currency via context. Inspect possible
-   non-adjacent matches. Vendor/reference/card evidence and page continuation must support
-   attachment; approximate date/amount alone is insufficient. Respect rejected matches.
-   Declined slips are distinct payment attempts. Missing future pages are fragments.
-5. Assign ONE whole-document category using existing descriptions; add a new private
-   category with a distinct name and description only when none fits. This is a purchase
-   category, not an ownership/account allocation decision.
-6. Use the four-request [short flow](luna-flow.md) to persist the OCR-assisted reading
-   and frozen image-only PDF. Python ensures matching PP for every retained region and confirms it.
-   This pins PP artifacts and returns ordinary OCR/math evidence, without Qwen.
-   The initial and final Luna readings share PP input; agreement is not independent corroboration.
-   In this SAME Luna context, inspect disputed pixels, assess the findings and call
-   `assess` with the complete revised extraction and rationale. Preserve initial values;
-   corrections only belong in the separate reassessed reading. Accept or reject each
-   suggested correction based on pixels; never follow another model to force agreement.
-   Keep unresolved discrepancies explicit and confidence honest. PP's text confidence is
-   not Astra confidence. `confirm` and `assess` are required even if no values change.
-7. Submit the reassessed parse and any grouping changes atomically. Exact retries are idempotent;
-   conflicts require a fresh read. Use the protocol's `pdf` operation to generate the searchable image PDF when date/vendor
-   are known, inspect it and save the PDF attestation. Return brief saved IDs, revisions,
-   status, filename and concrete failures. A saved model-review/awaiting-page/broken
-   result completes this worker's document: the coordinator continues the Luna queue.
-   A failed save or uncertain request instead stops the batch. Release an unused known
-   claim on execution error; no busy retries.
+2. Use Jev's existing whole-document category and the active category definitions as the
+   starting point. Read enough item content to verify it. Use [the supermarket rules](supermarket-classification.md)
+   for supermarket receipts; other categories keep their definitions. Do not research the
+   vendor or create categories. Sorting by plausible use does not assign ownership,
+   reimbursement or bank allocation.
+3. Detect handwriting presence only if pixels were inspected; never transcribe handwriting.
+   Keep the frozen page membership and roles. If pixels expose a grouping problem, record
+   it as low-confidence evidence for Astra/human review instead of fixing it here.
+4. Write one semantic result file containing the complete extraction, rationale and only
+   the page IDs whose prepared previews were actually opened. The controller handles every
+   checkpoint, comparison, submission, PDF, lease and verification operation. Open images
+   only for a concrete ambiguity or low-confidence source.
+5. Preserve uncertainty honestly. Luna/PP or Luna/Jev disagreement is low; agreement with
+   uncertainty is medium; high requires agreement and confidence. A saved low/medium result
+   is successful and proceeds to Astra. Return only the result path and compact outcome.
 
 ## Astra: independent full-document parse
 

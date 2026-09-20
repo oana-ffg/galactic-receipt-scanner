@@ -34,11 +34,20 @@ import {
 
 type Lock = {
   token: string;
+  request_sha256: string | null;
   stage: "small" | "large";
   document_id: string;
   revision: number;
   expires: number;
   draft: string | null;
+};
+type ClaimRequestRecord = {
+  token: string;
+  request_sha256: string;
+  stage: "small" | "large";
+  document_id: string | null;
+  revision: number | null;
+  outcome_reason: string;
 };
 const STAGE_MODEL = { small: "gpt-5.6-luna", large: "gpt-6-astra" } as const;
 const LEASE_MS = 20 * 60 * 1000;
@@ -593,6 +602,13 @@ export async function processingRoute(
       "Batch document exclusions must contain unique document IDs.",
     );
     const excluded = new Set<string>(excludedDocumentIds);
+    const requestedToken = input.claim_token;
+    requireThat(
+      requestedToken === undefined ||
+        (typeof requestedToken === "string" && UUID.test(requestedToken)),
+      400,
+      "A claim token must be a UUID.",
+    );
     const targeted = input.document_id !== undefined;
     requireThat(
       targeted
@@ -606,13 +622,128 @@ export async function processingRoute(
       400,
       "A targeted review requires stage large, document_id and its current revision.",
     );
+    const requestSha256 = requestedToken
+      ? await digest(
+          Uint8Array.from(
+            new TextEncoder().encode(
+              JSON.stringify({
+                stage: input.stage,
+                document_id: targeted ? input.document_id : null,
+                revision: targeted ? input.revision : null,
+                review_all: input.review_all === true,
+                exclude_document_ids: [...excluded].sort(),
+              }),
+            ),
+          ),
+        )
+      : null;
+    let priorRequest = requestedToken
+      ? await env.DB.prepare(
+          "SELECT token,request_sha256,stage,document_id,revision,outcome_reason FROM processing_claim_requests WHERE token=?",
+        )
+          .bind(requestedToken)
+          .first<ClaimRequestRecord>()
+      : null;
+    if (priorRequest)
+      requireThat(
+        priorRequest.request_sha256 === requestSha256 &&
+          priorRequest.stage === input.stage,
+        409,
+        "A claim token is permanently bound to its original request.",
+      );
     const captures = await load(),
       docs = await records(env, captures);
     const current = new Set(
       captures.filter((c) => c.is_current).map((c) => c.id),
     );
-    const jevReady = await jevReadyDocuments(env, docs, captures);
     const time = new Map(captures.map((c) => [c.id, c.created_at]));
+    const claimResponse = async (lock: Lock) => {
+      const document = docs.find(
+        (candidate) =>
+          candidate.id === lock.document_id &&
+          candidate.revision === lock.revision &&
+          !candidate.mergedInto &&
+          !candidate.duplicateOf,
+      );
+      requireThat(
+        document,
+        409,
+        "Claimed document changed; wait for the lease to expire before retrying.",
+      );
+      return json({
+        claim: {
+          token: lock.token,
+          expires: lock.expires,
+          stage: lock.stage,
+          document: {
+            id: document.id,
+            revision: document.revision,
+            pages: document.pages,
+          },
+          scanned_at: document.pages.map((page) => time.get(page.captureId)),
+          jev: await jevSummary(env, document),
+        },
+      });
+    };
+    if (priorRequest) {
+      const existing = await env.DB.prepare(
+        "SELECT * FROM processing_lock WHERE id=1 AND token=? AND request_sha256=? AND stage=? AND expires>unixepoch()*1000",
+      )
+        .bind(requestedToken, requestSha256, input.stage)
+        .first<Lock>();
+      if (existing && priorRequest.outcome_reason === "pending") {
+        await env.DB.prepare(
+          "UPDATE processing_claim_requests SET document_id=?,revision=?,outcome_reason='active' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
+        )
+          .bind(
+            existing.document_id,
+            existing.revision,
+            requestedToken,
+            requestSha256,
+          )
+          .run();
+        priorRequest = {
+          ...priorRequest,
+          document_id: existing.document_id,
+          revision: existing.revision,
+          outcome_reason: "active",
+        };
+      }
+      if (priorRequest.document_id === null) {
+        requireThat(
+          priorRequest.outcome_reason !== "pending",
+          409,
+          "The original claim request has not reached a durable outcome; do not select replacement work.",
+        );
+        return json({ claim: null, reason: priorRequest.outcome_reason });
+      }
+      requireThat(
+        existing &&
+          existing.document_id === priorRequest.document_id &&
+          existing.revision === priorRequest.revision,
+        409,
+        "The original claim is no longer active; use a new token for new work.",
+      );
+      return claimResponse(existing);
+    }
+    if (requestedToken) {
+      const began = await env.DB.prepare(
+        "INSERT INTO processing_claim_requests(token,request_sha256,stage,document_id,revision,outcome_reason,created_at) VALUES(?,?,?,NULL,NULL,'pending',?) ON CONFLICT(token) DO NOTHING RETURNING token",
+      )
+        .bind(
+          requestedToken,
+          requestSha256,
+          input.stage,
+          new Date().toISOString(),
+        )
+        .first<{ token: string }>();
+      requireThat(
+        began,
+        409,
+        "The claim token is already being resolved; retry only the exact same request.",
+      );
+    }
+    const jevReady = await jevReadyDocuments(env, docs, captures);
     const candidates = docs
       .filter(
         (d) =>
@@ -663,16 +794,25 @@ export async function processingRoute(
         "Targeted review requires a current, processed, non-human-reviewed document at the expected revision.",
       );
     }
-    if (!d) return json({ claim: null, reason: "queue-empty" });
-    const token = crypto.randomUUID();
+    if (!d) {
+      if (requestedToken)
+        await env.DB.prepare(
+          "UPDATE processing_claim_requests SET outcome_reason='queue-empty' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
+        )
+          .bind(requestedToken, requestSha256)
+          .run();
+      return json({ claim: null, reason: "queue-empty" });
+    }
+    const token = requestedToken ?? crypto.randomUUID();
     // Exactly one document lease across both stages. The head predicate rejects stale selection.
     const result = await env.DB.prepare(
-      `INSERT INTO processing_lock(id,token,stage,document_id,revision,expires,draft)
-      SELECT 1,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=? AND (?=1 OR EXISTS(SELECT 1 FROM jev_document_heads WHERE document_id=?)) AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
-      ON CONFLICT(id) DO UPDATE SET token=excluded.token,stage=excluded.stage,document_id=excluded.document_id,revision=excluded.revision,expires=excluded.expires,draft=NULL WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
+      `INSERT INTO processing_lock(id,token,request_sha256,stage,document_id,revision,expires,draft)
+      SELECT 1,?,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=? AND (?=1 OR EXISTS(SELECT 1 FROM jev_document_heads WHERE document_id=?)) AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
+      ON CONFLICT(id) DO UPDATE SET token=excluded.token,request_sha256=excluded.request_sha256,stage=excluded.stage,document_id=excluded.document_id,revision=excluded.revision,expires=excluded.expires,draft=NULL WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
     )
       .bind(
         token,
+        requestSha256,
         input.stage,
         d.id,
         d.revision,
@@ -682,17 +822,32 @@ export async function processingRoute(
         targeted ? 1 : 0,
         d.id,
       )
-      .first();
-    if (!result) return json({ claim: null, reason: "busy-or-changed" });
-    return json({
-      claim: {
-        ...result,
-        stage: input.stage,
-        document: { id: d.id, revision: d.revision, pages: d.pages },
-        scanned_at: d.pages.map((p) => time.get(p.captureId)),
-        jev: await jevSummary(env, d),
-      },
-    });
+      .first<{ token: string; expires: number }>();
+    if (!result) {
+      if (requestedToken)
+        await env.DB.prepare(
+          "UPDATE processing_claim_requests SET outcome_reason='busy-or-changed' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
+        )
+          .bind(requestedToken, requestSha256)
+          .run();
+      return json({ claim: null, reason: "busy-or-changed" });
+    }
+    const lock = {
+      token,
+      request_sha256: requestSha256,
+      stage: input.stage,
+      document_id: d.id,
+      revision: d.revision,
+      expires: result.expires,
+      draft: null,
+    } as Lock;
+    if (requestedToken)
+      await env.DB.prepare(
+        "UPDATE processing_claim_requests SET document_id=?,revision=?,outcome_reason='active' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
+      )
+        .bind(d.id, d.revision, requestedToken, requestSha256)
+        .run();
+    return claimResponse(lock);
   }
   if (path === "/api/processing/batch-lease" && method === "POST") {
     requireThat(
@@ -1334,7 +1489,7 @@ export async function processingRoute(
       requireThat(
         confirmation,
         409,
-        "Save independent OCR/model confirmation before reassessment.",
+        "Save the source-matched PP-OCR evidence checkpoint before reassessment.",
       );
       checkAssessment(input.assessment, confirmation.sha256);
       const finalExtraction = input.extraction;

@@ -184,12 +184,25 @@ export const purchaseCategoryRevisions = sqliteTable(
 export const processingLock = sqliteTable("processing_lock", {
   id: integer("id").primaryKey(),
   token: text("token").notNull(),
+  request_sha256: text("request_sha256"),
   stage: text("stage").notNull(),
   document_id: text("document_id").notNull(),
   revision: integer("revision").notNull(),
   expires: integer("expires").notNull(),
   draft: text("draft"),
 });
+export const processingClaimRequests = sqliteTable(
+  "processing_claim_requests",
+  {
+    token: text("token").primaryKey(),
+    request_sha256: text("request_sha256").notNull(),
+    stage: text("stage").notNull(),
+    document_id: text("document_id"),
+    revision: integer("revision"),
+    outcome_reason: text("outcome_reason").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+);
 export const processingBatchLease = sqliteTable("processing_batch_lease", {
   id: integer("id").primaryKey(),
   batch_id: text("batch_id").notNull().unique(),

@@ -69,7 +69,7 @@ class FakeScanner:
         self.pdf_calls = 0
         self.pdf_allow_inference = []
         self.prepare_allow_inference = []
-        self.lost_claim = False
+        self.lost_claim = 0
         self.categories = []
         self.jev_ready = False
         self.next_images = []
@@ -84,6 +84,7 @@ class FakeScanner:
         if path == "/api/processing/access":
             return {"version": 2, "queueClaims": True, "lunaReassessment": True,
                     "batchDocumentExclusions": True,
+                    "idempotentClaims": True,
                     "jev": {"configured": True, "model": "jev-1.13.0"}}
         if path == "/api/processing/categories":
             return deepcopy(self.categories)
@@ -108,8 +109,9 @@ class FakeScanner:
         if path.endswith("/claim"):
             self.claim_bodies.append(body)
             if self.lost_claim:
-                raise ClientError("Scanner connection failed; check connectivity and retry.")
-            return json.dumps({"claim": dict(token=TOKEN, expires=time.time()*1000+1200000,
+                self.lost_claim -= 1
+                raise module.ScannerConnectionError("Scanner connection failed; check connectivity and retry.")
+            return json.dumps({"claim": dict(token=body.get("claim_token", TOKEN), expires=time.time()*1000+1200000,
                 stage="small", document=deepcopy(self.documents[DID]),
                 jev={"ready": self.jev_ready,
                      "document": {"role": "purchase_document", "probability": 0.99,
@@ -240,9 +242,14 @@ class WorkerTests(unittest.TestCase):
     def make_worker(self, resume=None, *, profile_path=None):
         worker = module.Worker(self.profile, resume, profile_path=profile_path)
         self.addCleanup(worker.lock.close)
-        worker.check = lambda operation, **values: (
-            {"errors": [] if "type" in values["extraction"] else ["Invalid extraction"], "arithmetic": {}}
-            if operation == "validate" else [{"uncertainties": d["uncertainties"], "broken": d["broken"]} for d in values["documents"]])
+        def check(operation, **values):
+            if operation == "validate":
+                return {"errors": [] if "type" in values["extraction"] else ["Invalid extraction"], "arithmetic": {}}
+            if operation == "contract":
+                return {"payment_status": ["approved", "declined", "unknown", "not-applicable"],
+                        "line_items": {"item": {"description": "nonempty string"}}}
+            return [{"uncertainties": d["uncertainties"], "broken": d["broken"]} for d in values["documents"]]
+        worker.check = check
         def render(dpi):
             worker.state["rendered"] = ["synthetic-render"] * worker.state["pdf"]["pages"]
             return {"pages": worker.state["rendered"], "dpi": dpi}
@@ -267,6 +274,124 @@ class WorkerTests(unittest.TestCase):
         self.send("observe", observation=dict(capture_id=DID, type="receipt", vendor="Synthetic",
             receipt_date=None, currency=None, total_minor=None, card_last_four=None))
         self.send("context")
+
+    def test_prepared_luna_task_needs_one_semantic_result(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        self.assertTrue(prepared["ok"])
+        task = json.loads(Path(prepared["task_path"]).read_text())
+        self.assertEqual(task["document"]["capture_ids"], [DID])
+        self.assertEqual(len(task["ocr"]), 1)
+        self.assertEqual(len(task["images"]), 1)
+        self.assertEqual(task["extraction_contract"]["payment_status"], ["approved", "declined", "unknown", "not-applicable"])
+        self.assertIn("item", task["extraction_contract"]["line_items"])
+        self.assertNotIn(TOKEN, json.dumps(task))
+        value = extraction()
+        value["has_handwriting"] = None
+        Path(prepared["result_path"]).write_text(json.dumps({
+            "extraction": value,
+            "rationale": "Synthetic PP and Jev evidence agree.",
+            "inspected_capture_ids": [],
+        }))
+        finished = self.worker.complete_luna_task()
+        self.assertTrue(finished["ok"], finished)
+        self.assertEqual(self.worker.state["phase"], "complete")
+        self.assertEqual(self.fake.pdf_calls, 1)
+        self.assertEqual(self.fake.pdf_allow_inference, [False])
+
+    def test_prepared_luna_task_rejects_legacy_qwen_profile_before_claim(self):
+        self.assertEqual(self.worker.confirmation_provider, "qwen")
+        with self.assertRaisesRegex(module.InputError, "saved-PP"):
+            self.worker.prepare_luna_task([])
+        self.assertEqual(self.worker.state["phase"], "ready")
+        self.assertEqual(self.fake.claim_bodies, [])
+
+    def test_uninspected_handwriting_claim_requires_result_correction(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        Path(prepared["result_path"]).write_text(json.dumps({
+            "extraction": extraction(),
+            "rationale": "Synthetic result requiring correction.",
+            "inspected_capture_ids": [],
+        }))
+        result = self.worker.complete_luna_task()
+        self.assertTrue(result["correction_required"])
+        self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertFalse(self.fake.submitted)
+
+    def test_malformed_prepared_results_return_bounded_corrections(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        result_path = Path(prepared["result_path"])
+        fixtures = [
+            "not json",
+            json.dumps({"extraction": extraction()}),
+            json.dumps({
+                "extraction": extraction(),
+                "rationale": "Synthetic malformed inspection list.",
+                "inspected_capture_ids": [{}],
+            }),
+            json.dumps({
+                "extraction": extraction(),
+                "rationale": "Synthetic unknown inspected page.",
+                "inspected_capture_ids": [OTHER],
+            }),
+        ]
+        for value in fixtures:
+            with self.subTest(value=value[:40]):
+                result_path.write_text(value)
+                result = self.worker.complete_luna_task()
+                self.assertTrue(result["correction_required"])
+                self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertFalse(self.fake.submitted)
+
+    def test_unknown_prepared_category_is_correctable_before_result_is_pinned(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        categories = [{"id": OTHER, "name": "Synthetic supplies", "description": "Synthetic fixture."}]
+        self.fake.categories = deepcopy(categories)
+        prepared = self.worker.prepare_luna_task(categories)
+        result_path = Path(prepared["result_path"])
+        value = extraction()
+        value["category_id"] = FOREIGN
+        result_path.write_text(json.dumps({
+            "extraction": value,
+            "rationale": "Synthetic unknown category requiring correction.",
+            "inspected_capture_ids": [DID],
+        }))
+        correction = self.worker.complete_luna_task()
+        self.assertTrue(correction["correction_required"])
+        self.assertNotIn("luna_result_sha256", self.worker.state)
+        value["category_id"] = OTHER
+        result_path.write_text(json.dumps({
+            "extraction": value,
+            "rationale": "Synthetic category corrected from the prepared registry.",
+            "inspected_capture_ids": [DID],
+        }))
+        finished = self.worker.complete_luna_task()
+        self.assertTrue(finished["ok"], finished)
+        self.assertEqual(self.worker.state["phase"], "complete")
+
+    def test_controller_completion_recovers_a_lost_submit_response_in_place(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        value = extraction()
+        value["has_handwriting"] = None
+        Path(prepared["result_path"]).write_text(json.dumps({
+            "extraction": value,
+            "rationale": "Synthetic PP and Jev evidence agree.",
+            "inspected_capture_ids": [],
+        }))
+        self.fake.lost_submit = True
+        result = self.worker.complete_luna_task()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.worker.state["phase"], "complete")
+        self.assertEqual(self.fake.submit_bytes[0], self.fake.submit_bytes[1])
+        self.assertEqual(self.fake.pdf_calls, 1)
 
     def test_stopped_batch_prevents_a_preflighted_worker_from_claiming(self):
         self.batch.handle(dict(op='block', reason='Synthetic terminal failure'))
@@ -315,9 +440,10 @@ class WorkerTests(unittest.TestCase):
         proof = dict(batch_id=self.batch.state['batch_id'], document_id=OTHER)
         self.batch.save({**self.batch.state, 'verified_runs': {'a' * 32: proof}, 'completed_count': 1})
         self.send('claim', viewer_checked=True)
-        self.assertEqual(self.fake.claim_bodies[-1], {
-            'stage': 'small', 'exclude_document_ids': [OTHER],
-        })
+        body = self.fake.claim_bodies[-1]
+        self.assertEqual(body['stage'], 'small')
+        self.assertEqual(body['exclude_document_ids'], [OTHER])
+        self.assertRegex(body['claim_token'], module.UUID)
 
     def test_existing_claim_can_release_after_batch_stops(self):
         self.send('claim', viewer_checked=True)
@@ -1098,18 +1224,27 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(module.InputError, 'Another worker process'):
             self.make_worker()
 
-    def test_lost_claim_response_waits_for_lease_window_then_terminalizes(self):
-        self.fake.lost_claim = True
+    def test_lost_claim_response_immediately_recovers_the_same_claim(self):
+        self.fake.lost_claim = 1
+        result = self.send("claim", viewer_checked=True)
+        self.assertEqual(result["phase"], "claimed")
+        self.assertEqual(len(self.fake.claim_bodies), 2)
+        self.assertEqual(self.fake.claim_bodies[0], self.fake.claim_bodies[1])
+        self.assertEqual(self.worker.state["claim"]["token"], self.fake.claim_bodies[0]["claim_token"])
+
+    def test_reconcile_immediately_retries_a_persistently_uncertain_claim(self):
+        self.fake.lost_claim = 3
         result = self.worker.handle({"op": "claim", "viewer_checked": True})
         self.assertEqual(result["phase"], "claim-uncertain")
         self.assertEqual(result["claim_state"], "possibly-active")
+        self.assertEqual(len(self.fake.claim_bodies), 3)
+        claim_request = deepcopy(self.worker.state["claim_request"])
         self.worker.lock.close()
         self.worker = self.make_worker(self.worker.state["run_id"])
-        self.assertFalse(self.worker.handle({"op": "reconcile"})["ok"])
-        self.worker.state["claim_started"] -= 1500
-        self.send("reconcile")
-        self.assertEqual(self.worker.state["phase"], "released")
-        self.assertNotIn(("POST", "/api/processing/release"), self.fake.calls)
+        recovered = self.send("reconcile")
+        self.assertEqual(recovered["phase"], "claimed")
+        self.assertEqual(len(self.fake.claim_bodies), 4)
+        self.assertEqual(self.fake.claim_bodies[-1], claim_request)
 
     def test_transient_windows_claim_checkpoint_retries_before_the_request(self):
         with windows_replace_failure(fail_at=2, retry_once=True) as calls:

@@ -43,6 +43,55 @@ export interface Extraction {
   confirmed_arithmetic_mismatch: boolean;
   evidence: string;
 }
+
+/** Model-facing contract kept beside the validator so prepared tasks need no source lookup. */
+export const extractionContract = {
+  type: documentTypes,
+  vendor: "nonempty string up to 150 characters, or null",
+  receipt_date: "real YYYY-MM-DD date, or null",
+  reference: "nonempty string up to 200 characters, or null",
+  currency: "three uppercase ISO letters, or null",
+  has_handwriting:
+    "boolean only after every page was visually inspected; otherwise null",
+  has_payment_slip: "boolean",
+  payment_status: ["approved", "declined", "unknown", "not-applicable"],
+  card_last_four: "exactly four digits, or null",
+  line_items: {
+    max_items: 1000,
+    item: {
+      description: "nonempty string up to 2000 characters",
+      quantity: "finite number between -1000000 and 1000000, or null",
+      unit_price_minor: "signed integer minor units, or null",
+      amount_minor: "signed integer minor units, or null",
+    },
+  },
+  adjustments: {
+    max_items: 100,
+    item: {
+      description: "nonempty string up to 2000 characters",
+      amount_minor: "signed integer minor units",
+    },
+  },
+  total_minor: "signed integer minor units, or null",
+  charged_total_minor: "signed integer minor units, or null",
+  payment_adjustments: {
+    max_items: 100,
+    item: {
+      description: "nonempty string up to 2000 characters",
+      amount_minor: "signed integer minor units",
+    },
+  },
+  vat_minor: "signed integer minor units, or null",
+  tax_basis: ["gross", "net-plus-tax", "unknown"],
+  completeness: ["complete", "fragment", "uncertain"],
+  category_id: "exact id from the supplied active categories, or null",
+  certainty: ["low", "medium", "high"],
+  uncertainties: "up to 100 nonempty strings",
+  broken_reasons: "up to 100 nonempty strings",
+  confirmed_arithmetic_mismatch:
+    "boolean; true only after rereading every printed component of a complete financial source",
+  evidence: "nonempty source-grounded string up to 20000 characters",
+} as const;
 export interface ProcessingState {
   extraction: Extraction;
   not_invoice: boolean;

@@ -1214,6 +1214,22 @@ export async function jevDocumentHeads(env: Env) {
   ).results;
 }
 
+type AssessmentPayload = {
+  input?: {
+    pins?: { capture_id: string; ocr_sha256: string }[];
+    category_ids?: Record<string, string>;
+  };
+  response?: JevResponse;
+};
+
+function parseAssessmentPayload(payload: string): AssessmentPayload | null {
+  try {
+    return JSON.parse(payload) as AssessmentPayload;
+  } catch {
+    return null;
+  }
+}
+
 async function assessmentPayload(env: Env, id: string | null) {
   if (!id) return null;
   const row = await env.DB.prepare(
@@ -1222,29 +1238,20 @@ async function assessmentPayload(env: Env, id: string | null) {
     .bind(id)
     .first<{ payload: string }>();
   if (!row) return null;
-  try {
-    return JSON.parse(row.payload) as {
-      input?: {
-        pins?: { capture_id: string; ocr_sha256: string }[];
-        category_ids?: Record<string, string>;
-      };
-      response?: JevResponse;
-    };
-  } catch {
-    return null;
-  }
+  return parseAssessmentPayload(row.payload);
 }
 
-async function documentHeadReady(
-  env: Env,
+function documentHeadReadyFromEvidence(
   document: ReceiptDocument,
   head: JevDocumentHead | null,
   pages: PageHead[],
-  artifacts: { capture_id: string; sha256: string }[],
+  artifactPins: Set<string>,
+  assessments: Map<string, AssessmentPayload>,
+  fingerprint: string,
 ) {
   if (
     !head ||
-    head.page_fingerprint !== (await pageFingerprint(document)) ||
+    head.page_fingerprint !== fingerprint ||
     pages.length !== document.pages.length
   )
     return false;
@@ -1259,16 +1266,12 @@ async function documentHeadReady(
         !item ||
         item.capture_id !== page.captureId ||
         item.source_sha256 !== page.sha256 ||
-        !artifacts.some(
-          (artifact) =>
-            artifact.capture_id === page.captureId &&
-            artifact.sha256 === item.ocr_sha256,
-        )
+        !artifactPins.has(`${page.captureId}\u0000${item.ocr_sha256}`)
       );
     })
   )
     return false;
-  const roleAssessment = await assessmentPayload(env, head.assessment_id);
+  const roleAssessment = assessments.get(head.assessment_id);
   const role = roleAssessment?.response?.answers?.document_role;
   if (
     JSON.stringify(roleAssessment?.input?.pins) !== JSON.stringify(pins) ||
@@ -1288,10 +1291,9 @@ async function documentHeadReady(
     return false;
   const receiptPresent = pages.some((page) => page.role === "receipt");
   if (!receiptPresent) return head.category_assessment_id === null;
-  const categoryAssessment = await assessmentPayload(
-    env,
-    head.category_assessment_id,
-  );
+  const categoryAssessment = head.category_assessment_id
+    ? assessments.get(head.category_assessment_id)
+    : null;
   const category = categoryAssessment?.response?.answers?.purchase_category;
   const categoryChoices = categoryAssessment?.input?.category_ids ?? {};
   const categoryId =
@@ -1308,27 +1310,93 @@ async function documentHeadReady(
   );
 }
 
+async function documentHeadReady(
+  env: Env,
+  document: ReceiptDocument,
+  head: JevDocumentHead | null,
+  pages: PageHead[],
+  artifacts: { capture_id: string; sha256: string }[],
+) {
+  const assessments = new Map<string, AssessmentPayload>();
+  if (head) {
+    const role = await assessmentPayload(env, head.assessment_id);
+    if (role) assessments.set(head.assessment_id, role);
+    const category = await assessmentPayload(env, head.category_assessment_id);
+    if (category && head.category_assessment_id)
+      assessments.set(head.category_assessment_id, category);
+  }
+  return documentHeadReadyFromEvidence(
+    document,
+    head,
+    pages,
+    new Set(
+      artifacts.map(
+        (artifact) => `${artifact.capture_id}\u0000${artifact.sha256}`,
+      ),
+    ),
+    assessments,
+    await pageFingerprint(document),
+  );
+}
+
+async function documentAssessmentPayloads(env: Env) {
+  const rows = await env.DB.prepare(
+    `SELECT a.id,a.payload FROM jev_assessments a
+     JOIN (
+       SELECT assessment_id AS id FROM jev_document_heads
+       UNION
+       SELECT category_assessment_id AS id FROM jev_document_heads WHERE category_assessment_id IS NOT NULL
+     ) referenced ON referenced.id=a.id`,
+  ).all<{ id: string; payload: string }>();
+  const result = new Map<string, AssessmentPayload>();
+  for (const row of rows.results) {
+    const payload = parseAssessmentPayload(row.payload);
+    if (payload) result.set(row.id, payload);
+  }
+  return result;
+}
+
 export async function jevReadyDocuments(
   env: Env,
   documents: ReceiptDocument[],
   captures: Capture[] = [],
 ) {
-  const heads = await jevDocumentHeads(env);
-  const artifacts = (
-    await env.DB.prepare(
+  const [heads, artifactRows, pageRows, assessments] = await Promise.all([
+    jevDocumentHeads(env),
+    env.DB.prepare(
       "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
-    ).all<{ capture_id: string; sha256: string }>()
-  ).results;
-  const pageHeadRows = (
-    await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
-  ).results;
+    ).all<{ capture_id: string; sha256: string }>(),
+    env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>(),
+    documentAssessmentPayloads(env),
+  ]);
+  const pageHeadRows = pageRows.results;
+  const headsByDocument = new Map(
+    heads.map((head) => [head.document_id, head]),
+  );
+  const pageHeadsByCapture = new Map(
+    pageHeadRows.map((head) => [head.capture_id, head]),
+  );
+  const artifactPins = new Set(
+    artifactRows.results.map(
+      (artifact) => `${artifact.capture_id}\u0000${artifact.sha256}`,
+    ),
+  );
   const ready = new Map<string, JevDocumentHead>();
   for (const document of documents) {
-    const head = heads.find((item) => item.document_id === document.id) ?? null;
-    const pages = await pageHeads(env, document);
+    const head = headsByDocument.get(document.id) ?? null;
+    const pages = document.pages
+      .map((page) => pageHeadsByCapture.get(page.captureId))
+      .filter((page): page is PageHead => !!page);
     if (
       head?.role === "purchase_document" &&
-      (await documentHeadReady(env, document, head, pages, artifacts))
+      documentHeadReadyFromEvidence(
+        document,
+        head,
+        pages,
+        artifactPins,
+        assessments,
+        await pageFingerprint(document),
+      )
     )
       ready.set(document.id, head);
   }

@@ -339,6 +339,63 @@ it("excludes documents already verified by the active local batch", async () => 
       ).status,
     ).toBe(400);
 });
+it("returns the same active claim when an idempotent claim response is retried", async () => {
+  const first = await capture(),
+    token = crypto.randomUUID(),
+    request = {
+      stage: "small",
+      exclude_document_ids: [],
+      claim_token: token,
+    };
+  const initial = (await ok("/api/processing/claim", request, true)).claim;
+  const recovered = (await ok("/api/processing/claim", request, true)).claim;
+  expect(initial).toMatchObject({ token, document: { id: first.id } });
+  expect(recovered).toEqual(initial);
+  expect(
+    (
+      await req(
+        "/api/processing/claim",
+        { ...request, exclude_document_ids: [first.id] },
+        true,
+      )
+    ).status,
+  ).toBe(409);
+  expect(
+    (
+      await req(
+        "/api/processing/claim",
+        { ...request, claim_token: "not-a-uuid" },
+        true,
+      )
+    ).status,
+  ).toBe(400);
+});
+it("never reuses a settled claim token for replacement work", async () => {
+  await capture();
+  const claimToken = crypto.randomUUID(),
+    request = {
+      stage: "small",
+      exclude_document_ids: [],
+      claim_token: claimToken,
+    };
+  expect((await ok("/api/processing/claim", request, true)).claim.token).toBe(
+    claimToken,
+  );
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
+    .bind(claimToken)
+    .run();
+  expect((await req("/api/processing/claim", request, true)).status).toBe(409);
+  const stored = await db
+    .prepare(
+      "SELECT document_id,outcome_reason FROM processing_claim_requests WHERE token=?",
+    )
+    .bind(claimToken)
+    .first<any>();
+  expect(stored.document_id).toBeTruthy();
+  expect(stored.outcome_reason).toBe("active");
+});
 it("preserves unassessed handwriting on an OCR-first saved receipt", async () => {
   const c = await capture(),
     lease = await claim();

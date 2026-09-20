@@ -24,6 +24,10 @@ class ClientError(Exception):
     pass
 
 
+class ScannerConnectionError(ClientError):
+    """The request outcome is unknown because the scanner connection failed."""
+
+
 class OCRRequired(ClientError):
     """No saved PP artifact matches the verified source and requested layout."""
 
@@ -206,7 +210,7 @@ class ScannerClient:
             # Do not echo proxy HTML, URLs, request headers, or financial payloads.
             raise ClientError(f"Scanner returned HTTP {exc.code}; 401/403 means access denied, 409 requires rereading the current revision.") from None
         except (URLError, TimeoutError):
-            raise ClientError("Scanner connection failed; check connectivity and retry.") from None
+            raise ScannerConnectionError("Scanner connection failed; check connectivity and retry.") from None
 
     def get(self, path):
         try:

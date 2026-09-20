@@ -2,8 +2,9 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import receipt_batch as module
 
@@ -12,6 +13,8 @@ class FakeLease:
     def __init__(self):
         self.batch_id = None
         self.events = []
+        self.profile = {}
+        self.profile_path = Path("synthetic-profile.json")
 
     def start(self, batch_id, owner):
         self.batch_id = batch_id
@@ -67,7 +70,7 @@ class BatchGuardTests(unittest.TestCase):
             guard.handle(dict(op='finish'))
         self.assertEqual(lease.events[0], ('start', state['batch_id'], 'synthetic-task'))
         self.assertIn(('healthy', state['batch_id']), lease.events)
-        self.assertEqual(lease.events[-1], ('finish', state['batch_id'], True))
+        self.assertEqual(lease.events[-1], ('finish', state['batch_id'], False))
         self.assertIsNone(lease.batch_id)
 
     def test_lost_lease_can_still_record_and_release_a_blocked_batch(self):
@@ -84,6 +87,225 @@ class BatchGuardTests(unittest.TestCase):
         self.assertEqual(result['phase'], 'blocked')
         self.assertEqual(result['lease_error'], 'Synthetic lease expired.')
         self.assertIn(('finish', state['batch_id'], False), lease.events)
+
+    def test_controller_prepares_and_completes_one_luna_task_without_terra_mechanics(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "claimed"}
+        worker.client.get.return_value = []
+        worker.prepare_luna_task.return_value = {
+            "ok": True,
+            "run_id": "a" * 32,
+            "task_path": "/private/task.json",
+            "result_path": "/private/result.json",
+            "pages": 1,
+        }
+        worker.mutex = threading.RLock()
+        worker.stop_heartbeat = threading.Event()
+        worker.heartbeat.side_effect = lambda: worker.stop_heartbeat.wait()
+        worker.lock = Mock()
+
+        def complete():
+            worker.state["phase"] = "complete"
+            return {"ok": True}
+
+        worker.complete_luna_task.side_effect = complete
+        proof = {"verified": True, "run_id": "a" * 32, "document_id": "receipt"}
+        with patch.object(module, "Worker", return_value=worker), \
+             patch.object(module, "verify_run", return_value=proof):
+            prepared = guard.handle({"op": "next"})
+            self.assertEqual(prepared["next"], "spawn-luna")
+            self.assertEqual(prepared["task"]["run_id"], "a" * 32)
+            completed = guard.handle({"op": "complete", "run_id": "a" * 32})
+        worker.preflight.assert_called_once_with()
+        worker.prepare_luna_task.assert_called_once_with([])
+        worker.complete_luna_task.assert_called_once_with()
+        worker.lock.close.assert_called_once_with()
+        self.assertEqual(completed["phase"], "complete")
+        self.assertEqual(completed["completed_count"], 1)
+        self.assertEqual(completed["stop_reason"], "target-reached")
+
+    def test_controller_closes_an_unclaimed_worker_after_preflight_failure(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "ready"}
+        worker.preflight.side_effect = module.InputError("Synthetic preflight failure.")
+        worker.stop_heartbeat = threading.Event()
+        worker.lock = Mock()
+        with patch.object(module, "Worker", return_value=worker), \
+             self.assertRaisesRegex(module.InputError, "preflight"):
+            guard.handle({"op": "next"})
+        worker.lock.close.assert_called_once_with()
+        self.assertIsNone(guard.worker)
+
+    def test_controller_releases_a_healthy_claim_after_late_preparation_failure(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "ready"}
+        worker.client.get.return_value = []
+        worker.stop_heartbeat = threading.Event()
+        worker.heartbeat.side_effect = lambda: worker.stop_heartbeat.wait()
+        worker.lock = Mock()
+
+        def fail_after_claim(_categories):
+            worker.state["phase"] = "claimed"
+            worker.state["failed"] = {"operation": "previews", "error": "Synthetic preview failure after claim."}
+            raise module.InputError("Synthetic preview failure after claim.")
+
+        worker.prepare_luna_task.side_effect = fail_after_claim
+        with patch.object(module, "Worker", return_value=worker), \
+             self.assertRaisesRegex(module.InputError, "preview"):
+            guard.handle({"op": "next"})
+        worker.release.assert_called_once_with()
+        worker.lock.close.assert_called_once_with()
+        self.assertIsNone(guard.worker)
+        self.assertIsNone(guard.worker_thread)
+
+    def test_controller_keeps_completed_worker_until_live_verification_succeeds(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "claimed"}
+        worker.client.get.return_value = []
+        worker.prepare_luna_task.return_value = {
+            "ok": True, "run_id": "a" * 32, "task_path": "/private/task.json",
+            "result_path": "/private/result.json", "pages": 1,
+        }
+        worker.mutex = threading.RLock()
+        worker.stop_heartbeat = threading.Event()
+        worker.heartbeat.side_effect = lambda: worker.stop_heartbeat.wait()
+        worker.lock = Mock()
+
+        def complete():
+            worker.state["phase"] = "complete"
+            return {"ok": True}
+
+        worker.complete_luna_task.side_effect = complete
+        proof = {"verified": True, "run_id": "a" * 32, "document_id": "receipt"}
+        with patch.object(module, "Worker", return_value=worker), \
+             patch.object(module, "verify_run", side_effect=[module.ClientError("Synthetic readback failure."), proof, proof]):
+            guard.handle({"op": "next"})
+            retry = guard.handle({"op": "complete", "run_id": "a" * 32})
+            self.assertEqual(retry["next"], "retry-controller")
+            self.assertEqual(retry["retry_request"], {"op": "complete", "run_id": "a" * 32})
+            self.assertIs(guard.worker, worker)
+            worker.lock.close.assert_not_called()
+            result = guard.handle({"op": "complete", "run_id": "a" * 32})
+        self.assertEqual(result["phase"], "complete")
+        worker.lock.close.assert_called_once_with()
+
+    def test_verified_completion_can_finish_after_transient_final_refresh_failure(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "claimed"}
+        worker.client.get.return_value = []
+        worker.prepare_luna_task.return_value = {
+            "ok": True, "run_id": "a" * 32, "task_path": "/private/task.json",
+            "result_path": "/private/result.json", "pages": 1,
+        }
+        worker.mutex = threading.RLock()
+        worker.stop_heartbeat = threading.Event()
+        worker.heartbeat.side_effect = lambda: worker.stop_heartbeat.wait()
+        worker.lock = Mock()
+        worker.complete_luna_task.side_effect = lambda: worker.state.update(phase="complete") or {"ok": True}
+        proof = {"verified": True, "run_id": "a" * 32, "document_id": "receipt"}
+        with patch.object(module, "Worker", return_value=worker), \
+             patch.object(module, "verify_run", side_effect=[proof, module.ClientError("Synthetic final refresh failure."), proof]):
+            guard.handle({"op": "next"})
+            retry = guard.handle({"op": "complete", "run_id": "a" * 32})
+            self.assertEqual(retry["next"], "retry-controller")
+            self.assertEqual(retry["retry_request"], {"op": "finish"})
+            self.assertIsNone(guard.worker)
+            self.assertEqual(guard.state["completed_count"], 1)
+            result = guard.handle({"op": "complete", "run_id": "a" * 32})
+        self.assertEqual(result["phase"], "complete")
+        self.assertEqual(result["stop_reason"], "target-reached")
+
+    def test_terminal_lease_release_is_resumable_without_premature_completion(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        run_id = "a" * 32
+        proof = {"verified": True, "run_id": run_id, "document_id": "receipt"}
+        guard.save({**guard.state, "verified_runs": {run_id: proof}, "completed_count": 1})
+        real_finish = lease.finish
+        calls = 0
+
+        def flaky_finish(require_healthy=True):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise module.ClientError("Synthetic lost release response.")
+            return real_finish(require_healthy)
+
+        lease.finish = flaky_finish
+        with patch.object(module, "verify_run", return_value=proof):
+            retry = guard.handle({"op": "complete", "run_id": run_id})
+            self.assertEqual(retry["phase"], "finishing")
+            self.assertEqual(retry["next"], "retry-controller")
+            self.assertEqual(retry["retry_request"], {"op": "finish"})
+            self.assertIsNotNone(lease.batch_id)
+            completed = guard.handle(retry["retry_request"])
+        self.assertEqual(completed["phase"], "complete")
+        self.assertIsNone(lease.batch_id)
+
+    def test_empty_queue_release_retry_uses_returned_finish_request(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(10)
+        worker = Mock()
+        worker.confirmation_provider = "ppocr"
+        worker.state = {"run_id": "a" * 32, "phase": "ready"}
+        worker.client.get.return_value = []
+        worker.mutex = threading.RLock()
+        worker.stop_heartbeat = threading.Event()
+        worker.lock = Mock()
+
+        def empty(_categories):
+            worker.state.update(phase="empty", claim=None)
+            return {"ok": True}
+
+        worker.prepare_luna_task.side_effect = empty
+        real_finish = lease.finish
+        calls = 0
+
+        def flaky_finish(require_healthy=True):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise module.ClientError("Synthetic lost empty-batch release response.")
+            return real_finish(require_healthy)
+
+        lease.finish = flaky_finish
+        with patch.object(module, "Worker", return_value=worker):
+            retry = guard.handle({"op": "next"})
+            self.assertEqual(retry["phase"], "finishing")
+            self.assertEqual(retry["retry_request"], {"op": "finish"})
+            completed = guard.handle(retry["retry_request"])
+        self.assertEqual(completed["phase"], "complete")
+        self.assertEqual(completed["stop_reason"], "queue-empty-or-busy")
+        worker.lock.close.assert_called_once_with()
 
     def test_unclean_exit_requires_exact_owner_resolution(self):
         first = self.guard()
@@ -105,6 +327,27 @@ class BatchGuardTests(unittest.TestCase):
         self.assertEqual(resolved['phase'], 'complete')
         self.assertEqual(len(list(self.base.glob('batch-event-*.json'))), 2)
         next_guard.start()
+
+    def test_owner_can_recover_exact_finishing_batch_after_controller_restart(self):
+        original_lease = FakeLease()
+        first = module.BatchGuard(self.base, 'synthetic-task', original_lease)
+        state = first.start(1)
+        proof = {"verified": True, "run_id": "a" * 32, "document_id": "receipt"}
+        first.save({**first.state, "phase": "finishing", "verified_runs": {proof["run_id"]: proof},
+                    "completed_count": 1, "stop_reason": "target-reached"})
+        first.close()
+
+        recovery_lease = FakeLease()
+        recovery = module.BatchGuard(self.base, 'owner-recovery', recovery_lease)
+        self.addCleanup(recovery.close)
+        resolved = recovery.resolve(
+            state["batch_id"],
+            "Recovered exact terminal lease after the original controller exited.",
+        )
+        self.assertEqual(resolved["phase"], "complete")
+        self.assertEqual(resolved["verified_runs"], {proof["run_id"]: proof})
+        self.assertIn(("finish", state["batch_id"], False), recovery_lease.events)
+        self.assertEqual(recovery_lease.owner, "synthetic-task")
 
     def test_failure_and_unfinished_worker_cannot_be_reported_complete(self):
         guard = self.guard()

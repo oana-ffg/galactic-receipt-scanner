@@ -20,7 +20,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
 from receipt_locks import LockBusy, acquire_lock, lock_held
-from receipt_api import ScannerClient, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, write_new_file
+from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, write_new_file
 
 MAX_INPUT = 512 * 1024
 WINDOWS_REPLACE_ATTEMPTS = 7
@@ -33,12 +33,14 @@ OPERATIONS = {
     "retry-submit", "retry-checkpoint", "retry-pdf", "reconcile", "quit",
 }
 CHECKS = '''
-import {extractionErrors,arithmetic} from "./web/extraction.ts";
+import {extractionErrors,arithmetic,extractionContract} from "./web/extraction.ts";
 let text=""; for await (const part of process.stdin) text+=part;
 const input=JSON.parse(text);
 if(input.operation==="validate") {
   const errors=extractionErrors(input.extraction);
   console.log(JSON.stringify({errors,arithmetic:errors.length?null:arithmetic(input.extraction)}));
+} else if(input.operation==="contract") {
+  console.log(JSON.stringify(extractionContract));
 } else {
   const {build}=await import("esbuild");
   const built=await build({entryPoints:["web/documents.ts"],bundle:true,platform:"node",format:"esm",write:false});
@@ -341,6 +343,16 @@ class Worker:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         require(len(payload) <= MAX_INPUT, "Processing request exceeds 512 KiB.")
         return json.loads(self.client.request("/api/processing/" + endpoint, payload))
+
+    def claim_with_retry(self, body):
+        """Recover a lost claim response by repeating the same idempotent request."""
+        for attempt in range(1, 4):
+            try:
+                return self.post("claim", body)
+            except ScannerConnectionError:
+                if attempt == 3:
+                    raise
+                self.record("claim-connection-retry", {"attempt": attempt})
 
     def active(self):
         require(self.state["phase"] in {"claimed", "drafted"}, "This operation needs the active document claim.")
@@ -971,6 +983,244 @@ class Worker:
             evidence="Luna inspected every assembled draft page. Python verified identical ordered page renders "
                      "after adding the OCR layer, and the upload hash/revision. Draft inspection: " + message["layout_evidence"][:1700])
 
+    def prepare_luna_task(self, categories):
+        """Claim and materialize one complete model task without model-driven mechanics."""
+        require(self.state["phase"] == "ready", "A fresh deterministic worker is required for the next Luna task.")
+        require(self.confirmation_provider == "ppocr",
+                "Normal Luna processing requires the saved-PP consumer profile; OCR inference belongs to the nightly worker.")
+        started = self.handle({"op": "begin"})
+        if not started.get("ok") or self.state["phase"] == "empty":
+            return started
+        require(self.state["phase"] == "claimed", "Prepared Luna task did not retain a confirmed claim.")
+        claim = self.state["claim"]
+        ids = [page["captureId"] for page in claim["document"]["pages"]]
+        previews = self.handle({"op": "previews", "capture_ids": ids})
+        require(previews.get("ok") is True, "Prepared page previews failed; preserve the active claim for recovery.")
+        task = {
+            "version": 1,
+            "run_id": self.state["run_id"],
+            "document": {
+                "id": claim["document"]["id"],
+                "revision": claim["document"]["revision"],
+                "capture_ids": ids,
+            },
+            "ocr": started["result"]["claimed_ocr"],
+            "jev": started["result"]["jev"],
+            "categories": deepcopy(categories),
+            "images": previews["result"],
+            "extraction": started["result"]["request"]["extraction"],
+            "extraction_contract": self.check("contract"),
+            "result_schema": {
+                "extraction": "Fill the complete extraction object above.",
+                "rationale": "Explain uncertain or corrected fields and any PP/Jev disagreement.",
+                "inspected_capture_ids": "List only pages whose prepared preview you actually opened.",
+            },
+        }
+        self.save("luna-task.json", task)
+        self.state["task_file"] = "luna-task.json"
+        self.state["result_file"] = "luna-result.json"
+        self.state["category_ids"] = sorted(
+            category["id"] for category in categories
+            if isinstance(category, dict) and isinstance(category.get("id"), str)
+        )
+        self.checkpoint()
+        return {
+            "ok": True,
+            "run_id": self.state["run_id"],
+            "task_path": str((self.work / self.state["task_file"]).absolute()),
+            "result_path": str((self.work / self.state["result_file"]).absolute()),
+            "pages": len(ids),
+        }
+
+    def complete_luna_task(self):
+        """Consume one semantic Luna result, then perform every mechanical completion step."""
+        require(self.state["phase"] in {
+            "claimed", "draft-uncertain", "confirmation-uncertain", "drafted",
+            "submit-uncertain", "submit-readback", "submitted", "pdf-preparing",
+            "pdf-uncertain", "pdf", "complete",
+        }, "No prepared Luna task is awaiting completion.")
+        result_path = self.work / self.state["result_file"]
+        if not result_path.exists():
+            return self.luna_result_correction(result_path, "Write the requested Luna result JSON file.")
+        require(result_path.is_file() and not result_path.is_symlink() and result_path.stat().st_size <= MAX_INPUT,
+                "Luna result file is redirected, not regular or too large.")
+        try:
+            value = json.loads(result_path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeError):
+            return self.luna_result_correction(result_path, "Write one valid UTF-8 JSON object.")
+        if not (isinstance(value, dict)
+                and set(value) == {"extraction", "rationale", "inspected_capture_ids"}
+                and isinstance(value.get("extraction"), dict)
+                and isinstance(value.get("rationale"), str)
+                and 0 < len(value["rationale"].strip()) <= 20000
+                and isinstance(value.get("inspected_capture_ids"), list)
+                and all(isinstance(item, str) for item in value["inspected_capture_ids"])
+                and len(value["inspected_capture_ids"]) == len(set(value["inspected_capture_ids"]))):
+            return self.luna_result_correction(
+                result_path,
+                "Use exactly extraction, a nonempty rationale, and unique string inspected_capture_ids.",
+            )
+        ids = [page["captureId"] for page in self.state["claim"]["document"]["pages"]]
+        inspected = value["inspected_capture_ids"]
+        if not set(inspected) <= set(ids):
+            return self.luna_result_correction(
+                result_path,
+                "List only capture IDs from this prepared document whose previews were actually opened.",
+            )
+        all_inspected = set(inspected) == set(ids)
+        if not all_inspected and value["extraction"].get("has_handwriting") is not None:
+            return self.luna_result_correction(
+                result_path,
+                "Set has_handwriting to null unless every prepared page preview was actually inspected.",
+            )
+        category_id = value["extraction"].get("category_id")
+        if category_id is not None and category_id not in self.state.get("category_ids", []):
+            return self.luna_result_correction(
+                result_path,
+                "Use an exact category_id from this prepared task, or null when none fits.",
+            )
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        result_sha256 = hashlib.sha256(encoded).hexdigest()
+        pinned = self.state.get("luna_result_sha256")
+        require(pinned is None or pinned == result_sha256,
+                "The Luna result changed after durable completion started; preserve the pinned result for recovery.")
+        if pinned is None:
+            self.state["luna_result_sha256"] = result_sha256
+            self.state["luna_result_file"] = self.record("luna-semantic-result", value)
+
+        for attempt in range(3):
+            try:
+                result = self.advance_luna_completion(value, ids)
+            except ScannerConnectionError:
+                if attempt < 2:
+                    self.record("completion-connection-retry", {"attempt": attempt + 1, "phase": self.state["phase"]})
+                    continue
+                return self.failure("complete", "Scanner connection failed during deterministic completion; retry the same controller operation.")
+            if result.get("correction_required"):
+                self.state.pop("luna_result_sha256", None)
+                self.state.pop("luna_result_file", None)
+                self.checkpoint()
+                return result
+            if result.get("ok") is False and self.state["phase"] in {
+                "draft-uncertain", "confirmation-uncertain", "submit-uncertain",
+                "submit-readback", "pdf-preparing", "pdf-uncertain",
+            }:
+                continue
+            return result
+        return self.failure("complete", "Deterministic completion did not reach a stable state; retry the same controller operation.")
+
+    def luna_result_correction(self, result_path, error):
+        return {
+            "ok": False,
+            "correction_required": True,
+            "errors": [error],
+            "result_path": str(result_path.absolute()),
+        }
+
+    def advance_luna_completion(self, value, ids):
+        """Advance a pinned result through idempotent internal checkpoints."""
+        for _ in range(12):
+            phase = self.state["phase"]
+            if phase == "complete":
+                return {"ok": True, "op": "complete", "result": clean(self.summary())}
+            if phase == "claimed":
+                result = self.handle({
+                    "op": "review",
+                    "extraction": value["extraction"],
+                    "page_review": {"capture_ids": ids, "excluded": []},
+                    "grouping_evidence": "Jev froze the current ordered page group before Luna extraction.",
+                })
+                if result.get("ok") and not result["result"].get("draft", {}).get("drafted"):
+                    return self.luna_result_correction(
+                        self.work / self.state["result_file"],
+                        "; ".join(result["result"].get("validation", {}).get("errors", []))
+                        or "Correct the extraction fields rejected by validation.",
+                    )
+                if not result.get("ok"):
+                    return result
+                continue
+            if phase in {"draft-uncertain", "confirmation-uncertain"}:
+                self.retry_checkpoint()
+                continue
+            if phase == "drafted":
+                if not self.state.get("confirmation"):
+                    result = self.handle({"op": "confirm"})
+                elif not self.state.get("assessment"):
+                    # Preview inspection supports fields and handwriting only. The
+                    # final PDF is verified structurally after submission; Luna never
+                    # claims to have inspected a PDF that did not exist during its pass.
+                    result = self.handle({
+                        "op": "finish",
+                        "extraction": value["extraction"],
+                        "rationale": value["rationale"],
+                        "all_pages_inspected": False,
+                        "layout_evidence": "Jev-frozen PP-OCR page layout; final PDF verification is structural.",
+                    })
+                    if result.get("ok") and result.get("result", {}).get("assessed") is False:
+                        return self.luna_result_correction(
+                            self.work / self.state["result_file"],
+                            "; ".join(result["result"].get("validation", {}).get("errors", []))
+                            or "Correct the extraction fields rejected by validation.",
+                        )
+                else:
+                    result = self.handle({"op": "submit"})
+                if not result.get("ok"):
+                    return result
+                continue
+            if phase == "submit-uncertain":
+                body = self.load(self.state["submit_request"])
+                response = json.loads(self.client.request(
+                    "/api/processing/submit",
+                    (self.work / self.state["submit_request"]).read_bytes(),
+                ))
+                self.finish_submit(body, response)
+                self.state.pop("failed", None)
+                self.checkpoint()
+                continue
+            if phase == "submit-readback":
+                self.finish_submit(
+                    self.load(self.state["submit_request"]),
+                    self.load(self.state["submit_response"]),
+                )
+                self.state.pop("failed", None)
+                self.checkpoint()
+                continue
+            if phase == "submitted":
+                result = self.handle({"op": "pdf"})
+                if not result.get("ok"):
+                    return result
+                continue
+            if phase == "pdf-preparing":
+                verify("pdf_intent" not in self.state, "PDF preparation has an unresolved upload intent.")
+                self.state["phase"] = "submitted"
+                self.state.pop("failed", None)
+                self.checkpoint()
+                continue
+            if phase == "pdf-uncertain":
+                restored = self.restore_pdf()
+                if not restored["recovered"]:
+                    intent, doc = self.state["pdf_intent"], self.state["document"]
+                    response = json.loads(self.client.request(
+                        f"/api/documents/{doc['id']}/pdf?revision={intent['revision']}",
+                        Path(intent["path"]).read_bytes(),
+                        "application/pdf",
+                    ))
+                    verify(response.get("sha256") == intent["sha256"]
+                           and response.get("revision") == intent["revision"],
+                           "Recovered PDF upload acknowledgement differs.")
+                    self.restore_pdf()
+                continue
+            if phase == "pdf":
+                if self.structural_pdf():
+                    self.finish_structural_pdf()
+                    continue
+                return self.failure(
+                    "complete",
+                    "Final PDF requires separate visual investigation; normal Luna completion cannot attest it.",
+                )
+            return self.failure("complete", "Unsupported deterministic completion state; preserve the journal for recovery.")
+        return self.failure("complete", "Deterministic completion exceeded its bounded state transitions.")
+
     def compare_pdf_pixels(self):
         """Fail closed to visual review unless ordered lossless Poppler renders match."""
         draft, pdf = self.state["draft"]["pixel_pdf"], self.state["pdf"]
@@ -1090,9 +1340,19 @@ class Worker:
                 self.checkpoint()
                 return self.summary()
             if self.state["phase"] == "claim-uncertain":
-                # Server leases last 20 minutes. Include request timeout and clock margin.
+                claim_request = self.state.get("claim_request")
+                if claim_request:
+                    result = self.claim_with_retry(claim_request)
+                    self.state["claim"] = result["claim"]
+                    self.state["phase"] = "claimed" if result["claim"] else "empty"
+                    self.state.pop("failed", None)
+                    if result["claim"]:
+                        self.discover(result["claim"]["document"])
+                    self.record("claim-response", result)
+                    return {**clean(result), **self.summary()}
+                # Compatibility for an unfinished run created before idempotent claims.
                 require(time.time() >= self.state["claim_started"] + 20*60 + 90 + 120,
-                        "Unknown claim may still be active; wait until its maximum lease window has elapsed.")
+                        "Legacy unknown claim may still be active; wait until its maximum lease window has elapsed.")
                 self.state["phase"] = "released"
                 self.state.pop("failed", None)
                 self.checkpoint()
@@ -1136,8 +1396,13 @@ class Worker:
                 previous_state = deepcopy(self.state)
                 self.state["phase"] = "claim-uncertain"
                 self.state["claim_started"] = time.time()
+                self.state["claim_request"] = {
+                    "stage": "small",
+                    "exclude_document_ids": excluded,
+                    "claim_token": str(uuid.uuid4()),
+                }
                 self.checkpoint_intent(previous_state)
-                result = self.post("claim", {"stage": "small", "exclude_document_ids": excluded})
+                result = self.claim_with_retry(self.state["claim_request"])
                 self.state["claim"] = result["claim"]
                 self.state["phase"] = "claimed" if result["claim"] else "empty"
                 if result["claim"]:
@@ -1244,8 +1509,10 @@ class Worker:
             require(isinstance(ids, list) and 0 < len(ids) <= 100 and len(ids) == len(set(ids))
                     and set(ids) <= set(self.state["capture_ids"]), "Use unique capture IDs discovered in the claimed context.")
             if not self.state.get("claimed_observation"):
-                claimed = self.state["claim"]["document"]["pages"][0]["captureId"]
-                require(ids == [claimed], "Preview the first claimed scan alone, then observe it before viewing other pages.")
+                claimed_ids = [page["captureId"] for page in self.state["claim"]["document"]["pages"]]
+                jev_ready = self.state.get("claim", {}).get("jev", {}).get("ready") is True
+                require(ids == (claimed_ids if jev_ready else claimed_ids[:1]),
+                        "Preview only the frozen Jev group, or the first claimed scan before considering neighbors.")
             require(isinstance(overrides, dict) and set(overrides) <= set(ids), "Layout overrides must belong to requested pages.")
             values = []
             self.state.setdefault("layouts", {})
@@ -1415,6 +1682,8 @@ class Worker:
         require(access.get("lunaReassessment") is True, "Deploy the Luna reassessment API before running this workflow.")
         require(access.get("batchDocumentExclusions") is True,
                 "Deploy batch document exclusions before running this workflow.")
+        require(access.get("idempotentClaims") is True,
+                "Deploy idempotent processing claims before running this workflow.")
         if self.confirmation_provider == "ppocr":
             require(access.get("ppocrConfirmation") is True, "Deploy PP OCR confirmation support before processing.")
             require(access.get("ocrFirstOptionalVision") is True,

@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch, call
+from urllib.error import URLError
 from urllib.request import Request
-from receipt_api import ScannerClient, ClientError, OCRRequired, NoRedirect, main
+from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, main
 
 
 class ClientTests(unittest.TestCase):
@@ -226,6 +227,11 @@ class ClientTests(unittest.TestCase):
         for origin in ["http://scanner.example", "https://user:pass@scanner.example", "https://scanner.example/api", "https://scanner.example?next=bad"]:
             with self.assertRaises(ClientError):
                 ScannerClient({"origin": origin})
+
+    def test_connection_failure_has_a_distinct_retryable_type(self):
+        self.client.opener.open = Mock(side_effect=URLError("synthetic outage"))
+        with self.assertRaises(ScannerConnectionError):
+            self.client.request("/api/processing/claim", b"{}")
 
     def test_metadata_identity_and_symlinks_are_checked(self):
         self.client.get = Mock(return_value={**self.meta, "id": "wrong"})

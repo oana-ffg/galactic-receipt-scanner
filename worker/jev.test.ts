@@ -1423,6 +1423,20 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
   expect(
     (await jevReadyDocuments(env, [firstDocument], [first])).has(first.id),
   ).toBe(true);
+  let readinessQueries = 0;
+  const countingEnv = {
+    DB: {
+      prepare(sql: string) {
+        readinessQueries += 1;
+        return db.prepare(sql);
+      },
+    },
+  } as any;
+  await jevReadyDocuments(
+    countingEnv,
+    Array.from({ length: 100 }, () => firstDocument),
+  );
+  expect(readinessQueries).toBe(4);
 
   const second = await saveCapture();
   await db

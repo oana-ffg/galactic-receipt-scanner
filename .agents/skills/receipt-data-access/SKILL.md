@@ -11,20 +11,19 @@ Load credentials through the private connection config; never paste them into pr
 command arguments, logs or source.
 
 Reuse coordinator-supplied paths or the repository's ignored
-`.local/processing-host.json` (`python`, `worker_profile`) for Luna/Astra processing. The
-referenced saved-PP consumer profile contains the existing private `client_config`, Node
+`.local/processing-host.json` (`python`, `worker_profile`) for the deterministic Luna
+controller and Astra processing. The referenced saved-PP consumer profile contains the existing private `client_config`, Node
 and renderer, but no OCR engine/models. OCR production separately uses
 `.local/receipt-ocr-host.json`. Keep these descriptors
 local to its host; do not commit it or ask the owner to supply paths that it already stores.
 
-The coordinator starts with `python3 scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG status`.
-Its non-secret `origin` identifies the actual request destination. Before dispatching
-fresh processing workers, match it to owner-verified Site metadata or the owner's
-authenticated connection setup and pass that verification and authorized data flow in
-the worker handoff. A credential config alone is not independent proof of ownership.
-This verification belongs to the coordinator. A delegated Luna uses the verified handoff
-and bounded Python script; it does not repeat connection setup, Sites/browser ownership
-checks, protected-profile inspection or key retrieval. Python loads the existing credentials.
+Connection setup establishes the owner-verified Site origin. The deterministic controller
+loads the protected profile, requires its origin and repository to match the prepared host,
+and verifies scoped API capabilities before claiming work. A credential config alone is not
+independent proof of ownership. Terra and delegated Luna repeat none of this: Luna reads only
+its prepared private task and optional verified preview paths; it does not launch Python,
+inspect protected profiles or retrieve keys. Python loads the existing credentials for the
+controller.
 The connection helper creates a private config referring to its protected credential file.
 There is no gopass dependency. `--credentials-stdin` supports an explicitly authorized
 secret provider for optional personal integrations; browser password storage is not
@@ -57,8 +56,9 @@ private-file persistence need later end-to-end validation; do not block local it
 or claim cloud readiness prematurely. If the page says Sites access is not configured,
 follow PROCESSING_ACCESS.md; never export cookies or make the Site public.
 
-For a Luna host configured with the bounded worker, follow [the Luna protocol](../receipt-processing/references/luna-protocol.md)
-for every processing operation. It uses this client internally and keeps tokens out of model output.
+For a Luna controller host configured with the bounded worker, follow
+[the Luna protocol](../receipt-processing/references/luna-protocol.md) for every processing
+operation. The controller uses this client internally and keeps tokens out of model output.
 
 ## Read data and images
 
@@ -77,8 +77,8 @@ for every processing operation. It uses this client internally and keeps tokens 
 
 For OCR-producer work under the receipt-ocr-nightly skill, `prepare CAPTURE_ID` verifies the
 original, reuses source-matched PP-OCRv6 or runs the dedicated prepared PP pass, saves and
-verifies the OCR artifact, and returns only paths/hashes. Luna uses its bounded worker's
-saved-PP reader instead and never invokes inference. `pdf DOCUMENT_ID` requires matching
+verifies the OCR artifact, and returns only paths/hashes. The Luna controller uses the
+bounded worker's saved-PP reader instead and never invokes inference. `pdf DOCUMENT_ID` requires matching
 saved OCR and generates from the saved page
 order, uploads it, and verifies the server-computed hash and acknowledged revision,
 returning the generated local path and acknowledged hash without downloading it again.
@@ -91,7 +91,6 @@ Windows artifact directories inherit their parent's ACL so the sandbox image vie
 read them; POSIX artifact directories remain owner-only. Verify the parent is private
 and authorized for processing, and preflight image viewing before taking a queue claim.
 
-
 `post /api/processing/ENDPOINT PRIVATE_JSON_FILE` submits a private JSON body. Read the
 [processing contract](../receipt-processing/references/processing-api.md). Model document
 changes require claim → inspect → submit. Generic machine document writes are denied;
@@ -102,7 +101,7 @@ expired/stale claim requires rereading the current assignment, never force-savin
 PP-OCRv6 is the standard for all new OCR and searchable PDFs. `prepare` and `pdf`
 use distinct profiles: `prepare` discovers `.local/receipt-ocr-host.json` and may infer;
 `pdf` discovers `.local/processing-host.json` and can only consume saved PP. Python OCR
-producers call `client.configure_ppocr(profile_path)`; Luna consumers call
+producers call `client.configure_ppocr(profile_path)`; Luna controllers call
 `client.configure_saved_ppocr(profile_path)`. Missing matching PP is an OCR-queue item,
 never permission to fall back to Tesseract or install an engine during a receipt run.
 Retain older Tesseract artifacts as historical evidence. Browser PDF
@@ -131,17 +130,17 @@ below follow `scripts/receipt_api.py --config PRIVATE_CLIENT_CONFIG`; uppercase 
 denote actual supplied paths/IDs, never values to invent. The global --config option
 goes **before** the subcommand.
 
-| Subcommand | Result / constraint |
-| --- | --- |
-| `status` | Connection capabilities; coordinator verifies once per run. |
-| `get API_PATH` | Parsed JSON; construct token-bearing paths inside Python instead of shell arguments. |
-| `post PROCESSING_API_PATH PRIVATE_JSON_FILE` | POSTs the saved JSON bytes; use /api/processing/ routes. |
-| `original CAPTURE_ID --directory PRIVATE_DIRECTORY` | Verified original path/hash; --directory is optional here. |
-| `prepare CAPTURE_ID` | OCR-host operation: verified original and stored OCR paths/hashes, using `receipt-ocr-host.json`. **No --directory CLI option.** |
-| `pdf DOCUMENT_ID` | Saved-PP consumer operation: generated local PDF with server-acknowledged hash/revision; it never infers OCR. **No --directory CLI option.** |
-| `file API_PATH SHA256 PRIVATE_DESTINATION` | Hash-verified bytes for a pinned artifact. |
-| `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` | Advanced manual upload; prepare already does this. |
-| `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` | Advanced manual upload; pdf already does this. |
+| Subcommand                                          | Result / constraint                                                                                                                          |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                                            | Connection capabilities; the deterministic controller preflight verifies them once per run.                                                  |
+| `get API_PATH`                                      | Parsed JSON; construct token-bearing paths inside Python instead of shell arguments.                                                         |
+| `post PROCESSING_API_PATH PRIVATE_JSON_FILE`        | POSTs the saved JSON bytes; use /api/processing/ routes.                                                                                     |
+| `original CAPTURE_ID --directory PRIVATE_DIRECTORY` | Verified original path/hash; --directory is optional here.                                                                                   |
+| `prepare CAPTURE_ID`                                | OCR-host operation: verified original and stored OCR paths/hashes, using `receipt-ocr-host.json`. **No --directory CLI option.**             |
+| `pdf DOCUMENT_ID`                                   | Saved-PP consumer operation: generated local PDF with server-acknowledged hash/revision; it never infers OCR. **No --directory CLI option.** |
+| `file API_PATH SHA256 PRIVATE_DESTINATION`          | Hash-verified bytes for a pinned artifact.                                                                                                   |
+| `save-ocr CAPTURE_ID PRIVATE_JSON_FILE`             | Advanced manual upload; prepare already does this.                                                                                           |
+| `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF`         | Advanced manual upload; pdf already does this.                                                                                               |
 
 There are no claim/context/categories CLI subcommands; use get/post or the existing
 Python client. For per-worker cache directories, Python `client.prepare(id,directory)`

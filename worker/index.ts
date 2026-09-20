@@ -279,6 +279,7 @@ async function route(
       queueClaims: true,
       lunaReassessment: true,
       batchDocumentExclusions: true,
+      idempotentClaims: true,
       ppocrConfirmation: true,
       ocrFirstOptionalVision: true,
       categories: true,

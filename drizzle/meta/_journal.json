@@ -169,6 +169,13 @@
       "when": 1789911075190,
       "tag": "0023_dizzy_silver_surfer",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1789917786196,
+      "tag": "0024_misty_strong_guy",
+      "breakpoints": true
     }
   ]
 }
