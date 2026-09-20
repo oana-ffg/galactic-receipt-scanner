@@ -55,6 +55,11 @@ async function seedJevReady(capture: any, ocrSha256: string) {
   await db.batch([
     db
       .prepare(
+        "UPDATE jev_jobs SET status='complete',run_token=NULL,last_error=NULL,updated_at=? WHERE capture_id=? AND ocr_sha256=?",
+      )
+      .bind(now, capture.id, ocrSha256),
+    db
+      .prepare(
         "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
       )
       .bind(
@@ -233,8 +238,29 @@ it("does not offer Luna work until the current layout has a Jev pass", async () 
     .bind(c.id)
     .first<any>();
   await seedJevReady(c, artifact.sha256);
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,created_at,updated_at) VALUES(?,3,'group',?,?,?,?)",
+    )
+    .bind(crypto.randomUUID(), c.created_at, c.id, now, now)
+    .run();
+  expect(await claim()).toBeNull();
+  await db.prepare("UPDATE jev_pipeline_runs SET phase='complete'").run();
   const lease = await claim();
   expect(lease.document.id).toBe(c.id);
+});
+it("globally gates ready receipts while another current Jev job is unfinished", async () => {
+  const ready = await capture();
+  const unfinished = await capture(false);
+  expect(await claim()).toBeNull();
+  const db = await mf.getD1Database("DB");
+  const artifact = await db
+    .prepare("SELECT sha256 FROM artifacts WHERE capture_id=? AND kind='ocr'")
+    .bind(unfinished.id)
+    .first<any>();
+  await seedJevReady(unfinished, artifact.sha256);
+  expect((await claim()).document.id).toBe(ready.id);
 });
 it("excludes documents already verified by the active local batch", async () => {
   const first = await capture(),

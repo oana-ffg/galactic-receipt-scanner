@@ -116,6 +116,11 @@ async function capture() {
   await db.batch([
     db
       .prepare(
+        "UPDATE jev_jobs SET status='complete',run_token=NULL,last_error=NULL,updated_at=? WHERE capture_id=? AND ocr_sha256=?",
+      )
+      .bind(now, id, ocr.sha256),
+    db
+      .prepare(
         "INSERT INTO jev_assessments(id,task,subject_id,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?)",
       )
       .bind(

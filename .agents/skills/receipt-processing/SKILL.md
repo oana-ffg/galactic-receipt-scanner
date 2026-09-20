@@ -64,13 +64,15 @@ for Astra. Its legacy Luna examples do not implement reassessment; do not use th
 
 ## Document flow
 
-PP-OCR and Jev now own the pre-Luna preparation step. When exact-layout PP is saved, the
-backend classifies each page, compares it with the immediately preceding whole document,
-and stops that consecutive chain on the first non-match. After the ordinary Jev backfill,
-run the separate date-reconciliation pass: it checks only receipt-only/payment-only
-documents that share an exact normalized date from pinned PP-OCR or a stored extraction.
-It saves page-level, document-level and relationship decisions with separate probabilities,
+PP-OCR and Jev own the pre-Luna preparation step. The resumable Jev pipeline freezes a
+capture snapshot, classifies every page, groups adjacent whole documents forward in scan
+order until the first non-match, reconciles detached receipt-only/payment-only documents
+that share an exact normalized date, then performs one final whole-document classification.
+Document role and purchase category share that final Jev request. The pipeline saves
+page-level, document-level and relationship decisions with separate probabilities,
 confidence and provenance. Blank OCR is deterministic `misc` and makes no Jev request.
+Luna remains globally gated until the entire snapshot reaches `complete`; it never sees
+partly grouped or partly classified documents.
 
 Jev page roles are `receipt`, `payment_evidence`, `account_record`, `cash_withdrawal`, and
 `misc`. Document role is separate from page role, association and purchase category. Jev
@@ -289,11 +291,13 @@ disagreement stays low for human review even when Astra and Luna agree.
 
 ## Grouping and originals
 
-The backend owns ordinary grouping. It compares each new Jev-classified receipt/payment
-page against the immediately preceding whole document and stops that consecutive chain on
-the first non-match. A separate end pass checks earlier complementary receipt/payment
-documents only when their normalized dates match. Only high-probability, high-confidence
-Jev matches are applied. The model decision remains append-only even when no merge is made.
+The backend owns ordinary grouping. For a frozen snapshot it first classifies all pages,
+then compares each next whole document with the active preceding group. A match extends
+that group; the first non-match closes it and makes the next document the active group.
+The integrated end pass checks earlier complementary receipt/payment documents only when
+their normalized dates match. Only high-probability, high-confidence Jev matches are
+applied. The model decision remains append-only even when no merge is made. One final
+whole-document role/category classification runs only after membership is stable.
 
 Luna treats the current ordered layout as frozen. If source pixels reveal a wrong merge,
 duplicate, missing page or incorrect order, record the concrete issue with low confidence

@@ -2,12 +2,13 @@
 
 ## First-pass PP and Jev gate
 
-Saving exact-layout PP-OCRv6 triggers the backend's pinned Jev page/document pass.
-That pass compares only the immediately preceding whole document. After the backfill is
-complete, run the date-reconciliation pass before starting Luna: it checks detached
-receipt-only/payment-only documents only when pinned OCR or the stored extraction supplies
-an identical normalized date.
+Saving exact-layout PP-OCRv6 triggers the backend's pinned Jev page pass. The resumable
+backfill freezes a snapshot, finishes page roles, groups adjacent whole documents forward,
+matches detached receipt-only/payment-only documents with an identical normalized date,
+then performs one final combined document-role/category request for every stable document.
+Do not run a separate date pass during normal processing.
 Only a current `purchase_document` with both PP and Jev readiness is eligible for Luna.
+No document is Luna-ready while any Jev pipeline snapshot or page job is unfinished.
 The claim includes the Jev document/category/page decisions and confidence. After saving
 the ordinary immutable Luna draft and preparing every frozen region, POST
 `/api/processing/confirmation` with `token`, `provider: "ppocr"`, the unchanged
@@ -32,9 +33,8 @@ uploads handled by the client. Never print claim tokens; build query strings in 
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET /api/processing/access                  | none                                                                                                      | Version 2 must advertise queueClaims, lunaReassessment and configured Jev with its pinned model.                                                                                                    |
 | POST /api/processing/claim                  | `{stage:"small"}` or `{stage:"large"}`                                                                    | `{claim:{token,expires,stage,document:{id,revision,pages},scanned_at,jev}}`, or `{claim:null,reason:"queue-empty"\|"busy-or-changed"}`. Both stages require current exact-layout PP+Jev; large also requires a saved eligible Luna result. Stop on null.          |
-| GET /api/jev/status                         | none                                                                                                      | Jev configuration plus queued job counts.                                                                                                                                                           |
-| POST /api/jev/backfill                      | `{}`                                                                                                      | Queues the latest PP artifact per current scan, processes one retryable job, and returns `remaining`.                                                                                                |
-| POST /api/jev/reconcile-matching-dates      | `{after:null|string}`                                                                                      | Bounded end pass over detached receipt/payment documents with an exact shared date. Follow `next` until `remaining` is zero; stop and retry later when `busy` is true.                               |
+| GET /api/jev/status                         | none                                                                                                      | Jev configuration, job counts, ineligible reasons and the latest pipeline phase/snapshot/busy state.                                                                                                |
+| POST /api/jev/backfill                      | `{}`                                                                                                      | Advances one resumable page, forward-grouping, shared-date, or final-document step. Follow `remaining` to zero and confirm zero once more so work arriving at the snapshot boundary starts a new run. |
 | GET /api/jev/documents?disagreements=1      | none                                                                                                      | Current Jev/Luna document-role and category disagreements with names/confidence; no OCR text.                                                                                                        |
 | POST /api/processing/renew                  | `{token}`                                                                                                 | `{expires}`, epoch milliseconds.                                                                                                                                                                    |
 | POST /api/processing/release                | `{token}`                                                                                                 | `{released:true}`. Only for an active claim being abandoned.                                                                                                                                        |
@@ -52,9 +52,9 @@ One renewable global lease prevents overlapping model work and expires after 20 
 A token assigns ONE document. Claim pages use `captureId`; context `next_images` use
 `id`, with `sha256`, `created_at` and `document_id`. Fetching lookahead does not attach it.
 
-Normal Luna does not use context for grouping: the backend has already matched chronological
-continuations and the separate shared-date pass has matched detached payment evidence with
-Jev before the claim. The context and grouping routes below remain for explicit Astra
+Normal Luna does not use context for grouping: the completed backend pipeline has already
+matched chronological continuations and detached shared-date payment evidence with Jev
+before the claim. The context and grouping routes below remain for explicit Astra
 repair/legacy maintenance only.
 
 Context returns two next images in chronological order; continue with `after_capture`.

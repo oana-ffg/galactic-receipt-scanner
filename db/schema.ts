@@ -309,6 +309,24 @@ export const jevJobs = sqliteTable(
     index("jev_job_status_created").on(table.status, table.created_at),
   ],
 );
+export const jevPipelineRuns = sqliteTable(
+  "jev_pipeline_runs",
+  {
+    id: text("id").primaryKey(),
+    version: integer("version").notNull(),
+    phase: text("phase").notNull(),
+    snapshot_created_at: text("snapshot_created_at").notNull(),
+    snapshot_capture_id: text("snapshot_capture_id").notNull(),
+    cursor: text("cursor"),
+    step_token: text("step_token"),
+    step_started_at: text("step_started_at"),
+    created_at: text("created_at").notNull(),
+    updated_at: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("jev_pipeline_phase_created").on(table.phase, table.created_at),
+  ],
+);
 // Append-only manual outlines; capture metadata and source bytes stay immutable.
 export const captureOutlines = sqliteTable(
   "capture_outlines",

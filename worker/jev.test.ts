@@ -24,7 +24,7 @@ beforeEach(async () => {
 
 afterEach(async () => mf?.dispose());
 
-async function saveCapture() {
+async function saveCapture(retakeOf?: string) {
   const id = crypto.randomUUID();
   const response = await mf.dispatchFetch(`${origin}/api/captures/${id}`, {
     method: "POST",
@@ -33,6 +33,7 @@ async function saveCapture() {
       Origin: origin,
       "X-Scanner-Request": "1",
       "X-Capture-Status": "accepted",
+      ...(retakeOf ? { "X-Retake-Of": retakeOf } : {}),
       "X-Capture-Metadata": JSON.stringify({
         sourcePixels: [1000, 1600],
         quality: { ok: true, receiptPixels: [1000, 1600] },
@@ -104,27 +105,21 @@ async function runBackfill(processingToken: string) {
   return result;
 }
 
-async function runDateReconciliation(
-  processingToken: string,
-  after: string | null = null,
-) {
-  const response = await mf.dispatchFetch(
-    `${origin}/api/jev/reconcile-matching-dates`,
-    {
-      method: "POST",
-      headers: {
-        ...ownerHeaders,
-        Origin: origin,
-        "X-Scanner-Request": "1",
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${processingToken}`,
-      },
-      body: JSON.stringify({ after }),
-    },
-  );
-  const result = await response.json<any>();
-  expect(response.status, JSON.stringify(result)).toBe(200);
-  return result;
+async function drainBackfill(processingToken: string, limit = 200) {
+  const results: any[] = [];
+  let complete = false;
+  for (let index = 0; index < limit; index += 1) {
+    const result = await runBackfill(processingToken);
+    results.push(result);
+    if (result.remaining === 0) {
+      if (complete) return { result, results };
+      complete = true;
+      continue;
+    }
+    complete = false;
+    expect(result.busy, JSON.stringify(result)).not.toBe(true);
+  }
+  throw new Error(`Jev backfill did not finish after ${limit} steps.`);
 }
 
 async function paymentJevResponse(
@@ -471,7 +466,7 @@ it("classifies blank PP OCR as misc without an external Jev key", async () => {
   );
   const saved = await response.json<any>();
   expect(response.status, JSON.stringify(saved)).toBe(200);
-  expect(saved.jev).toEqual({ status: "complete" });
+  expect(saved.jev).toEqual({ status: "classified" });
   const db = await mf.getD1Database("DB");
   expect(
     await db
@@ -481,13 +476,18 @@ it("classifies blank PP OCR as misc without an external Jev key", async () => {
   ).toMatchObject({ role: "misc", model: "rule:blank-ocr" });
   expect(
     await db
-      .prepare("SELECT role,model FROM jev_document_heads WHERE document_id=?")
+      .prepare("SELECT role FROM jev_document_heads WHERE document_id=?")
       .bind(capture.id)
       .first(),
-  ).toMatchObject({ role: "misc", model: "rule:blank-ocr" });
+  ).toBeNull();
 });
 
 it("rejects a document head whose saved assessment is not pinned to the current PP OCR", async () => {
+  const processingToken = `rsc_${"h".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
   const capture = await saveCapture();
   const response = await mf.dispatchFetch(
     `${origin}/api/captures/${capture.id}/artifacts/ocr`,
@@ -513,6 +513,7 @@ it("rejects a document head whose saved assessment is not pinned to the current 
     },
   );
   expect(response.status).toBe(200);
+  await drainBackfill(processingToken);
   const db = await mf.getD1Database("DB");
   const bucket = await mf.getR2Bucket("BUCKET");
   const stored = await mf.dispatchFetch(
@@ -577,8 +578,10 @@ it("keeps a nonblank PP upload successful and Jev retryable when unconfigured", 
 });
 
 it("completes each page job without starving a multi-page document and binds the final head to both PP pins", async () => {
+  const processingToken = `rsc_${"m".repeat(43)}`;
   await mf.dispose();
   mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
     typesafeApiKey: "synthetic-key",
     outboundService: syntheticJevResponse,
   });
@@ -622,8 +625,9 @@ it("completes each page job without starving a multi-page document and binds the
     );
     const saved = await response.json<any>();
     expect(response.status, JSON.stringify(saved)).toBe(200);
-    expect(saved.jev.status).toBe("complete");
+    expect(saved.jev.status).toBe("classified");
   }
+  await drainBackfill(processingToken);
   const db = await mf.getD1Database("DB");
   expect(
     (
@@ -650,9 +654,36 @@ it("completes each page job without starving a multi-page document and binds the
   );
   expect(summary.ready).toBe(true);
   expect(summary.document?.role).toBe("purchase_document");
+  expect(summary.document?.assessment_id).toBe(
+    summary.document?.category_assessment_id,
+  );
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT task,COUNT(*) AS count FROM jev_assessments WHERE task LIKE 'document-%' OR task='purchase-category' GROUP BY task",
+        )
+        .all()
+    ).results,
+  ).toEqual([{ task: "document-classification", count: 1 }]);
   expect(summary.pages.map((page) => page.capture_id)).toEqual(
     captures.map((capture) => capture.id),
   );
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,created_at,updated_at) VALUES(?,3,'pages',?,?,?,?)",
+    )
+    .bind(crypto.randomUUID(), captures[1].created_at, captures[1].id, now, now)
+    .run();
+  expect(
+    (
+      await jevSummary(
+        { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as any,
+        current,
+      )
+    ).ready,
+  ).toBe(true);
 });
 
 it("discovers and processes only one historical OCR artifact per backfill request", async () => {
@@ -671,7 +702,7 @@ it("discovers and processes only one historical OCR artifact per backfill reques
     await seedHistoricalOcr(capture, "", `2026-01-01T00:00:0${index}.000Z`);
   }
   expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
+    result: { status: "classified" },
     remaining: 1,
     blocked: 0,
   });
@@ -681,13 +712,8 @@ it("discovers and processes only one historical OCR artifact per backfill reques
   expect(await db.prepare("SELECT capture_id FROM jev_jobs").first()).toEqual({
     capture_id: captures[0].id,
   });
-  let result: any;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    result = await runBackfill(processingToken);
-    if (result.remaining === 0) break;
-  }
+  const { result } = await drainBackfill(processingToken);
   expect(result).toMatchObject({
-    result: { status: "complete" },
     remaining: 0,
     blocked: 0,
   });
@@ -722,10 +748,10 @@ it("re-evaluates legacy ineligible jobs and classifies safe auto-cropped PP text
     await db.prepare("SELECT status,eligibility_version FROM jev_jobs").first(),
   ).toEqual({ status: "ineligible", eligibility_version: 1 });
 
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
+  expect((await drainBackfill(processingToken)).result).toMatchObject({
     remaining: 0,
     blocked: 0,
+    phase: "complete",
   });
   expect(
     await db
@@ -769,19 +795,15 @@ it("reports unprocessed legacy captures in the backfill remaining count", async 
     .run();
 
   expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
+    result: { status: "classified" },
     remaining: 1,
     blocked: 0,
   });
-  let final: any = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    final = await runBackfill(processingToken);
-    if (final.remaining === 0) break;
-  }
+  const { result: final } = await drainBackfill(processingToken);
   expect(final).toMatchObject({
-    result: { status: "complete" },
     remaining: 0,
     blocked: 0,
+    phase: "complete",
   });
   expect(
     await db.prepare("SELECT COUNT(*) AS count FROM jev_page_heads").first(),
@@ -804,11 +826,7 @@ it("keeps completed Jev evidence pinned when a newer legacy artifact is rejected
   );
   const db = await mf.getD1Database("DB");
   await queueJevJob({ DB: db } as any, capture.id, completed);
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-    remaining: 0,
-    blocked: 0,
-  });
+  await drainBackfill(processingToken);
 
   const rejected = await seedHistoricalOcr(
     capture,
@@ -824,11 +842,7 @@ it("keeps completed Jev evidence pinned when a newer legacy artifact is rejected
     .bind(rejected)
     .run();
 
-  expect(await runBackfill(processingToken)).toEqual({
-    result: null,
-    remaining: 0,
-    blocked: 0,
-  });
+  expect((await runBackfill(processingToken)).remaining).toBe(0);
   expect(
     (
       await db
@@ -897,11 +911,7 @@ it("retries only the newest legacy artifact and leaves its older sibling untouch
     )
     .run();
 
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-    remaining: 0,
-    blocked: 0,
-  });
+  await drainBackfill(processingToken);
   expect(
     (
       await db
@@ -919,11 +929,7 @@ it("retries only the newest legacy artifact and leaves its older sibling untouch
   expect(
     await db.prepare("SELECT ocr_sha256 FROM jev_page_heads").first(),
   ).toEqual({ ocr_sha256: newer });
-  expect(await runBackfill(processingToken)).toEqual({
-    result: null,
-    remaining: 0,
-    blocked: 0,
-  });
+  expect((await runBackfill(processingToken)).remaining).toBe(0);
 });
 
 it("backfills a historical receipt before its later matching payment slip", async () => {
@@ -955,12 +961,7 @@ it("backfills a historical receipt before its later matching payment slip", asyn
     "PAYMENT SLIP\nTOTAL 12.34",
     "2026-01-01T00:00:01.000Z",
   );
-  expect(await runBackfill(processingToken)).toMatchObject({ remaining: 1 });
-  let result: any;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    result = await runBackfill(processingToken);
-    if (result.remaining === 0) break;
-  }
+  const { result } = await drainBackfill(processingToken);
   expect(result).toMatchObject({ remaining: 0, blocked: 0 });
   const response = await mf.dispatchFetch(`${origin}/api/documents`, {
     headers: ownerHeaders,
@@ -989,18 +990,42 @@ it("does not let an older completed artifact hide a newer unqueued PP artifact",
     "",
     "2026-01-01T00:00:00.000Z",
   );
-  expect(await runBackfill(processingToken)).toMatchObject({ remaining: 0 });
+  await drainBackfill(processingToken);
   const newer = await seedHistoricalOcr(
     capture,
     " ",
     "2026-01-01T00:00:01.000Z",
   );
   expect(newer).not.toBe(older);
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-    remaining: 0,
-  });
   const db = await mf.getD1Database("DB");
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT artifact.capture_id,artifact.sha256 FROM artifacts artifact WHERE artifact.kind='ocr' AND NOT EXISTS (SELECT 1 FROM artifacts newer WHERE newer.capture_id=artifact.capture_id AND newer.kind='ocr' AND (newer.created_at>artifact.created_at OR (newer.created_at=artifact.created_at AND newer.key>artifact.key))) AND NOT EXISTS (SELECT 1 FROM jev_jobs job WHERE job.capture_id=artifact.capture_id AND job.ocr_sha256=artifact.sha256)",
+        )
+        .all()
+    ).results,
+  ).toEqual([{ capture_id: capture.id, sha256: newer }]);
+  const resumed = await runBackfill(processingToken);
+  expect(resumed).toMatchObject({ remaining: 1, phase: "pages" });
+  expect((await drainBackfill(processingToken)).result).toMatchObject({
+    remaining: 0,
+    phase: "complete",
+  });
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT ocr_sha256,status FROM jev_jobs WHERE capture_id=? ORDER BY created_at,id",
+        )
+        .bind(capture.id)
+        .all()
+    ).results,
+  ).toEqual([
+    { ocr_sha256: older, status: "complete" },
+    { ocr_sha256: newer, status: "complete" },
+  ]);
   expect(
     await db
       .prepare("SELECT ocr_sha256 FROM jev_page_heads WHERE capture_id=?")
@@ -1012,7 +1037,108 @@ it("does not let an older completed artifact hide a newer unqueued PP artifact",
   ).toEqual({ count: 2 });
 });
 
-it("checks only the immediately preceding document during the page backfill", async () => {
+it("defers PP refreshes during grouping and reruns the complete pipeline", async () => {
+  const processingToken = `rsc_${"k".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const capture = await saveCapture();
+  const older = await seedHistoricalOcr(
+    capture,
+    "",
+    "2026-01-01T00:00:00.000Z",
+  );
+  let step: any;
+  for (let index = 0; index < 20; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "group") break;
+  }
+  expect(step.phase).toBe("group");
+  const refresh = await mf.dispatchFetch(
+    `${origin}/api/captures/${capture.id}/artifacts/ocr`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        source: {
+          captureId: capture.id,
+          sha256: capture.sha256,
+          pixels: [1000, 1600],
+          rotation: 0,
+          region: { left: 0, top: 0, width: 1000, height: 1600 },
+        },
+        provenance: { engine: "PP-OCRv6" },
+        text: " ",
+      }),
+    },
+  );
+  const saved = await refresh.json<any>();
+  expect(refresh.status, JSON.stringify(saved)).toBe(200);
+  expect(saved.jev.status).toBe("pending");
+  expect(saved.sha256).not.toBe(older);
+  await drainBackfill(processingToken);
+  const db = await mf.getD1Database("DB");
+  expect(
+    await db
+      .prepare("SELECT ocr_sha256 FROM jev_page_heads WHERE capture_id=?")
+      .bind(capture.id)
+      .first(),
+  ).toEqual({ ocr_sha256: saved.sha256 });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_jobs").first(),
+  ).toEqual({ count: 2 });
+  expect(
+    (
+      await db
+        .prepare("SELECT DISTINCT status FROM jev_jobs ORDER BY status")
+        .all()
+    ).results,
+  ).toEqual([{ status: "complete" }]);
+});
+
+it("retires classified work when its capture is superseded mid-pipeline", async () => {
+  const processingToken = `rsc_${"l".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const original = await saveCapture();
+  await seedHistoricalOcr(original, "", "2026-01-01T00:00:00.000Z");
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "classified" },
+    phase: "pages",
+  });
+  await saveCapture(original.id);
+  const { result } = await drainBackfill(processingToken);
+  expect(result).toMatchObject({ remaining: 0, phase: "complete" });
+  const db = await mf.getD1Database("DB");
+  expect(
+    await db
+      .prepare(
+        "SELECT status,ineligible_reason FROM jev_jobs WHERE capture_id=?",
+      )
+      .bind(original.id)
+      .first(),
+  ).toEqual({
+    status: "ineligible",
+    ineligible_reason: "capture_not_current",
+  });
+  expect(
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_pipeline_runs WHERE phase!='complete'",
+      )
+      .first(),
+  ).toEqual({ count: 0 });
+});
+
+it("groups forward once per adjacent document and preserves the first boundary", async () => {
   const processingToken = `rsc_${"e".repeat(43)}`;
   const relationshipPairs: { current: string; candidate: string }[] = [];
   await mf.dispose();
@@ -1054,15 +1180,11 @@ it("checks only the immediately preceding document during the page backfill", as
       createdAt,
     );
   }
-  let result: any;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    result = await runBackfill(processingToken);
-    if (result.remaining === 0) break;
-  }
+  const { result } = await drainBackfill(processingToken);
   expect(result).toMatchObject({
-    result: { status: "complete" },
     remaining: 0,
     blocked: 0,
+    phase: "complete",
   });
   expect(relationshipPairs).toEqual([
     { current: captures[1].id, candidate: captures[0].id },
@@ -1087,34 +1209,29 @@ it("checks only the immediately preceding document during the page backfill", as
   ).toHaveLength(2);
 });
 
-it("resumes the exact saved association after a merge interruption", async () => {
+it("persists the forward grouping cursor between requests", async () => {
   const processingToken = `rsc_${"w".repeat(43)}`;
   const relationshipPairs: string[] = [];
-  const captures: any[] = [];
   await mf.dispose();
   mf = await runtime({
     processingTokenSha256: await processingTokenHash(processingToken),
     typesafeApiKey: "synthetic-key",
     outboundService: async (request: Request) => {
       const body = (await request.clone().json()) as any;
-      let relationship: "continuation" | "unrelated" = "unrelated";
-      if (body.questions.relationship) {
+      if (body.questions.relationship)
         relationshipPairs.push(
           `${body.state.current.document_id}|${body.state.candidate.document_id}`,
         );
-        if (
-          body.state.current.document_id === captures[2]?.id &&
-          body.state.candidate.document_id === captures[1]?.id
-        )
-          relationship = "continuation";
-      }
-      return paymentJevResponse(request, relationship);
+      return paymentJevResponse(request, "unrelated");
     },
   });
+  const captures = [
+    await saveCapture(),
+    await saveCapture(),
+    await saveCapture(),
+  ];
   const db = await mf.getD1Database("DB");
-  for (let index = 0; index < 3; index += 1) {
-    const capture = await saveCapture();
-    captures.push(capture);
+  for (const [index, capture] of captures.entries()) {
     const createdAt = `2026-01-01T00:00:0${index}.000Z`;
     await db
       .prepare("UPDATE captures SET created_at=? WHERE id=?")
@@ -1126,113 +1243,40 @@ it("resumes the exact saved association after a merge interruption", async () =>
       createdAt,
     );
   }
-  let prepared = false;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    await runBackfill(processingToken);
-    const jobs = (
-      await db
-        .prepare("SELECT capture_id,status FROM jev_jobs")
-        .all<{ capture_id: string; status: string }>()
-    ).results;
-    prepared =
-      jobs.find((job) => job.capture_id === captures[0].id)?.status ===
-        "complete" &&
-      jobs.find((job) => job.capture_id === captures[1].id)?.status ===
-        "complete" &&
-      jobs.find((job) => job.capture_id === captures[2].id)?.status ===
-        "pending";
-    if (prepared) break;
+  let step: any;
+  for (let index = 0; index < 10; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "group") break;
   }
-  expect(prepared).toBe(true);
+  expect(step.phase).toBe("group");
+  expect(relationshipPairs).toEqual([]);
+
+  await runBackfill(processingToken);
+  expect(relationshipPairs).toEqual([`${captures[1].id}|${captures[0].id}`]);
+  const cursor = await db
+    .prepare(
+      "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
+    )
+    .first<{ cursor: string }>();
+  expect(JSON.parse(cursor!.cursor)).toEqual({ active_id: captures[1].id });
+
+  await saveCapture(captures[1].id);
   expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-    remaining: 0,
+    result: { status: "cursor-reset" },
+    phase: "group",
   });
-  const interruptedDecision = JSON.stringify({
-    version: 2,
-    status: "decision",
-    current_id: captures[2].id,
-    current_revision: 0,
-    candidate_id: captures[1].id,
-    candidate_revision: 0,
-    relationship: "continuation",
-  });
-  await db.batch([
-    db
-      .prepare(
-        "UPDATE jev_jobs SET status='failed',attempts=0,association_progress=? WHERE capture_id=?",
-      )
-      .bind(interruptedDecision, captures[2].id),
-    db
-      .prepare("DELETE FROM jev_document_heads WHERE document_id=?")
-      .bind(captures[1].id),
-  ]);
-  let final: any;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    final = await runBackfill(processingToken);
-    if (final.remaining === 0) break;
-  }
-  expect(final).toMatchObject({ remaining: 0, blocked: 0 });
+  const reset = await db
+    .prepare(
+      "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
+    )
+    .first<{ cursor: string }>();
+  expect(JSON.parse(reset!.cursor)).toEqual({ active_id: captures[0].id });
+  await runBackfill(processingToken);
   expect(relationshipPairs).toEqual([
     `${captures[1].id}|${captures[0].id}`,
-    `${captures[2].id}|${captures[1].id}`,
+    `${captures[2].id}|${captures[0].id}`,
   ]);
 });
-
-it("retires a legacy association cursor without replaying its predecessor", async () => {
-  const processingToken = `rsc_${"x".repeat(43)}`;
-  let relationshipCalls = 0;
-  await mf.dispose();
-  mf = await runtime({
-    processingTokenSha256: await processingTokenHash(processingToken),
-    typesafeApiKey: "synthetic-key",
-    outboundService: async (request: Request) => {
-      const body = (await request.clone().json()) as any;
-      if (body.questions.relationship) relationshipCalls += 1;
-      return syntheticJevResponse(request);
-    },
-  });
-  const first = await saveCapture();
-  const second = await saveCapture();
-  const db = await mf.getD1Database("DB");
-  let secondOcr = "";
-  for (const [index, capture] of [first, second].entries()) {
-    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
-    await db
-      .prepare("UPDATE captures SET created_at=? WHERE id=?")
-      .bind(createdAt, capture.id)
-      .run();
-    const digest = await seedHistoricalOcr(capture, "SHOP RECEIPT", createdAt);
-    if (capture.id === second.id) secondOcr = digest;
-  }
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-    remaining: 1,
-  });
-  await queueJevJob(
-    { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as any,
-    second.id,
-    secondOcr,
-  );
-  await db
-    .prepare(
-      "UPDATE jev_jobs SET association_progress=? WHERE capture_id=? AND status='pending'",
-    )
-    .bind(JSON.stringify({ scope: "legacy-scope", next: 1 }), second.id)
-    .run();
-  let result: any;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    result = await runBackfill(processingToken);
-    if (result.remaining === 0) break;
-  }
-  expect(result).toMatchObject({
-    result: { status: "complete" },
-    remaining: 0,
-    blocked: 0,
-  });
-  expect(relationshipCalls).toBe(0);
-});
-
 it("reconciles detached payment evidence only against receipts with the same OCR date", async () => {
   const processingToken = `rsc_${"q".repeat(43)}`;
   const reconciliationPairs: { current: string; candidate: string }[] = [];
@@ -1295,7 +1339,8 @@ it("reconciles detached payment evidence only against receipts with the same OCR
     "2026-01-01T00:00:03.000Z",
   );
   let backfill: any;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (backfill?.phase === "dates") reconciling = true;
     backfill = await runBackfill(processingToken);
     if (backfill.remaining === 0) break;
   }
@@ -1304,15 +1349,6 @@ it("reconciles detached payment evidence only against receipts with the same OCR
     blocked: 0,
   });
 
-  reconciling = true;
-  let after: string | null = null;
-  let reconciliation: any;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    reconciliation = await runDateReconciliation(processingToken, after);
-    after = reconciliation.next;
-    if (reconciliation.remaining === 0) break;
-  }
-  expect(reconciliation).toMatchObject({ remaining: 0, next: null });
   expect(reconciliationPairs).toEqual([
     { current: matchingReceipt.id, candidate: payment.id },
   ]);
@@ -1354,6 +1390,80 @@ it("reconciles detached payment evidence only against receipts with the same OCR
   ).toBe(true);
 });
 
+it("does not date-match a current payment against a receipt capture retired after the snapshot", async () => {
+  const processingToken = `rsc_${"x".repeat(43)}`;
+  const reconciliationPairs: string[] = [];
+  let reconciling = false;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      if (reconciling && body.questions.relationship)
+        reconciliationPairs.push(
+          `${body.state.current.document_id}|${body.state.candidate.document_id}`,
+        );
+      return paymentJevResponse(
+        request,
+        reconciling ? "payment_match" : "unrelated",
+      );
+    },
+  });
+  const receipt = await saveCapture();
+  const payment = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of [receipt, payment].entries()) {
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+  }
+  await seedHistoricalOcr(
+    receipt,
+    "SHOP RECEIPT 19.09.2026 REFERENCE MATCH",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    payment,
+    "PAYMENT SLIP 19.09.2026 REFERENCE MATCH",
+    "2026-01-01T00:00:01.000Z",
+  );
+
+  let step: any;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "dates") break;
+  }
+  expect(step.phase).toBe("dates");
+  const persisted = newDocument(receipt);
+  const persistResponse = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+    },
+    body: JSON.stringify({ documents: [persisted] }),
+  });
+  expect(persistResponse.status).toBe(200);
+  await saveCapture(receipt.id);
+  reconciling = true;
+  const { result } = await drainBackfill(processingToken);
+  expect(result).toMatchObject({ remaining: 0, blocked: 0 });
+  expect(reconciliationPairs).toEqual([]);
+
+  const catalog = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  expect(
+    catalog.documents.find((document: any) => document.id === payment.id).pages,
+  ).toEqual([expect.objectContaining({ captureId: payment.id })]);
+});
+
 it("checkpoints same-date reconciliation without repeating candidate pairs", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   const reconciliationPairs: string[] = [];
@@ -1388,21 +1498,12 @@ it("checkpoints same-date reconciliation without repeating candidate pairs", asy
     );
   }
   let backfill: any;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (backfill?.phase === "dates") reconciling = true;
     backfill = await runBackfill(processingToken);
     if (backfill.remaining === 0) break;
   }
   expect(backfill).toMatchObject({ remaining: 0, blocked: 0 });
-
-  reconciling = true;
-  let after: string | null = null;
-  let reconciliation: any;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    reconciliation = await runDateReconciliation(processingToken, after);
-    after = reconciliation.next;
-    if (reconciliation.remaining === 0) break;
-  }
-  expect(reconciliation).toMatchObject({ remaining: 0, next: null });
   expect(reconciliationPairs).toHaveLength(3);
   expect(new Set(reconciliationPairs).size).toBe(3);
   expect(
@@ -1442,14 +1543,14 @@ it("recovers an interrupted job that the previous request boundary blocked", asy
     )
     .bind("2026-01-01T00:00:01.000Z", jobId)
     .run();
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
+  expect((await drainBackfill(processingToken)).result).toMatchObject({
     remaining: 0,
     blocked: 0,
+    phase: "complete",
   });
 });
 
-it("retries an accepted match when the merge save fails before cursor advancement", async () => {
+it("retries a saved grouping decision after the merge write fails", async () => {
   const processingToken = `rsc_${"g".repeat(43)}`;
   await mf.dispose();
   mf = await runtime({
@@ -1460,71 +1561,67 @@ it("retries an accepted match when the merge save fails before cursor advancemen
   const receipt = await saveCapture();
   const payment = await saveCapture();
   const db = await mf.getD1Database("DB");
-  await db
-    .prepare("UPDATE captures SET created_at=? WHERE id=?")
-    .bind("2026-01-01T00:00:00.000Z", receipt.id)
-    .run();
-  await db
-    .prepare("UPDATE captures SET created_at=? WHERE id=?")
-    .bind("2026-01-01T00:00:01.000Z", payment.id)
-    .run();
-  await seedHistoricalOcr(
-    receipt,
-    "SHOP RECEIPT\nTOTAL 12.34",
-    "2026-01-01T00:00:00.000Z",
-  );
-  await seedHistoricalOcr(
-    payment,
-    "PAYMENT SLIP\nTOTAL 12.34",
-    "2026-01-01T00:00:01.000Z",
-  );
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-  });
+  for (const [index, capture] of [receipt, payment].entries()) {
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(
+      capture,
+      index === 0 ? "SHOP RECEIPT TOTAL 12.34" : "PAYMENT SLIP TOTAL 12.34",
+      createdAt,
+    );
+  }
+  let step: any;
+  for (let index = 0; index < 10; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "group") break;
+  }
+  expect(step.phase).toBe("group");
   await db
     .prepare(
       "CREATE TRIGGER synthetic_fail_merge BEFORE INSERT ON document_versions BEGIN SELECT RAISE(ABORT, 'synthetic merge failure'); END",
     )
     .run();
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "failed" },
-    remaining: 1,
+  const failed = await mf.dispatchFetch(`${origin}/api/jev/backfill`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${processingToken}`,
+    },
+    body: "{}",
   });
+  expect(failed.status).toBe(503);
   expect(
     await db
       .prepare(
-        "SELECT association_progress FROM jev_jobs WHERE capture_id=? ORDER BY created_at DESC LIMIT 1",
+        "SELECT cursor,step_token FROM jev_pipeline_runs WHERE phase='group'",
       )
-      .bind(payment.id)
       .first(),
-  ).toMatchObject({
-    association_progress: expect.stringContaining("decision"),
-  });
-  await db.prepare("DROP TRIGGER synthetic_fail_merge").run();
-  let result: any;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    result = await runBackfill(processingToken);
-    if (result.remaining === 0) break;
-  }
-  expect(result).toMatchObject({
-    result: { status: "complete" },
-    remaining: 0,
-    blocked: 0,
-  });
-  const documents = await mf.dispatchFetch(`${origin}/api/documents`, {
-    headers: ownerHeaders,
-  });
-  const catalog = await documents.json<any>();
+  ).toEqual({ cursor: null, step_token: null });
   expect(
-    catalog.documents
-      .filter(
-        (document: any) => !document.mergedInto && !document.duplicateOf,
-      )[0]
-      .pages.map((page: any) => page.captureId),
-  ).toEqual([receipt.id, payment.id]);
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship'",
+      )
+      .first(),
+  ).toEqual({ count: 1 });
+  await db.prepare("DROP TRIGGER synthetic_fail_merge").run();
+  await drainBackfill(processingToken);
+  expect(
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship'",
+      )
+      .first(),
+  ).toEqual({ count: 1 });
 });
 
-it("prevents a superseded Jev execution from overwriting its successor ownership", async () => {
+it("serializes forward grouping with the pipeline step lease", async () => {
   const processingToken = `rsc_${"h".repeat(43)}`;
   let releaseRelationship!: () => void;
   const relationshipReleased = new Promise<void>((resolve) => {
@@ -1547,50 +1644,100 @@ it("prevents a superseded Jev execution from overwriting its successor ownership
       return unrelatedPaymentJevResponse(request);
     },
   });
-  const payment = await saveCapture();
-  const receipt = await saveCapture();
   const db = await mf.getD1Database("DB");
-  await db
-    .prepare("UPDATE captures SET created_at=? WHERE id=?")
-    .bind("2026-01-01T00:00:00.000Z", payment.id)
-    .run();
-  await db
-    .prepare("UPDATE captures SET created_at=? WHERE id=?")
-    .bind("2026-01-01T00:00:01.000Z", receipt.id)
-    .run();
-  await seedHistoricalOcr(
-    payment,
-    "PAYMENT SLIP\nTOTAL 12.34",
-    "2026-01-01T00:00:00.000Z",
-  );
-  await seedHistoricalOcr(
-    receipt,
-    "SHOP RECEIPT\nTOTAL 12.34",
-    "2026-01-01T00:00:01.000Z",
-  );
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "complete" },
-  });
-  const oldExecution = runBackfill(processingToken);
+  for (let index = 0; index < 2; index += 1) {
+    const capture = await saveCapture();
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(
+      capture,
+      `${index ? "SHOP RECEIPT" : "PAYMENT SLIP"} TOTAL 12.34`,
+      createdAt,
+    );
+  }
+  let step: any;
+  for (let index = 0; index < 10; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "group") break;
+  }
+  const first = runBackfill(processingToken);
   await relationshipStarted;
-  const job = await db
-    .prepare("SELECT id,run_token FROM jev_jobs WHERE capture_id=?")
-    .bind(receipt.id)
-    .first<{ id: string; run_token: string }>();
-  await db
-    .prepare("UPDATE jev_jobs SET run_token='successor-token' WHERE id=?")
-    .bind(job!.id)
-    .run();
-  releaseRelationship();
-  expect(await oldExecution).toMatchObject({
-    result: { status: "running", superseded: true },
+  const concurrent = await runBackfill(processingToken);
+  expect(concurrent).toMatchObject({
+    phase: "group",
+    remaining: 1,
+    busy: true,
   });
+  releaseRelationship();
+  expect(await first).toMatchObject({
+    phase: "group",
+    remaining: 1,
+    busy: false,
+  });
+});
+
+it("creates only one active pipeline when initial backfill requests overlap", async () => {
+  const processingToken = `rsc_${"i".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  await saveCapture();
+  const results = await Promise.all([
+    runBackfill(processingToken),
+    runBackfill(processingToken),
+  ]);
+  expect(results.every((result) => result.remaining === 1)).toBe(true);
+  const db = await mf.getD1Database("DB");
   expect(
     await db
-      .prepare("SELECT run_token FROM jev_jobs WHERE id=?")
-      .bind(job!.id)
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_pipeline_runs WHERE phase!='complete'",
+      )
       .first(),
-  ).toEqual({ run_token: "successor-token" });
+  ).toEqual({ count: 1 });
+});
+
+it("checkpoints final document classification one document per request", async () => {
+  const processingToken = `rsc_${"j".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const captures = [await saveCapture(), await saveCapture()];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries()) {
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, "", createdAt);
+  }
+  let step: any;
+  for (let index = 0; index < 30; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "documents") break;
+  }
+  expect(step.phase).toBe("documents");
+  await runBackfill(processingToken);
+  const first = await db
+    .prepare(
+      "SELECT cursor FROM jev_pipeline_runs WHERE phase='documents' LIMIT 1",
+    )
+    .first<{ cursor: string }>();
+  expect(JSON.parse(first!.cursor).after_id).toBe(captures[0].id);
+  await saveCapture(captures[0].id);
+  await runBackfill(processingToken);
+  const second = await db
+    .prepare(
+      "SELECT cursor FROM jev_pipeline_runs WHERE phase='documents' LIMIT 1",
+    )
+    .first<{ cursor: string }>();
+  expect(JSON.parse(second!.cursor).after_id).toBe(captures[1].id);
 });
 
 it("atomically owns a Jev job while upload and backfill overlap", async () => {
@@ -1669,8 +1816,13 @@ it("atomically owns a Jev job while upload and backfill overlap", async () => {
   releaseFirst();
   const saved = await upload;
   expect(saved.status, await saved.text()).toBe(200);
-  expect(calls).toBe(3);
+  expect(calls).toBe(1);
   const db = await mf.getD1Database("DB");
+  expect(
+    await db.prepare("SELECT status,run_token FROM jev_jobs").first(),
+  ).toEqual({ status: "classified", run_token: null });
+  await drainBackfill(processingToken);
+  expect(calls).toBe(2);
   expect(
     await db.prepare("SELECT status,run_token FROM jev_jobs").first(),
   ).toEqual({ status: "complete", run_token: null });
@@ -1709,6 +1861,7 @@ it("paginates the Jev document inventory", async () => {
     );
     expect(response.status, await response.text()).toBe(200);
   }
+  await drainBackfill(processingToken);
   const headers = {
     ...ownerHeaders,
     Origin: origin,

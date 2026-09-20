@@ -16,7 +16,7 @@ const MAX_JEV_TEXT = 24_000;
 const AUTO_MATCH_PROBABILITY = 0.9;
 const AUTO_MATCH_CONFIDENCE = 0.75;
 const JEV_ELIGIBILITY_VERSION = 2;
-const ASSOCIATION_COMPLETE = JSON.stringify({ version: 2, complete: true });
+const JEV_PIPELINE_VERSION = 3;
 
 export const pageRoles = [
   "receipt",
@@ -732,18 +732,33 @@ async function classifyDocument(
     cash_withdrawal: "An ATM cash-withdrawal receipt or cash-dispenser record.",
     misc: "Anything else, including blank or unreadable material.",
   };
-  const roleQuestions: Parameters<typeof callJev>[2] = {
+  const questions: Parameters<typeof callJev>[2] = {
     document_role: {
       type: "choice",
       instructions: "Classify this document.",
       criteria: roleCriteria,
     },
   };
+  const receiptPresent = heads.some((head) => head.role === "receipt");
+  if (receiptPresent)
+    questions.purchase_category = {
+      type: "choice",
+      instructions: "Classify this receipt using the category definitions.",
+      criteria: categoryChoices.criteria,
+    };
   const roleInput = { ocr_text: ocr.text };
   const roleSaved = await assess(
     env,
-    "document-role",
-    { state: roleInput, pins: ocr.pins, criteria: roleCriteria },
+    "document-classification",
+    {
+      state: roleInput,
+      pins: ocr.pins,
+      role_criteria: roleCriteria,
+      category_criteria: receiptPresent ? categoryChoices.criteria : null,
+      category_ids: receiptPresent
+        ? Object.fromEntries(categoryChoices.ids)
+        : null,
+    },
     { id: document.id, revision: document.revision },
     null,
     async () => {
@@ -765,52 +780,26 @@ async function classifyDocument(
             },
           },
         };
-      return callJev(env, roleInput, roleQuestions, budget);
+      return callJev(env, roleInput, questions, budget);
     },
-    (result) => validateChoice(result.answers.document_role, documentRoles),
+    (result) => {
+      validateChoice(result.answers.document_role, documentRoles);
+      if (receiptPresent)
+        validateChoice(
+          result.answers.purchase_category,
+          Object.keys(categoryChoices.criteria),
+        );
+    },
   );
   const roleResult = roleSaved.result;
   const role = roleResult.answers.document_role;
   validateChoice(role, documentRoles);
   let category: ChoiceAnswer | null = null;
   let categoryAssessmentId: string | null = null;
-  if (!ocr.blank && heads.some((head) => head.role === "receipt")) {
-    const categoryInput = { ocr_text: ocr.text };
-    const categorySaved = await assess(
-      env,
-      "purchase-category",
-      {
-        state: categoryInput,
-        pins: ocr.pins,
-        criteria: categoryChoices.criteria,
-        category_ids: Object.fromEntries(categoryChoices.ids),
-      },
-      { id: document.id, revision: document.revision },
-      null,
-      () =>
-        callJev(
-          env,
-          categoryInput,
-          {
-            purchase_category: {
-              type: "choice",
-              instructions:
-                "Classify this receipt using the category definitions.",
-              criteria: categoryChoices.criteria,
-            },
-          },
-          budget,
-        ),
-      (result) =>
-        validateChoice(
-          result.answers.purchase_category,
-          Object.keys(categoryChoices.criteria),
-        ),
-    );
-    const categoryResult = categorySaved.result;
-    category = categoryResult.answers.purchase_category;
+  if (!ocr.blank && receiptPresent) {
+    category = roleResult.answers.purchase_category;
     validateChoice(category, Object.keys(categoryChoices.criteria));
-    categoryAssessmentId = categorySaved.id;
+    categoryAssessmentId = roleSaved.id;
   }
   const categoryId =
     category && category.choice !== "unresolved"
@@ -859,175 +848,6 @@ async function currentDocument(
   );
 }
 
-async function tryAssociations(
-  request: Request,
-  env: Env,
-  loadCaptures: () => Promise<Capture[]>,
-  captureId: string,
-  job: {
-    id: string;
-    run_token: string;
-    association_progress: string | null;
-  },
-  budget: JevBudget,
-) {
-  const captures = await loadCaptures();
-  const current = await currentDocument(env, captures, captureId);
-  if (!current) return { document: null, deferred: false };
-  const ordered = captures
-    .filter((capture) => capture.is_current)
-    .sort(
-      (a, b) =>
-        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
-    );
-  const orderIndex = new Map(
-    ordered.map((capture, index) => [capture.id, index]),
-  );
-  const pageHeadRows = (
-    await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
-  ).results;
-  const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
-  const allDocuments = records(await storedDocuments(env), captures);
-  const docs = allDocuments.filter(
-    (document) => !document.mergedInto && !document.duplicateOf,
-  );
-  if (job.association_progress) {
-    let saved: {
-      version?: unknown;
-      status?: unknown;
-      current_id?: unknown;
-      current_revision?: unknown;
-      candidate_id?: unknown;
-      candidate_revision?: unknown;
-      relationship?: unknown;
-      scope?: unknown;
-      next?: unknown;
-    };
-    try {
-      saved = JSON.parse(job.association_progress);
-    } catch {
-      throw new HttpError(409, "Saved Jev association state is invalid.");
-    }
-    if (saved.status === "decision" && saved.version === 2) {
-      const relationship = saved.relationship;
-      requireThat(
-        (relationship === "continuation" || relationship === "payment_match") &&
-          typeof saved.current_id === "string" &&
-          typeof saved.candidate_id === "string" &&
-          Number.isSafeInteger(saved.current_revision) &&
-          Number.isSafeInteger(saved.candidate_revision),
-        409,
-        "Saved Jev association state is invalid.",
-      );
-      const originalCurrent = allDocuments.find(
-        (document) => document.id === saved.current_id,
-      );
-      const originalCandidate = allDocuments.find(
-        (document) => document.id === saved.candidate_id,
-      );
-      if (
-        originalCurrent?.mergedInto === originalCandidate?.id ||
-        originalCandidate?.mergedInto === originalCurrent?.id
-      )
-        return { document: current, deferred: false };
-      requireThat(
-        originalCurrent &&
-          originalCandidate &&
-          !originalCurrent.mergedInto &&
-          !originalCurrent.duplicateOf &&
-          !originalCandidate.mergedInto &&
-          !originalCandidate.duplicateOf &&
-          originalCurrent.revision === saved.current_revision &&
-          originalCandidate.revision === saved.candidate_revision,
-        409,
-        "The documents changed before the saved Jev association could be applied.",
-      );
-      if (
-        !(await documentsAreUnlocked(env, [originalCurrent, originalCandidate]))
-      )
-        return { document: current, deferred: true };
-      const merged = await mergeDocuments(
-        request,
-        env,
-        loadCaptures,
-        originalCurrent,
-        originalCandidate,
-        relationship,
-        roles,
-        allDocuments,
-      );
-      return { document: merged ?? current, deferred: false };
-    }
-    // Version 1 wrote its cursor after completing a step, or with next=0
-    // when there were no steps. Retire that old broad-search cursor without
-    // replaying its predecessor decision against a possibly expanded group.
-    if (
-      typeof saved.scope === "string" &&
-      Number.isInteger(saved.next) &&
-      Number(saved.next) >= 0
-    )
-      return { document: current, deferred: false };
-    requireThat(false, 409, "Saved Jev association state is invalid.");
-  }
-  const currentEvidence = await documentEvidence(env, current);
-  if (
-    !currentEvidence ||
-    !currentEvidence.heads.some(
-      (head) => head.role === "receipt" || head.role === "payment_evidence",
-    )
-  )
-    return { document: current, deferred: false };
-  const firstIndex = Math.min(
-    ...current.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
-  );
-  const previousCapture = [...ordered.slice(0, firstIndex)]
-    .reverse()
-    .find(
-      (capture) =>
-        !current!.pages.some((page) => page.captureId === capture.id),
-    );
-  const previous = previousCapture
-    ? docs.find((document) =>
-        document.pages.some((page) => page.captureId === previousCapture.id),
-      )
-    : null;
-  if (!previous || previous.id === current.id)
-    return { document: current, deferred: false };
-  const decision = await compareDocuments(env, current, previous, budget);
-  if (decision && shouldAutoMerge(decision.answer)) {
-    if (!(await documentsAreUnlocked(env, [current, previous])))
-      return { document: current, deferred: true };
-    const progress = JSON.stringify({
-      version: 2,
-      status: "decision",
-      current_id: current.id,
-      current_revision: current.revision,
-      candidate_id: previous.id,
-      candidate_revision: previous.revision,
-      relationship: decision.answer.choice,
-    });
-    const saved = await env.DB.prepare(
-      "UPDATE jev_jobs SET association_progress=? WHERE id=? AND status='running' AND run_token=? RETURNING id",
-    )
-      .bind(progress, job.id, job.run_token)
-      .first<{ id: string }>();
-    requireThat(saved, 409, "Jev job ownership changed.");
-    job.association_progress = progress;
-    const merged = await mergeDocuments(
-      request,
-      env,
-      loadCaptures,
-      current,
-      previous,
-      decision.answer.choice as "continuation" | "payment_match",
-      roles,
-      allDocuments,
-    );
-    if (merged) return { document: merged, deferred: false };
-  }
-  return { document: current, deferred: false };
-}
-
 export async function queueJevJob(
   env: Env,
   captureId: string,
@@ -1044,15 +864,12 @@ export async function queueJevJob(
 }
 
 async function processJob(
-  request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
   job: {
     id: string;
     capture_id: string;
     ocr_sha256: string;
-    run_token: string;
-    association_progress: string | null;
   },
 ) {
   const captures = await loadCaptures();
@@ -1083,55 +900,16 @@ async function processJob(
   if (!page) return { eligible: false, ineligible_reason: "page_missing" };
   if (!ocrTextArtifactMatchesPage(value, page))
     return { eligible: false, ineligible_reason: "ocr_region_mismatch" };
-  const budget: JevBudget = { remaining: 3 };
-  try {
-    await classifyPage(env, capture, job.ocr_sha256, value, budget);
-    let document: ReceiptDocument | null;
-    if (job.association_progress === ASSOCIATION_COMPLETE) {
-      document =
-        (await currentDocument(env, await loadCaptures(), capture.id)) ?? null;
-    } else {
-      const association = await tryAssociations(
-        request,
-        env,
-        loadCaptures,
-        capture.id,
-        job,
-        budget,
-      );
-      if (association.deferred) return { eligible: true, deferred: true };
-      document = association.document;
-      const saved = await env.DB.prepare(
-        "UPDATE jev_jobs SET association_progress=? WHERE id=? AND status='running' AND run_token=? RETURNING id",
-      )
-        .bind(ASSOCIATION_COMPLETE, job.id, job.run_token)
-        .first<{ id: string }>();
-      requireThat(saved, 409, "Jev job ownership changed.");
-      job.association_progress = ASSOCIATION_COMPLETE;
-    }
-    if (!document)
-      return {
-        eligible: false,
-        ineligible_reason: "document_missing_after_association",
-      };
-    const classification = await classifyDocument(env, document, budget);
-    return {
-      eligible: true,
-      document: classification,
-      awaiting_document: classification === null,
-    };
-  } catch (error) {
-    if (error instanceof JevCheckpoint)
-      return { eligible: true, deferred: true };
-    throw error;
-  }
+  await classifyPage(env, capture, job.ocr_sha256, value, { remaining: 1 });
+  return { eligible: true };
 }
 
 export async function runJevJob(
-  request: Request,
+  _request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
   id: string,
+  pipelineOwned = false,
 ) {
   type Job = {
     id: string;
@@ -1140,18 +918,17 @@ export async function runJevJob(
     status: string;
     attempts: number;
     run_token: string;
-    association_progress: string | null;
   };
   const runToken = crypto.randomUUID();
   const now = new Date().toISOString();
   const job = await env.DB.prepare(
-    "UPDATE jev_jobs SET status='running',attempts=attempts+1,eligibility_version=?,ineligible_reason=NULL,run_token=?,last_error=NULL,updated_at=? WHERE id=? AND (status='pending' OR (status='failed' AND attempts<3)) RETURNING id,capture_id,ocr_sha256,status,attempts,run_token,association_progress",
+    `UPDATE jev_jobs SET status='running',attempts=attempts+1,eligibility_version=?,ineligible_reason=NULL,run_token=?,last_error=NULL,updated_at=? WHERE id=? AND (status='pending' OR (status='failed' AND attempts<3))${pipelineOwned ? "" : " AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete')"} RETURNING id,capture_id,ocr_sha256,status,attempts,run_token`,
   )
     .bind(JEV_ELIGIBILITY_VERSION, runToken, now, id)
     .first<Job>();
   if (!job) {
     const current = await env.DB.prepare(
-      "SELECT id,capture_id,ocr_sha256,status,attempts,run_token,association_progress FROM jev_jobs WHERE id=?",
+      "SELECT id,capture_id,ocr_sha256,status,attempts,run_token FROM jev_jobs WHERE id=?",
     )
       .bind(id)
       .first<Job>();
@@ -1159,28 +936,8 @@ export async function runJevJob(
     return { id, status: current.status };
   }
   try {
-    const result = await processJob(request, env, loadCaptures, job);
-    if (result.deferred) {
-      const saved = await env.DB.prepare(
-        "UPDATE jev_jobs SET status='pending',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
-      )
-        .bind(new Date().toISOString(), id, runToken)
-        .first<{ status: string }>();
-      if (!saved) {
-        const current = await env.DB.prepare(
-          "SELECT status FROM jev_jobs WHERE id=?",
-        )
-          .bind(id)
-          .first<{ status: string }>();
-        return {
-          id,
-          status: current?.status ?? "failed",
-          superseded: true,
-        };
-      }
-      return { id, status: "pending", ...result };
-    }
-    const status = result.eligible ? "complete" : "ineligible";
+    const result = await processJob(env, loadCaptures, job);
+    const status = result.eligible ? "classified" : "ineligible";
     const saved = await env.DB.prepare(
       "UPDATE jev_jobs SET status=?,ineligible_reason=?,association_progress=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
     )
@@ -1225,6 +982,194 @@ export async function runJevJob(
       return { id, status: current?.status ?? "failed", superseded: true };
     }
     throw error;
+  }
+}
+
+type JevPipelinePhase = "pages" | "group" | "dates" | "documents" | "complete";
+
+type JevPipelineRun = {
+  id: string;
+  version: number;
+  phase: JevPipelinePhase;
+  snapshot_created_at: string;
+  snapshot_capture_id: string;
+  cursor: string | null;
+  step_token: string | null;
+  step_started_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const captureOrder = (capture: Pick<Capture, "created_at" | "id">) =>
+  `${capture.created_at}\u0000${capture.id}`;
+
+function withinPipelineSnapshot(capture: Capture, run: JevPipelineRun) {
+  return (
+    captureOrder(capture) <=
+    `${run.snapshot_created_at}\u0000${run.snapshot_capture_id}`
+  );
+}
+
+async function activePipelineRun(env: Env) {
+  return env.DB.prepare(
+    "SELECT * FROM jev_pipeline_runs WHERE phase!='complete' ORDER BY created_at DESC,id DESC LIMIT 1",
+  ).first<JevPipelineRun>();
+}
+
+async function latestPipelineRun(env: Env) {
+  return env.DB.prepare(
+    "SELECT * FROM jev_pipeline_runs ORDER BY created_at DESC,id DESC LIMIT 1",
+  ).first<JevPipelineRun>();
+}
+
+async function pipelineNeedsRun(
+  env: Env,
+  current: Capture[],
+  latest: JevPipelineRun | null,
+) {
+  if (!latest) return current.length > 0;
+  if (latest.version !== JEV_PIPELINE_VERSION) return current.length > 0;
+  const currentIds = new Set(current.map((capture) => capture.id));
+  const unfinished = (
+    await env.DB.prepare(
+      "SELECT capture_id FROM jev_jobs WHERE status IN ('pending','running','failed','classified')",
+    ).all<{ capture_id: string }>()
+  ).results.some((job) => currentIds.has(job.capture_id));
+  if (unfinished) return true;
+  const boundary = current.at(-1);
+  if (!boundary) return false;
+  const probe: JevPipelineRun = {
+    ...latest,
+    snapshot_created_at: boundary.created_at,
+    snapshot_capture_id: boundary.id,
+  };
+  return (
+    (await unqueuedArtifacts(env, current, probe)).length > 0 ||
+    (await legacyPageCandidates(env, current, probe)).length > 0
+  );
+}
+
+async function startPipelineRun(env: Env, current: Capture[]) {
+  const boundary = current.at(-1);
+  if (!boundary) return null;
+  const now = new Date().toISOString();
+  const run: JevPipelineRun = {
+    id: crypto.randomUUID(),
+    version: JEV_PIPELINE_VERSION,
+    phase: "pages",
+    snapshot_created_at: boundary.created_at,
+    snapshot_capture_id: boundary.id,
+    cursor: null,
+    step_token: null,
+    step_started_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+  const inserted = await env.DB.prepare(
+    "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,cursor,step_token,step_started_at,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete') RETURNING *",
+  )
+    .bind(
+      run.id,
+      run.version,
+      run.phase,
+      run.snapshot_created_at,
+      run.snapshot_capture_id,
+      null,
+      null,
+      null,
+      now,
+      now,
+    )
+    .first<JevPipelineRun>();
+  return inserted ?? activePipelineRun(env);
+}
+
+async function claimPipelineStep(env: Env, run: JevPipelineRun) {
+  const token = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const claimed = await env.DB.prepare(
+    "UPDATE jev_pipeline_runs SET step_token=?,step_started_at=?,updated_at=? WHERE id=? AND phase!='complete' AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
+  )
+    .bind(token, now, now, run.id)
+    .first<JevPipelineRun>();
+  return claimed ? { run: claimed, token } : null;
+}
+
+async function savePipelineStep(
+  env: Env,
+  run: JevPipelineRun,
+  token: string,
+  phase: JevPipelinePhase,
+  cursor: string | null,
+) {
+  const saved = await env.DB.prepare(
+    "UPDATE jev_pipeline_runs SET phase=?,cursor=?,step_token=NULL,step_started_at=NULL,updated_at=? WHERE id=? AND step_token=? RETURNING id",
+  )
+    .bind(phase, cursor, new Date().toISOString(), run.id, token)
+    .first<{ id: string }>();
+  requireThat(saved, 409, "Jev pipeline ownership changed.");
+}
+
+async function releasePipelineStep(
+  env: Env,
+  run: JevPipelineRun,
+  token: string,
+) {
+  await env.DB.prepare(
+    "UPDATE jev_pipeline_runs SET step_token=NULL,step_started_at=NULL,updated_at=? WHERE id=? AND step_token=?",
+  )
+    .bind(new Date().toISOString(), run.id, token)
+    .run();
+}
+
+async function pipelineDocuments(
+  env: Env,
+  captures: Capture[],
+  run: JevPipelineRun,
+) {
+  const allowed = new Set(
+    captures
+      .filter(
+        (capture) => capture.is_current && withinPipelineSnapshot(capture, run),
+      )
+      .map((capture) => capture.id),
+  );
+  const order = new Map(
+    captures
+      .filter((capture) => allowed.has(capture.id))
+      .sort(
+        (a, b) =>
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      )
+      .map((capture, index) => [capture.id, index]),
+  );
+  const all = records(await storedDocuments(env), captures);
+  const active = all
+    .filter(
+      (document) =>
+        !document.mergedInto &&
+        !document.duplicateOf &&
+        document.pages.length > 0 &&
+        document.pages.every((page) => allowed.has(page.captureId)),
+    )
+    .sort(
+      (a, b) =>
+        Math.min(
+          ...a.pages.map((page) => order.get(page.captureId) ?? Infinity),
+        ) -
+        Math.min(
+          ...b.pages.map((page) => order.get(page.captureId) ?? Infinity),
+        ),
+    );
+  return { all, active };
+}
+
+function parsePipelineCursor<T>(run: JevPipelineRun): T | null {
+  if (!run.cursor) return null;
+  try {
+    return JSON.parse(run.cursor) as T;
+  } catch {
+    throw new HttpError(503, "Stored Jev pipeline cursor is invalid.");
   }
 }
 
@@ -1333,7 +1278,15 @@ async function documentHeadReady(
 export async function jevReadyDocuments(
   env: Env,
   documents: ReceiptDocument[],
+  currentCaptureIds: Set<string>,
 ) {
+  const pipeline = await activePipelineRun(env);
+  const unfinished = (
+    await env.DB.prepare(
+      "SELECT capture_id FROM jev_jobs WHERE status IN ('pending','running','failed','classified')",
+    ).all<{ capture_id: string }>()
+  ).results.some((job) => currentCaptureIds.has(job.capture_id));
+  if (pipeline || unfinished) return new Map<string, JevDocumentHead>();
   const heads = await jevDocumentHeads(env);
   const artifacts = (
     await env.DB.prepare(
@@ -1393,24 +1346,322 @@ export async function jevSummary(env: Env, document: ReceiptDocument) {
   };
 }
 
+async function unqueuedArtifacts(
+  env: Env,
+  current: Capture[],
+  run: JevPipelineRun,
+) {
+  const captureIds = new Set(
+    current
+      .filter((capture) => withinPipelineSnapshot(capture, run))
+      .map((capture) => capture.id),
+  );
+  if (!captureIds.size) return [];
+  const artifacts = (
+    await env.DB.prepare(
+      "SELECT artifact.capture_id,artifact.sha256 FROM artifacts artifact WHERE artifact.kind='ocr' AND NOT EXISTS (SELECT 1 FROM artifacts newer WHERE newer.capture_id=artifact.capture_id AND newer.kind='ocr' AND (newer.created_at>artifact.created_at OR (newer.created_at=artifact.created_at AND newer.key>artifact.key))) AND NOT EXISTS (SELECT 1 FROM jev_jobs job WHERE job.capture_id=artifact.capture_id AND job.ocr_sha256=artifact.sha256) ORDER BY artifact.created_at,artifact.key",
+    ).all<{ capture_id: string; sha256: string }>()
+  ).results;
+  return artifacts.filter((artifact) => captureIds.has(artifact.capture_id));
+}
+
+async function legacyPageCandidates(
+  env: Env,
+  current: Capture[],
+  run: JevPipelineRun,
+) {
+  const allowed = new Set(
+    current
+      .filter((capture) => withinPipelineSnapshot(capture, run))
+      .map((capture) => capture.id),
+  );
+  const rows = (
+    await env.DB.prepare(
+      "SELECT candidate.id,candidate.capture_id FROM jev_jobs candidate JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256 JOIN captures capture ON capture.id=candidate.capture_id WHERE candidate.status='ineligible' AND candidate.eligibility_version<? AND NOT EXISTS (SELECT 1 FROM jev_jobs completed WHERE completed.capture_id=candidate.capture_id AND completed.status IN ('classified','complete')) AND NOT EXISTS (SELECT 1 FROM jev_jobs sibling JOIN artifacts sibling_artifact ON sibling_artifact.capture_id=sibling.capture_id AND sibling_artifact.kind='ocr' AND sibling_artifact.sha256=sibling.ocr_sha256 WHERE sibling.capture_id=candidate.capture_id AND sibling.status='ineligible' AND sibling.eligibility_version<? AND (sibling_artifact.created_at>artifact.created_at OR (sibling_artifact.created_at=artifact.created_at AND sibling_artifact.key>artifact.key))) ORDER BY capture.created_at,capture.id",
+    )
+      .bind(JEV_ELIGIBILITY_VERSION, JEV_ELIGIBILITY_VERSION)
+      .all<{ id: string; capture_id: string }>()
+  ).results;
+  return rows.filter((row) => allowed.has(row.capture_id));
+}
+
+async function pagePipelineStep(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+  current: Capture[],
+  run: JevPipelineRun,
+) {
+  const allowed = new Set(
+    current
+      .filter((capture) => withinPipelineSnapshot(capture, run))
+      .map((capture) => capture.id),
+  );
+  await env.DB.prepare(
+    "UPDATE jev_jobs SET status='failed',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,run_token=NULL,last_error='Interrupted Jev run; safe to retry.',updated_at=? WHERE status='running' AND unixepoch(updated_at)<unixepoch()-300",
+  )
+    .bind(new Date().toISOString())
+    .run();
+  await env.DB.prepare(
+    "UPDATE jev_jobs SET status='failed',attempts=2,run_token=NULL,updated_at=? WHERE status='blocked' AND last_error='Interrupted Jev run; safe to retry.'",
+  )
+    .bind(new Date().toISOString())
+    .run();
+  await env.DB.prepare(
+    "UPDATE jev_jobs SET status='blocked',run_token=NULL WHERE status='failed' AND attempts>=3",
+  ).run();
+  const retryable = (
+    await env.DB.prepare(
+      "SELECT id,capture_id FROM jev_jobs WHERE status='pending' OR (status='failed' AND attempts<3) ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,attempts,updated_at,created_at,id",
+    ).all<{ id: string; capture_id: string }>()
+  ).results.find((job) => allowed.has(job.capture_id));
+  const running = (
+    await env.DB.prepare(
+      "SELECT capture_id FROM jev_jobs WHERE status='running'",
+    ).all<{ capture_id: string }>()
+  ).results.some((job) => allowed.has(job.capture_id));
+  if (running) return { remaining: 1, busy: true, result: null };
+  let jobId = retryable?.id ?? null;
+  if (!jobId) {
+    const legacy = (await legacyPageCandidates(env, current, run))[0];
+    if (legacy) {
+      const activated = await env.DB.prepare(
+        "UPDATE jev_jobs SET status='pending',attempts=0,eligibility_version=?,ineligible_reason=NULL,run_token=NULL,last_error=NULL,association_progress=NULL,updated_at=? WHERE id=? AND status='ineligible' AND eligibility_version<? RETURNING id",
+      )
+        .bind(
+          JEV_ELIGIBILITY_VERSION,
+          new Date().toISOString(),
+          legacy.id,
+          JEV_ELIGIBILITY_VERSION,
+        )
+        .first<{ id: string }>();
+      jobId = activated?.id ?? null;
+    }
+  }
+  if (!jobId) {
+    const candidate = (await unqueuedArtifacts(env, current, run))[0];
+    if (candidate)
+      jobId = await queueJevJob(env, candidate.capture_id, candidate.sha256);
+  }
+  if (!jobId) return { remaining: 0, busy: false, result: null };
+  const result = await runJevJob(request, env, loadCaptures, jobId, true);
+  return { remaining: 1, busy: false, result };
+}
+
+async function groupPipelineStep(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+  captures: Capture[],
+  run: JevPipelineRun,
+) {
+  const { all, active } = await pipelineDocuments(env, captures, run);
+  if (!active.length)
+    return { phase: "dates" as const, cursor: null, result: null };
+  const saved = parsePipelineCursor<{ active_id?: unknown }>(run);
+  const activeId =
+    typeof saved?.active_id === "string" ? saved.active_id : active[0].id;
+  const original = all.find((document) => document.id === activeId);
+  const resolvedId = original?.mergedInto ?? activeId;
+  const index = active.findIndex((document) => document.id === resolvedId);
+  if (index < 0)
+    return {
+      phase: "group" as const,
+      cursor: JSON.stringify({ active_id: active[0].id }),
+      result: { status: "cursor-reset" },
+    };
+  const current = active[index];
+  const next = active[index + 1];
+  if (!next) return { phase: "dates" as const, cursor: null, result: null };
+  const currentEvidence = await documentEvidence(env, current);
+  const nextEvidence = await documentEvidence(env, next);
+  const relevant = (evidence: Awaited<ReturnType<typeof documentEvidence>>) =>
+    evidence?.heads.some(
+      (head) => head.role === "receipt" || head.role === "payment_evidence",
+    ) ?? false;
+  if (!relevant(currentEvidence) || !relevant(nextEvidence))
+    return {
+      phase: "group" as const,
+      cursor: JSON.stringify({ active_id: next.id }),
+      result: { status: "boundary" },
+    };
+  const decision = await compareDocuments(env, next, current, { remaining: 1 });
+  if (decision && shouldAutoMerge(decision.answer)) {
+    if (!(await documentsAreUnlocked(env, [current, next])))
+      return {
+        phase: "group" as const,
+        cursor: run.cursor,
+        result: { status: "busy" },
+        busy: true,
+      };
+    const roles = new Map(
+      (
+        await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
+      ).results.map((head) => [head.capture_id, head.role]),
+    );
+    const merged = await mergeDocuments(
+      request,
+      env,
+      loadCaptures,
+      next,
+      current,
+      decision.answer.choice as "continuation" | "payment_match",
+      roles,
+      all,
+    );
+    if (merged)
+      return {
+        phase: "group" as const,
+        cursor: JSON.stringify({ active_id: merged.id }),
+        result: { status: "merged" },
+      };
+  }
+  return {
+    phase: "group" as const,
+    cursor: JSON.stringify({ active_id: next.id }),
+    result: { status: "boundary" },
+  };
+}
+
+async function documentPipelineStep(
+  env: Env,
+  captures: Capture[],
+  run: JevPipelineRun,
+) {
+  const { active } = await pipelineDocuments(env, captures, run);
+  const activeCaptureIds = new Set(
+    active.flatMap((document) => document.pages.map((page) => page.captureId)),
+  );
+  const currentCaptures = new Map(
+    captures
+      .filter((capture) => capture.is_current)
+      .map((capture) => [capture.id, capture]),
+  );
+  const stranded = (
+    await env.DB.prepare(
+      "SELECT capture_id FROM jev_jobs WHERE status='classified' ORDER BY updated_at,created_at,id",
+    ).all<{ capture_id: string }>()
+  ).results.find((job) => {
+    const capture = currentCaptures.get(job.capture_id);
+    return (
+      !capture ||
+      (withinPipelineSnapshot(capture, run) &&
+        !activeCaptureIds.has(job.capture_id))
+    );
+  });
+  if (stranded) {
+    const reason = currentCaptures.has(stranded.capture_id)
+      ? "document_not_active"
+      : "capture_not_current";
+    await env.DB.prepare(
+      "UPDATE jev_jobs SET status='ineligible',ineligible_reason=?,updated_at=? WHERE capture_id=? AND status='classified'",
+    )
+      .bind(reason, new Date().toISOString(), stranded.capture_id)
+      .run();
+    return {
+      remaining: 1,
+      cursor: run.cursor,
+      result: { status: "ineligible", reason },
+    };
+  }
+  const saved = parsePipelineCursor<{ after_id?: unknown }>(run);
+  const afterId = typeof saved?.after_id === "string" ? saved.after_id : null;
+  const previousIndex = afterId
+    ? active.findIndex((document) => document.id === afterId)
+    : -1;
+  const document =
+    active[(afterId && previousIndex < 0 ? -1 : previousIndex) + 1];
+  if (!document) return { remaining: 0, cursor: null, result: null };
+  const cursor = JSON.stringify({ after_id: document.id });
+  const artifacts = (
+    await env.DB.prepare(
+      "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
+    ).all<{ capture_id: string; sha256: string }>()
+  ).results;
+  const evidence = await documentEvidence(env, document);
+  if (!evidence) {
+    for (const page of document.pages)
+      await env.DB.prepare(
+        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status='classified'",
+      )
+        .bind(new Date().toISOString(), page.captureId)
+        .run();
+    return {
+      remaining: 1,
+      cursor,
+      result: {
+        status: "ineligible",
+        document_id: document.id,
+        reason: "document_evidence_incomplete",
+      },
+    };
+  }
+  const head =
+    (await env.DB.prepare(
+      "SELECT * FROM jev_document_heads WHERE document_id=?",
+    )
+      .bind(document.id)
+      .first<JevDocumentHead>()) ?? null;
+  const assessment = head
+    ? await env.DB.prepare("SELECT task FROM jev_assessments WHERE id=?")
+        .bind(head.assessment_id)
+        .first<{ task: string }>()
+    : null;
+  const alreadyCurrent =
+    head?.document_revision === document.revision &&
+    head.page_fingerprint === (await pageFingerprint(document)) &&
+    assessment?.task === "document-classification" &&
+    (await documentHeadReady(env, document, head, evidence.heads, artifacts));
+  if (!alreadyCurrent) {
+    const classification = await classifyDocument(env, document, {
+      remaining: 1,
+    });
+    requireThat(
+      classification,
+      503,
+      "Final Jev document evidence is unavailable.",
+    );
+  }
+  for (const page of document.pages)
+    await env.DB.prepare(
+      "UPDATE jev_jobs SET status='complete',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status='classified'",
+    )
+      .bind(new Date().toISOString(), page.captureId)
+      .run();
+  return {
+    remaining: 1,
+    cursor,
+    result: {
+      status: alreadyCurrent ? "verified" : "classified",
+      document_id: document.id,
+    },
+  };
+}
+
 async function reconcileMatchingDates(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
+  after: string | null,
+  pipelineRun: JevPipelineRun,
 ) {
-  const input = (await request.json().catch(() => ({}))) as { after?: unknown };
-  requireThat(
-    input.after === undefined ||
-      input.after === null ||
-      (typeof input.after === "string" && input.after.length <= 120),
-    400,
-    "The date-reconciliation cursor is invalid.",
-  );
-  const after = typeof input.after === "string" ? input.after : null;
   const captures = await loadCaptures();
+  const capturesById = new Map(
+    captures.map((capture) => [capture.id, capture]),
+  );
   const allDocuments = records(await storedDocuments(env), captures);
   const documents = allDocuments.filter(
-    (document) => !document.mergedInto && !document.duplicateOf,
+    (document) =>
+      !document.mergedInto &&
+      !document.duplicateOf &&
+      document.pages.every((page) => {
+        const capture = capturesById.get(page.captureId);
+        return (
+          !!capture &&
+          capture.is_current &&
+          withinPipelineSnapshot(capture, pipelineRun)
+        );
+      }),
   );
   const activePages = new Map(
     documents.flatMap((document) =>
@@ -1454,43 +1705,6 @@ async function reconcileMatchingDates(
     pageHeadRows.map((row) => [row.capture_id, row]),
   );
   const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
-  const documentHeads = new Map(
-    (
-      await env.DB.prepare(
-        "SELECT * FROM jev_document_heads",
-      ).all<JevDocumentHead>()
-    ).results.map((head) => [head.document_id, head]),
-  );
-  for (const document of documents) {
-    const heads = document.pages
-      .map((page) => pageHeadsByCapture.get(page.captureId))
-      .filter((head): head is PageHead => !!head);
-    if (
-      heads.length !== document.pages.length ||
-      !heads.some((head) => head.role === "receipt") ||
-      !heads.some((head) => head.role === "payment_evidence")
-    )
-      continue;
-    const head = documentHeads.get(document.id);
-    if (
-      head?.document_revision === document.revision &&
-      head.page_fingerprint === (await pageFingerprint(document))
-    )
-      continue;
-    const classification = await classifyDocument(env, document, {
-      remaining: 2,
-    });
-    requireThat(
-      classification,
-      503,
-      "Merged document evidence is unavailable for Jev reclassification.",
-    );
-    return {
-      result: { status: "reclassified", document_id: document.id },
-      remaining: 1,
-      next: null,
-    };
-  }
   type DatedDocument = { document: ReceiptDocument; dates: Set<string> };
   const purchases: DatedDocument[] = [];
   const payments: DatedDocument[] = [];
@@ -1591,14 +1805,6 @@ async function reconcileMatchingDates(
             cursor = key;
             continue;
           }
-          const classification = await classifyDocument(env, merged, {
-            remaining: 2,
-          });
-          requireThat(
-            classification,
-            503,
-            "Merged document evidence is unavailable for Jev reclassification.",
-          );
           return {
             result: { status: "merged", document_id: merged.id },
             remaining: 1,
@@ -1634,10 +1840,20 @@ export async function jevRoute(
     const ineligibleReasons = await env.DB.prepare(
       "SELECT COALESCE(ineligible_reason,'unspecified') AS reason,COUNT(*) AS count FROM jev_jobs WHERE status='ineligible' GROUP BY COALESCE(ineligible_reason,'unspecified') ORDER BY reason",
     ).all<{ reason: string; count: number }>();
+    const pipeline = await latestPipelineRun(env);
     return json({
       configured: Boolean(env.TYPESAFE_API_KEY),
       jobs: counts.results,
       ineligible_reasons: ineligibleReasons.results,
+      pipeline: pipeline
+        ? {
+            version: pipeline.version,
+            phase: pipeline.phase,
+            snapshot_created_at: pipeline.snapshot_created_at,
+            busy: pipeline.step_token !== null,
+            updated_at: pipeline.updated_at,
+          }
+        : null,
     });
   }
   if (url.pathname === "/api/jev/documents" && request.method === "GET") {
@@ -1715,12 +1931,10 @@ export async function jevRoute(
       next: candidates.length > limit ? documents.at(-1)!.id : null,
     });
   }
-  if (
-    url.pathname === "/api/jev/reconcile-matching-dates" &&
-    request.method === "POST"
-  )
-    return json(await reconcileMatchingDates(request, env, loadCaptures));
   if (url.pathname === "/api/jev/backfill" && request.method === "POST") {
+    const blocked = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM jev_jobs WHERE status='blocked'",
+    ).first<{ count: number }>();
     const captures = await loadCaptures();
     const current = captures
       .filter((capture) => capture.is_current)
@@ -1728,138 +1942,158 @@ export async function jevRoute(
         (a, b) =>
           a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
       );
-    await env.DB.prepare(
-      "UPDATE jev_jobs SET status='failed',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,run_token=NULL,last_error='Interrupted Jev run; safe to retry.',updated_at=? WHERE status='running' AND unixepoch(updated_at)<unixepoch()-300",
-    )
-      .bind(new Date().toISOString())
-      .run();
-    await env.DB.prepare(
-      "UPDATE jev_jobs SET status='failed',attempts=2,run_token=NULL,updated_at=? WHERE status='blocked' AND last_error='Interrupted Jev run; safe to retry.'",
-    )
-      .bind(new Date().toISOString())
-      .run();
-    await env.DB.prepare(
-      "UPDATE jev_jobs SET status='blocked',run_token=NULL WHERE status='failed' AND attempts>=3",
-    ).run();
-    let job = await env.DB.prepare(
-      "SELECT id FROM jev_jobs WHERE status='pending' OR (status='failed' AND attempts<3) ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,attempts,updated_at,created_at,id LIMIT 1",
-    ).first<{ id: string }>();
-    const running = await env.DB.prepare(
-      "SELECT 1 AS present FROM jev_jobs WHERE status='running' LIMIT 1",
-    ).first<{ present: number }>();
-    if (!job && !running) {
-      const legacy = await env.DB.prepare(
-        "SELECT candidate.id FROM jev_jobs candidate JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256 JOIN captures capture ON capture.id=candidate.capture_id WHERE candidate.status='ineligible' AND candidate.eligibility_version<? AND NOT EXISTS (SELECT 1 FROM jev_jobs completed WHERE completed.capture_id=candidate.capture_id AND completed.status='complete') AND NOT EXISTS (SELECT 1 FROM jev_jobs sibling JOIN artifacts sibling_artifact ON sibling_artifact.capture_id=sibling.capture_id AND sibling_artifact.kind='ocr' AND sibling_artifact.sha256=sibling.ocr_sha256 WHERE sibling.capture_id=candidate.capture_id AND sibling.status='ineligible' AND sibling.eligibility_version<? AND (sibling_artifact.created_at>artifact.created_at OR (sibling_artifact.created_at=artifact.created_at AND sibling_artifact.key>artifact.key))) ORDER BY capture.created_at,capture.id LIMIT 1",
-      )
-        .bind(JEV_ELIGIBILITY_VERSION, JEV_ELIGIBILITY_VERSION)
-        .first<{ id: string }>();
-      if (legacy) {
-        const activated = await env.DB.prepare(
-          "UPDATE jev_jobs SET status='pending',attempts=0,eligibility_version=?,ineligible_reason=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='ineligible' AND eligibility_version<? RETURNING id",
-        )
-          .bind(
-            JEV_ELIGIBILITY_VERSION,
-            new Date().toISOString(),
-            legacy.id,
-            JEV_ELIGIBILITY_VERSION,
-          )
-          .first<{ id: string }>();
-        if (activated) job = activated;
+    let run = await activePipelineRun(env);
+    if (!run) {
+      const latest = await latestPipelineRun(env);
+      const boundary = current.at(-1);
+      if (boundary) {
+        const probe: JevPipelineRun = {
+          ...(latest ?? {
+            id: "probe",
+            version: JEV_PIPELINE_VERSION,
+            phase: "pages" as const,
+            cursor: null,
+            step_token: null,
+            step_started_at: null,
+            created_at: boundary.created_at,
+            updated_at: boundary.created_at,
+          }),
+          snapshot_created_at: boundary.created_at,
+          snapshot_capture_id: boundary.id,
+        };
+        const candidate = (await unqueuedArtifacts(env, current, probe))[0];
+        if (candidate)
+          await queueJevJob(env, candidate.capture_id, candidate.sha256);
       }
+      if (!(await pipelineNeedsRun(env, current, latest)))
+        return json({
+          result: null,
+          phase: "complete",
+          remaining: 0,
+          busy: false,
+          blocked: blocked?.count ?? 0,
+        });
+      run = await startPipelineRun(env, current);
+      if (!run)
+        return json({
+          result: null,
+          phase: "complete",
+          remaining: 0,
+          busy: false,
+          blocked: blocked?.count ?? 0,
+        });
     }
-    const backfillCandidates = async () => {
-      const artifacts = (
-        await env.DB.prepare(
-          "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr' ORDER BY created_at DESC,key DESC",
-        ).all<{ capture_id: string; sha256: string }>()
-      ).results;
-      const jobs = (
-        await env.DB.prepare(
-          "SELECT capture_id,ocr_sha256,status FROM jev_jobs",
-        ).all<{
-          capture_id: string;
-          ocr_sha256: string;
-          status: string;
-        }>()
-      ).results;
-      const jobByArtifact = new Map(
-        jobs.map((item) => [
-          `${item.capture_id}:${item.ocr_sha256}`,
-          item.status,
-        ]),
-      );
-      const artifactsByCapture = new Map<
-        string,
-        { capture_id: string; sha256: string }[]
-      >();
-      for (const artifact of artifacts) {
-        const rows = artifactsByCapture.get(artifact.capture_id) ?? [];
-        rows.push(artifact);
-        artifactsByCapture.set(artifact.capture_id, rows);
+    const claim = await claimPipelineStep(env, run);
+    if (!claim)
+      return json({
+        result: null,
+        phase: run.phase,
+        remaining: 1,
+        busy: true,
+        blocked: blocked?.count ?? 0,
+      });
+    run = claim.run;
+    const token = claim.token;
+    let saved = false;
+    try {
+      if (run.phase === "pages") {
+        const step = await pagePipelineStep(
+          request,
+          env,
+          loadCaptures,
+          current,
+          run,
+        );
+        const phase = step.remaining === 0 ? "group" : "pages";
+        await savePipelineStep(env, run, token, phase, null);
+        saved = true;
+        return json({
+          result: step.result,
+          phase,
+          remaining: 1,
+          busy: step.busy,
+          blocked: blocked?.count ?? 0,
+        });
       }
-      const candidates: { capture_id: string; sha256: string }[] = [];
-      for (const capture of current) {
-        for (const artifact of artifactsByCapture.get(capture.id) ?? []) {
-          const status = jobByArtifact.get(
-            `${artifact.capture_id}:${artifact.sha256}`,
-          );
-          if (!status) {
-            candidates.push(artifact);
-            break;
-          }
-          if (["complete", "pending", "running", "failed"].includes(status))
-            break;
+      if (run.phase === "group") {
+        const step = await groupPipelineStep(
+          request,
+          env,
+          loadCaptures,
+          captures,
+          run,
+        );
+        await savePipelineStep(env, run, token, step.phase, step.cursor);
+        saved = true;
+        return json({
+          result: step.result,
+          phase: step.phase,
+          remaining: 1,
+          busy: step.busy ?? false,
+          blocked: blocked?.count ?? 0,
+        });
+      }
+      if (run.phase === "dates") {
+        const cursor = parsePipelineCursor<{ after?: unknown }>(run);
+        const after = typeof cursor?.after === "string" ? cursor.after : null;
+        const step = await reconcileMatchingDates(
+          request,
+          env,
+          loadCaptures,
+          after,
+          run,
+        );
+        const phase = step.remaining === 0 ? "documents" : "dates";
+        const next =
+          phase === "dates" ? JSON.stringify({ after: step.next }) : null;
+        await savePipelineStep(env, run, token, phase, next);
+        saved = true;
+        return json({
+          ...step,
+          phase,
+          remaining: 1,
+          blocked: blocked?.count ?? 0,
+        });
+      }
+      if (run.phase === "documents") {
+        const step = await documentPipelineStep(env, captures, run);
+        const phase = step.remaining === 0 ? "complete" : "documents";
+        await savePipelineStep(env, run, token, phase, step.cursor);
+        saved = true;
+        if (
+          phase === "complete" &&
+          (await pipelineNeedsRun(env, current, run))
+        ) {
+          const next = await startPipelineRun(env, current);
+          if (next)
+            return json({
+              result: step.result,
+              phase: next.phase,
+              remaining: 1,
+              busy: false,
+              blocked: blocked?.count ?? 0,
+            });
         }
+        return json({
+          result: step.result,
+          phase,
+          remaining: step.remaining,
+          busy: false,
+          blocked: blocked?.count ?? 0,
+        });
       }
-      return candidates;
-    };
-    if (!job && !running) {
-      const candidate = (await backfillCandidates())[0];
-      if (candidate) {
-        job = {
-          id: await queueJevJob(env, candidate.capture_id, candidate.sha256),
-        };
-      }
+      await savePipelineStep(env, run, token, "complete", null);
+      saved = true;
+      return json({
+        result: null,
+        phase: "complete",
+        remaining: 0,
+        busy: false,
+        blocked: blocked?.count ?? 0,
+      });
+    } finally {
+      if (!saved) await releasePipelineStep(env, run, token);
     }
-    let result: Record<string, unknown> | null = null;
-    if (job)
-      try {
-        result = await runJevJob(request, env, loadCaptures, job.id);
-      } catch (error) {
-        const saved = await env.DB.prepare(
-          "SELECT status FROM jev_jobs WHERE id=?",
-        )
-          .bind(job.id)
-          .first<{ status: string }>();
-        result = {
-          id: job.id,
-          status: saved?.status ?? "failed",
-          error:
-            error instanceof HttpError
-              ? error.message
-              : "Jev processing failed.",
-        };
-      }
-    const remainingJobs = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM jev_jobs WHERE status IN ('pending','running','failed')",
-    ).first<{ count: number }>();
-    const candidatesRemaining = await backfillCandidates();
-    const legacyCandidatesRemaining = await env.DB.prepare(
-      "SELECT COUNT(DISTINCT candidate.capture_id) AS count FROM jev_jobs candidate JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256 WHERE candidate.status='ineligible' AND candidate.eligibility_version<? AND NOT EXISTS (SELECT 1 FROM jev_jobs completed WHERE completed.capture_id=candidate.capture_id AND completed.status='complete')",
-    )
-      .bind(JEV_ELIGIBILITY_VERSION)
-      .first<{ count: number }>();
-    const blocked = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM jev_jobs WHERE status='blocked'",
-    ).first<{ count: number }>();
-    return json({
-      result,
-      remaining:
-        (remainingJobs?.count ?? 0) +
-        candidatesRemaining.length +
-        (legacyCandidatesRemaining?.count ?? 0),
-      blocked: blocked?.count ?? 0,
-    });
   }
   throw new HttpError(404, "Jev route not found.");
 }

@@ -606,10 +606,10 @@ export async function processingRoute(
     );
     const captures = await load(),
       docs = await records(env, captures);
-    const jevReady = await jevReadyDocuments(env, docs);
     const current = new Set(
       captures.filter((c) => c.is_current).map((c) => c.id),
     );
+    const jevReady = await jevReadyDocuments(env, docs, current);
     const time = new Map(captures.map((c) => [c.id, c.created_at]));
     const candidates = docs
       .filter(
@@ -666,7 +666,7 @@ export async function processingRoute(
     // Exactly one document lease across both stages. The head predicate rejects stale selection.
     const result = await env.DB.prepare(
       `INSERT INTO processing_lock(id,token,stage,document_id,revision,expires,draft)
-      SELECT 1,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=?
+      SELECT 1,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=? AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete')
       ON CONFLICT(id) DO UPDATE SET token=excluded.token,stage=excluded.stage,document_id=excluded.document_id,revision=excluded.revision,expires=excluded.expires,draft=NULL WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
     )
       .bind(token, input.stage, d.id, d.revision, LEASE_MS, d.id, d.revision)
