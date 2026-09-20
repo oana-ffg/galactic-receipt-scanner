@@ -418,6 +418,106 @@ class BatchGuardTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self.guard()
 
+    def test_lease_client_setup_failure_reports_cause_before_opening_guard(self):
+        stdout = io.StringIO()
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+        ]), patch.object(
+            module,
+            'ProcessingBatchLease',
+            side_effect=module.ClientError('Scanner returned HTTP 403; access denied.'),
+        ), patch.object(module, 'BatchGuard') as guard, patch.object(module.sys, 'stdout', stdout):
+            with self.assertRaises(SystemExit) as error:
+                module.main()
+        self.assertEqual(error.exception.code, 1)
+        guard.assert_not_called()
+        self.assertEqual(json.loads(stdout.getvalue()), {
+            'blocking': True,
+            'batch_started': False,
+            'stage': 'batch-lease-setup',
+            'error': 'Scanner returned HTTP 403; access denied.',
+            'error_type': 'ClientError',
+        })
+
+    def test_missing_lease_setup_file_does_not_leak_its_private_path(self):
+        private_repo = Path(self.tmp.name) / 'SENTINEL-private-checkout'
+        private_base = private_repo / '.local' / 'receipt-worker'
+        private_base.mkdir(parents=True)
+        previous = json.dumps({
+            'batch_id': 'a' * 32,
+            'owner': 'SENTINEL-prior-owner',
+            'phase': 'complete',
+            'completed_count': 1,
+            'active_run_id': None,
+        }).encode()
+        state_path = private_base / 'batch-state.json'
+        state_path.write_bytes(previous)
+        event_path = private_base / ('batch-event-' + 'b' * 32 + '.json')
+        event_path.write_bytes(previous)
+        stdout = io.StringIO()
+        with patch.object(module, '__file__', str(private_repo / 'scripts' / 'receipt_batch.py')), \
+             patch.object(module.sys, 'argv', [
+                 'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+             ]), patch.object(module, 'BatchGuard') as guard, patch.object(module.sys, 'stdout', stdout):
+            with self.assertRaises(SystemExit) as error:
+                module.main()
+        self.assertEqual(error.exception.code, 1)
+        guard.assert_not_called()
+        self.assertEqual(state_path.read_bytes(), previous)
+        self.assertEqual(event_path.read_bytes(), previous)
+        self.assertFalse(module.lock_held(private_base / 'batch.lock'))
+        output = stdout.getvalue()
+        self.assertNotIn('SENTINEL', output)
+        self.assertEqual(json.loads(output), {
+            'blocking': True,
+            'batch_started': False,
+            'stage': 'batch-lease-setup',
+            'error': 'Batch lease setup failed before a new batch started.',
+            'error_type': 'FileNotFoundError',
+        })
+
+    def test_invalid_lease_response_preserves_previous_completed_batch_without_leaking(self):
+        self.base.mkdir()
+        previous = json.dumps({
+            'batch_id': 'a' * 32,
+            'owner': 'prior-owner',
+            'phase': 'complete',
+            'completed_count': 1,
+            'active_run_id': None,
+        }).encode()
+        state_path = self.base / 'batch-state.json'
+        state_path.write_bytes(previous)
+        lease = module.ProcessingBatchLease.__new__(module.ProcessingBatchLease)
+        lease.client = Mock()
+        lease.client.request.return_value = b'SENTINEL invalid private response'
+        lease.batch_id = None
+        lease.owner = None
+        lease.expires = 0
+        lease.error = None
+        lease.stop = threading.Event()
+        lease.thread = None
+        stdout = io.StringIO()
+        with patch.object(module, '__file__', str(Path(self.tmp.name) / 'scripts' / 'receipt_batch.py')), \
+             patch.object(module, 'ProcessingBatchLease', return_value=lease), \
+             patch.object(module.sys, 'argv', [
+                 'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+             ]), patch.object(module.sys, 'stdout', stdout):
+            with self.assertRaises(SystemExit) as error:
+                module.main()
+        self.assertEqual(error.exception.code, 1)
+        self.assertEqual(state_path.read_bytes(), previous)
+        self.assertEqual(list(self.base.glob('batch-event-*.json')), [])
+        self.assertFalse(module.lock_held(self.base / 'batch.lock'))
+        output = stdout.getvalue()
+        self.assertNotIn('SENTINEL', output)
+        self.assertEqual(json.loads(output), {
+            'blocking': True,
+            'batch_started': False,
+            'stage': 'batch-lease-acquire',
+            'error': 'Batch lease acquisition failed before a new batch started.',
+            'error_type': 'JSONDecodeError',
+        })
+
     def test_live_worker_prevents_finish_and_resolution_even_with_ready_journal(self):
         guard = self.guard()
         state = guard.start()

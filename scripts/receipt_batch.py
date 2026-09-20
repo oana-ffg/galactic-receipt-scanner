@@ -15,6 +15,34 @@ from receipt_batch_verify import regular_path, verify_run
 from receipt_worker import InputError, Once, Worker, artifact_directory, replace_journal_file, require, write_new_file
 
 
+EXPECTED_BATCH_LEASE_ERRORS = (ClientError, InputError, OSError, KeyError, TypeError, ValueError)
+BATCH_LEASE_FAILURE_MESSAGES = {
+    "batch-lease-setup": "Batch lease setup failed before a new batch started.",
+    "batch-lease-acquire": "Batch lease acquisition failed before a new batch started.",
+}
+
+
+def batch_lease_failure(stage, error):
+    """Return a content-free startup error without exposing paths or malformed values."""
+    require(stage in BATCH_LEASE_FAILURE_MESSAGES, "Unknown batch lease startup stage.")
+    message = str(error) if isinstance(error, ClientError) else BATCH_LEASE_FAILURE_MESSAGES[stage]
+    return dict(
+        blocking=True,
+        batch_started=False,
+        stage=stage,
+        error=message,
+        error_type=type(error).__name__,
+    )
+
+
+class BatchLeaseStartError(Exception):
+    """A lease request failed before this controller persisted a new batch."""
+
+    def __init__(self, error):
+        self.payload = batch_lease_failure("batch-lease-acquire", error)
+        super().__init__(self.payload["error"])
+
+
 class ProcessingBatchLease:
     """Keep retroactive Jev merges out of a live Luna verification batch."""
 
@@ -140,7 +168,13 @@ class BatchGuard:
         self.check_worker_closed()
         batch_id = uuid.uuid4().hex
         if self.lease is not None:
-            self.lease.start(batch_id, self.owner)
+            try:
+                self.lease.start(batch_id, self.owner)
+            except EXPECTED_BATCH_LEASE_ERRORS as error:
+                # No active batch has been persisted yet. Keep the last terminal
+                # batch authoritative and report the startup stage instead of
+                # mislabelling it as damaged guard state.
+                raise BatchLeaseStartError(error) from None
         try:
             return self.save(dict(batch_id=batch_id, owner=self.owner, phase="active", started_at=time.time(),
                                   requested_count=count, workflow=workflow, verified_runs={}, completed_count=0))
@@ -398,7 +432,12 @@ def main():
         return
     base = repo / ".local" / "receipt-worker"
     try:
-        guard = BatchGuard(base, args.owner, ProcessingBatchLease(repo))
+        lease = ProcessingBatchLease(repo)
+    except EXPECTED_BATCH_LEASE_ERRORS as error:
+        print(json.dumps(batch_lease_failure("batch-lease-setup", error)), flush=True)
+        raise SystemExit(1) from None
+    try:
+        guard = BatchGuard(base, args.owner, lease)
     except BatchBusy:
         print(json.dumps(dict(busy=True)), flush=True)
         return
@@ -412,6 +451,9 @@ def main():
         except BatchBusy:
             print(json.dumps(dict(busy=True)), flush=True)
             return
+        except BatchLeaseStartError as error:
+            print(json.dumps(error.payload), flush=True)
+            raise SystemExit(1) from None
         except InputError as error:
             print(json.dumps(dict(blocking=True, error=str(error), previous=guard.state)), flush=True)
             return
