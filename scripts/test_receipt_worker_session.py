@@ -11,7 +11,8 @@ import receipt_worker as module
 
 class WorkerSessionTests(unittest.TestCase):
     def test_protected_profile_denial_is_specific_and_cannot_start_worker(self):
-        with patch.object(module.sys, 'argv', ['receipt_worker.py', '--profile', 'private-profile.json']), \
+        with patch.object(module.sys, 'argv', ['receipt_worker.py', '--profile', 'private-profile.json',
+                                               '--client-config', '/private/client.json']), \
              patch.object(module.Path, 'read_text', side_effect=PermissionError('secret-path-must-not-escape')), \
              patch.object(module, 'Worker') as worker, \
              patch.object(module.sys, 'stdout', io.StringIO()) as output, \
@@ -31,6 +32,8 @@ class WorkerSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory) / 'profile.json'
             profile.write_text('{}')
+            config = Path(directory) / 'client.json'
+            config.write_text('{}')
             worker = Mock()
             worker.state = dict(phase='ready')
             worker.preflight.return_value = dict(ready=True)
@@ -41,15 +44,18 @@ class WorkerSessionTests(unittest.TestCase):
                 return result if result is not None else dict(phase=phase)
             worker.handle.side_effect = handle
             stdin = Mock(buffer=io.BytesIO(b'{"op":"attest"}\n{"op":"quit"}\n'))
-            with patch.object(module, 'Worker', return_value=worker), \
+            with patch.object(module, 'Worker', return_value=worker) as worker_class, \
                  patch.object(module, 'disable_console_echo'), \
-                 patch.object(module.sys, 'argv', ['receipt_worker.py', '--profile', str(profile)]), \
+                 patch.object(module.sys, 'argv', ['receipt_worker.py', '--profile', str(profile),
+                                                   '--client-config', str(config)]), \
                  patch.object(module.sys, 'stdin', stdin), \
                  patch.object(module.sys, 'stdout', io.StringIO()) as output:
                 module.main()
             worker.lock.close.assert_called_once()
             self.assertTrue(worker.stop_heartbeat.is_set())
             worker.release.assert_not_called()
+            passed_profile = worker_class.call_args.args[0]
+            self.assertEqual(passed_profile['client_config'], str(config.resolve()))
             return worker, [json.loads(line) for line in output.getvalue().splitlines()]
 
     def test_successful_terminal_result_closes_without_reading_quit(self):

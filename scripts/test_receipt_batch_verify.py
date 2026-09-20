@@ -46,22 +46,20 @@ class VerificationTests(unittest.TestCase):
                           draft=dict(page_review=dict(capture_ids=[self.capture_id]), target=dict(pages=[self.page])),
                           document=copy.deepcopy(self.document), pdf=dict(sha256='b' * 64, pages=1))
         self.write(self.work / '0039-submit-response.json', dict(saved=[dict(id=self.document_id, revision=4)]))
-        self.profile = dict(repository=str(self.repo), origin=self.origin, client_config='synthetic-config')
+        self.profile = dict(repository=str(self.repo), origin=self.origin)
         self.write(self.repo / 'profile.json', self.profile)
         self.write(self.repo / '.local' / 'processing-host.json', dict(worker_profile=str(self.repo / 'profile.json')))
         self.client = Mock(origin=self.origin)
         self.client.get.side_effect = lambda url: (dict(claim_active=False, attempt_saved=True)
             if url.startswith('/api/processing/readings?') else dict(document=self.document))
         self.addCleanup(patch.stopall)
-        patch.object(module, 'credentials', return_value={}).start()
-        self.client_factory = patch.object(module, 'ScannerClient', return_value=self.client).start()
 
     def write(self, path, value):
         path.write_text(json.dumps(value), encoding='utf-8')
 
     def verify(self):
         self.write(self.work / 'state.json', self.state)
-        return module.verify_run(self.repo, self.run_id, 'synthetic-task')
+        return module.verify_run(self.repo, self.run_id, 'synthetic-task', client=self.client)
 
     def test_actual_journal_reference_and_live_readback_generate_compact_proof(self):
         result = self.verify()
@@ -116,7 +114,7 @@ class VerificationTests(unittest.TestCase):
         path = self.work.parent / 'batch-state.json'
         batch = json.loads(path.read_text())
         self.write(path, {**batch, 'requested_count': 1, 'completed_count': 1})
-        guard = BatchGuard(self.work.parent, 'synthetic-task')
+        guard = BatchGuard(self.work.parent, 'synthetic-task', Mock(client=self.client))
         self.addCleanup(guard.close)
         result = guard.handle(dict(op='verify', run_id=self.run_id))
         self.assertEqual(result['completed_count'], 1)
@@ -139,7 +137,7 @@ class VerificationTests(unittest.TestCase):
         path = self.work.parent / 'batch-state.json'
         batch = json.loads(path.read_text())
         self.write(path, {**batch, 'requested_count': 1, 'completed_count': 1})
-        guard = BatchGuard(self.work.parent, 'synthetic-task')
+        guard = BatchGuard(self.work.parent, 'synthetic-task', Mock(client=self.client))
         self.addCleanup(guard.close)
         guard.handle(dict(op='verify', run_id=self.run_id))
         original_pages = copy.deepcopy(self.document['pages'])
@@ -232,13 +230,13 @@ class VerificationTests(unittest.TestCase):
             with self.assertRaises(InputError):
                 self.verify()
             self.state = original
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
 
     def test_missing_submit_acknowledgement_is_not_success(self):
         self.state['submit_response'] = 'guessed-submit-response.json'
         with self.assertRaises(FileNotFoundError):
             self.verify()
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
 
     def test_response_for_different_document_is_rejected(self):
         self.write(self.work / '0039-submit-response.json', dict(saved=[dict(id=self.capture_id)]))
@@ -294,7 +292,7 @@ class VerificationTests(unittest.TestCase):
         self.state['claim_started'] = 99
         with self.assertRaises(InputError):
             self.verify()
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
 
     def test_origin_mismatch_is_rejected_before_network(self):
         self.state['origin'] = 'https://different.example'
@@ -307,7 +305,7 @@ class VerificationTests(unittest.TestCase):
         self.write(self.repo / 'profile.json', self.profile)
         with self.assertRaises(InputError):
             self.verify()
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
 
     def test_inactive_or_differently_owned_batch_is_rejected(self):
         for changes in [dict(phase='complete'), dict(owner='different-task'), dict(batch_id='invalid')]:
@@ -317,7 +315,7 @@ class VerificationTests(unittest.TestCase):
             })
             with self.assertRaises(InputError):
                 self.verify()
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
         self.assertEqual(list(self.work.glob('verification-*.json')), [])
 
     def test_blocked_batch_allows_read_only_verification_without_resuming_it(self):
@@ -334,7 +332,7 @@ class VerificationTests(unittest.TestCase):
         self.state['batch_id'] = 'd' * 32
         with self.assertRaisesRegex(InputError, 'different batch'):
             self.verify()
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
 
     def test_submit_acknowledgement_must_cover_every_affected_document(self):
         donor_id = '33333333-3333-4333-8333-333333333333'
@@ -344,11 +342,11 @@ class VerificationTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(InputError, 'omitted an affected document'):
             self.verify()
-        self.client_factory.assert_not_called()
+        self.client.get.assert_not_called()
 
     def test_path_escape_is_rejected(self):
         with self.assertRaises(InputError):
-            module.verify_run(self.repo, '../other', 'synthetic-task')
+            module.verify_run(self.repo, '../other', 'synthetic-task', client=self.client)
         self.state['submit_response'] = str(self.repo / 'outside.json')
         with self.assertRaises(InputError):
             self.verify()

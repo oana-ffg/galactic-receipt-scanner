@@ -12,8 +12,9 @@ command arguments, logs or source.
 
 Reuse coordinator-supplied paths or the repository's ignored
 `.local/processing-host.json` (`python`, `worker_profile`) for the deterministic Luna
-controller and Astra processing. The referenced saved-PP consumer profile contains the existing private `client_config`, Node
-and renderer, but no OCR engine/models. OCR production separately uses
+controller and Astra processing. The referenced saved-PP consumer profile contains the
+owner-verified origin, Node and renderer, but no credential config or OCR engine/models.
+OCR production separately uses
 `.local/receipt-ocr-host.json`. Keep these descriptors
 local to its host; do not commit it or ask the owner to supply paths that it already stores.
 
@@ -22,8 +23,8 @@ loads the protected profile, requires its origin and repository to match the pre
 and verifies scoped API capabilities before claiming work. A credential config alone is not
 independent proof of ownership. Terra and delegated Luna repeat none of this: Luna reads only
 its prepared private task and optional verified preview paths; it does not launch Python,
-inspect protected profiles or retrieve keys. Python loads the existing credentials for the
-controller.
+inspect protected profiles or retrieve keys. The controller receives the fresh batch config
+path and loads it without exposing secrets.
 The connection helper creates a private config referring to its protected credential file.
 There is no gopass dependency. `--credentials-stdin` supports an explicitly authorized
 secret provider for optional personal integrations; browser password storage is not
@@ -41,15 +42,19 @@ A 401/403 is an access failure, not a missing original. Do not spoof identity he
    Invoke its `create_processing_connection` WebMCP tool with the returned `request`
    object unchanged. The normal owner UI also accepts `request.json` when site tools
    are unavailable. Authorization is a write operation and retains normal tool approvals.
-3. Save the tool's encrypted JSON result to a private response file, then run
-   `node scripts/receipt_connection.mjs complete PRIVATE_DIRECTORY RESPONSE_FILE`.
-   Only this helper decrypts it. It prints the client config path and expiry, never keys.
-4. Verify `status` and a hash-checked original through that config before claiming access
-   works. The coordinator should fetch verification facts only; Luna inspects the original pixels.
-   Pass the config path to each fresh worker. All client commands accept `--config` before
-   the subcommand. Original/PDF/OCR helpers launch locally and make no model API calls.
-5. The owner can list and revoke named connections on `/agent-access`. For scheduled jobs,
-   configure a suitable expiry and report expired/revoked access as an actionable failure.
+3. Pipe the tool's encrypted JSON result to
+   `node scripts/receipt_connection.mjs complete-stdin PRIVATE_DIRECTORY`.
+   Only this helper decrypts it. It prints the client config path, connection ID and expiry,
+   never keys; no plaintext response file is needed.
+4. Pass that config path to the deterministic controller with `--client-config`. The
+   controller performs the real access preflight before claiming work. Terra and Luna do not
+   duplicate it. All client commands accept `--config` before the subcommand.
+5. In a `finally` cleanup for every batch outcome, use the signed-in page's
+   `revoke_processing_connection` tool for that exact connection ID. Only after it returns
+   `revoked:true`, run `node scripts/receipt_connection.mjs destroy PRIVATE_DIRECTORY`.
+   This removes the temporary plaintext credential/config and key material. If revocation
+   cannot be confirmed, retain the private directory for exact owner recovery. The one-day
+   server expiry is a crash fallback, never the normal lifecycle.
 
 Local Codex is the current test environment. Cloud Work's browser/tool availability and
 private-file persistence need later end-to-end validation; do not block local iteration

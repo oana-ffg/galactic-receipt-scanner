@@ -15,6 +15,7 @@ class FakeLease:
         self.events = []
         self.profile = {}
         self.profile_path = Path("synthetic-profile.json")
+        self.client = Mock()
 
     def start(self, batch_id, owner):
         self.batch_id = batch_id
@@ -37,6 +38,8 @@ class BatchGuardTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name) / '.local' / 'receipt-worker'
         self.base.parent.mkdir()
+        self.client_config = Path(self.tmp.name) / 'client.json'
+        self.client_config.write_text('{}')
 
     def guard(self):
         guard = module.BatchGuard(self.base, 'synthetic-task')
@@ -48,6 +51,26 @@ class BatchGuardTests(unittest.TestCase):
         (self.base / run).mkdir(exist_ok=True)
         (self.base / run / 'state.json').write_text(json.dumps(state))
         (self.base / 'active-run.json').write_text(json.dumps(dict(run_id=run)))
+
+    def test_batch_lease_uses_only_the_explicit_fresh_config(self):
+        repo = Path(self.tmp.name)
+        runtime = repo / '.local' / 'runtime'
+        runtime.mkdir(parents=True)
+        profile = runtime / 'profile.json'
+        profile.write_text(json.dumps({
+            'repository': str(repo),
+            'origin': 'https://synthetic.example',
+            'client_config': '/stale/config-that-must-not-be-used.json',
+        }))
+        (repo / '.local' / 'processing-host.json').write_text(json.dumps({
+            'worker_profile': str(profile),
+        }))
+        client = Mock(origin='https://synthetic.example')
+        with patch.object(module, 'credentials', return_value={'fresh': True}) as load, \
+             patch.object(module, 'ScannerClient', return_value=client):
+            lease = module.ProcessingBatchLease(repo, str(self.client_config))
+        self.assertTrue(load.call_args.args[0].samefile(self.client_config))
+        self.assertTrue(Path(lease.profile['client_config']).samefile(self.client_config))
 
     def test_second_coordinator_is_busy_until_first_finishes(self):
         first = self.guard()
@@ -363,7 +386,8 @@ class BatchGuardTests(unittest.TestCase):
     def test_input_eof_blocks_and_preserves_batch(self):
         with patch.object(module, '__file__', str(Path(self.tmp.name) / 'scripts' / 'receipt_batch.py')), \
              patch.object(module, 'ProcessingBatchLease', return_value=FakeLease()), \
-             patch.object(module.sys, 'argv', ['receipt_batch.py', '--owner', 'synthetic-task']), \
+             patch.object(module.sys, 'argv', ['receipt_batch.py', '--owner', 'synthetic-task',
+                                                '--client-config', str(self.client_config)]), \
              patch.object(module.sys, 'stdin', io.StringIO('')), \
              patch.object(module.sys, 'stdout', io.StringIO()):
             module.main()
@@ -373,6 +397,7 @@ class BatchGuardTests(unittest.TestCase):
     def test_scheduled_owner_cannot_resolve_before_opening_guard(self):
         with patch.object(module.sys, 'argv', [
             'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+            '--client-config', str(self.client_config),
             '--resolve', 'a' * 32, '--reason', 'Automatic retry',
         ]), patch.object(module, 'BatchGuard') as guard:
             with self.assertRaisesRegex(module.InputError, 'Scheduled processing cannot resolve'):
@@ -387,6 +412,7 @@ class BatchGuardTests(unittest.TestCase):
         ]:
             with self.subTest(extra=extra), patch.object(module.sys, 'argv', [
                 'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+                '--client-config', str(self.client_config),
                 '--resolve', 'a' * 32, '--reason', 'Automatic retry', *extra,
             ]), patch.object(module, 'BatchGuard') as guard, \
                  patch.object(module.sys, 'stderr', io.StringIO()):
@@ -396,19 +422,25 @@ class BatchGuardTests(unittest.TestCase):
                 guard.assert_not_called()
 
     def test_verification_never_opens_a_second_batch_guard(self):
+        lease = FakeLease()
         with patch.object(module.sys, 'argv', [
             'receipt_batch.py', '--owner', 'receipt-processing-scheduled', '--verify', 'a' * 32,
-        ]), patch.object(module, 'BatchGuard') as guard, \
+            '--client-config', str(self.client_config),
+        ]), patch.object(module, 'ProcessingBatchLease', return_value=lease), \
+             patch.object(module, 'BatchGuard') as guard, \
              patch.object(module, 'verify_run', return_value=dict(verified=True)) as verify, \
              patch.object(module.sys, 'stdout', io.StringIO()):
             module.main()
+            self.assertIs(verify.call_args.kwargs['client'], lease.client)
             verify.assert_called_once()
             guard.assert_not_called()
 
     def test_empty_verify_argument_cannot_start_a_batch(self):
         with patch.object(module.sys, 'argv', [
             'receipt_batch.py', '--owner', 'receipt-processing-scheduled', '--verify', '',
-        ]), patch.object(module, 'BatchGuard') as guard:
+            '--client-config', str(self.client_config),
+        ]), patch.object(module, 'ProcessingBatchLease', return_value=FakeLease()), \
+             patch.object(module, 'BatchGuard') as guard:
             with self.assertRaises(module.InputError):
                 module.main()
             guard.assert_not_called()
@@ -422,6 +454,7 @@ class BatchGuardTests(unittest.TestCase):
         stdout = io.StringIO()
         with patch.object(module.sys, 'argv', [
             'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+            '--client-config', str(self.client_config),
         ]), patch.object(
             module,
             'ProcessingBatchLease',
@@ -458,6 +491,7 @@ class BatchGuardTests(unittest.TestCase):
         with patch.object(module, '__file__', str(private_repo / 'scripts' / 'receipt_batch.py')), \
              patch.object(module.sys, 'argv', [
                  'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+                 '--client-config', str(self.client_config),
              ]), patch.object(module, 'BatchGuard') as guard, patch.object(module.sys, 'stdout', stdout):
             with self.assertRaises(SystemExit) as error:
                 module.main()
@@ -501,6 +535,7 @@ class BatchGuardTests(unittest.TestCase):
              patch.object(module, 'ProcessingBatchLease', return_value=lease), \
              patch.object(module.sys, 'argv', [
                  'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+                 '--client-config', str(self.client_config),
              ]), patch.object(module.sys, 'stdout', stdout):
             with self.assertRaises(SystemExit) as error:
                 module.main()
@@ -552,7 +587,7 @@ class BatchGuardTests(unittest.TestCase):
             with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id=run, document_id=f'doc-{index}')):
                 result = guard.handle(dict(op='verify', run_id=run))
         self.assertEqual(result['next'], 'finish')
-        with patch.object(module, 'verify_run', side_effect=lambda repo, rid, owner: guard.state['verified_runs'][rid]):
+        with patch.object(module, 'verify_run', side_effect=lambda repo, rid, owner, client: guard.state['verified_runs'][rid]):
             self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'target-reached')
 
     def test_verification_is_idempotent_and_different_run_cannot_double_count_document(self):

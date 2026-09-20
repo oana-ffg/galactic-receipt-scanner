@@ -19,23 +19,23 @@ ignored descriptor when configuring a host so future invocations can reuse its s
 Missing configuration is a setup task; an omitted batch range uses the skill default.
 
 Provide the verified absolute Python/helper/profile paths. The private Luna profile contains
-`repository`, `client_config`, the owner-verified `origin`, `node`, `renderer`, and
-`confirmation_provider: "ppocr"`. It deliberately contains no `ppocr`, model, device or
-inference-Python fields. Create it with `scripts/receipt_processing_setup.py`. PP-OCR
+`repository`, the owner-verified `origin`, `node`, `renderer`, and
+`confirmation_provider: "ppocr"`. It deliberately contains no `ppocr`, model, device,
+inference-Python or credential fields. Create it with `scripts/receipt_processing_setup.py`.
+Create a fresh per-run connection as described in the data-access skill and pass its client
+config explicitly to the controller or exact recovery worker. PP-OCR
 production belongs to the dedicated OCR host and its separate `receipt-ocr-host.json`.
-Use prepared runtimes; credentials stay in the existing protected connection. Keep the
-profile and its machine-specific approval rule outside tracked source. The rule allows
+Use prepared runtimes. Keep the profile and its machine-specific approval rule outside
+tracked source. The rule allows
 only the exact Python executable, `-X utf8 -B -I`, absolute `scripts/receipt_worker.py`,
-`--profile`, and the exact private profile path. The same prefix covers the optional
+`--profile`, the exact private profile path, `--client-config`, and the fresh private config
+path. The same prefix covers the optional
 validated `--resume RUN_ID`; duplicate profile overrides and option abbreviations are rejected. Never allow arbitrary Python or shells.
 
-The prepared launch uses an existing standing rule; do not request a new broader rule.
-Omit the shell tool's `prefix_rule` argument when that exact allow is already present.
-If the tool requires a prefix proposal, copy the full eight-element tuple from the
-standing rule, including the exact profile path after `--profile`. Never stop the prefix
-at `--profile` or omit any executable/argument. If the full standing rule is absent,
-report a setup blocker rather than proposing a substitute. An approval rejection still
-stops the denied operation and enters repair-before-block; changing the proposed prefix does not authorize retrying a denied launch.
+Request the exact prepared launch through the normal managed approval boundary. Do not
+create a standing prefix that omits or generalizes the fresh config path. An approval
+rejection still stops the denied operation and enters repair-before-block; changing the
+proposed command does not authorize retrying a denied launch.
 
 Connection setup establishes source/destination ownership once. The coordinator matches the
 prepared profile's origin and checkout before dispatch or recovery. Keep the verified origin,
@@ -43,9 +43,10 @@ non-secret ownership evidence, exact Python/script/profile paths and authorized 
 the coordinator's recovery context, never in Luna's semantic task. Never pass credentials or
 browser tab handles.
 
-For exact-journal recovery, the coordinator launches the prepared Python script; Luna never
-does. Do not repeat ownership setup, query Sites metadata, open an authentication page or
-provision/fetch API keys. The Python script loads the existing credentials and enforces the
+Before exact-journal recovery, the coordinator creates one fresh scoped connection using
+the same per-run lifecycle as a normal batch. It then launches the prepared Python script;
+Luna never does. Once that connection is prepared, do not repeat ownership setup, query
+Sites metadata or provision another key inside the recovery. The Python script loads the explicitly supplied fresh credentials and enforces the
 configured origin, checkout and runtime checks; stdin cannot change destinations, runtimes
 or paths. Actual permission failures enter repair-before-block without bypassing the denied
 operation.
@@ -58,7 +59,7 @@ absolute paths and exact argument order, `tty: true`, `login: false`, and
 `sandbox_permissions: "require_escalated"` in the shell tool call:
 
 ```text
-PYTHON -X utf8 -B -I WORKER --profile PROFILE
+PYTHON -X utf8 -B -I WORKER --profile PROFILE --client-config FRESH_CLIENT_CONFIG
 ```
 
 On PowerShell, when the prepared Python executable path is a literal path without
@@ -72,9 +73,9 @@ Validate approval matching with an actual `--help` launch (no profile read or cl
 not solely `codex execpolicy check` on a shell wrapper: that standalone check does not
 perform the runtime's shell-command lowering.
 
-The existing allow rule authorizes the exact Python launch; it does not select the
-execution context when `sandbox_permissions` is
-omitted. Include that field explicitly. A `profile_access_denied` startup response
+The exact managed approval does not select the execution context when
+`sandbox_permissions` is omitted. Include that field explicitly. A
+`profile_access_denied` startup response
 means this process could not read the prepared profile and made no claim; report the
 launch configuration failure to the coordinator without weakening profile permissions.
 This does not override the repair-before-block procedure or permission boundaries.
@@ -118,8 +119,9 @@ The coordinator uses the prepared Python executable to launch the checkout's abs
 `scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`,
 and the authorized `sandbox_permissions: require_escalated` context for its protected
 profile reads during verification. Scheduled runs use `receipt-processing-scheduled`.
+Pass `--client-config FRESH_CLIENT_CONFIG` for the connection created for this batch.
 Default count is 10; append `--count N` for an explicitly different count. The guard
-loads credentials and owns its internal worker without exposing them to model output.
+loads that config and owns its internal worker without exposing credentials to model output.
 It rejects any legacy Qwen profile before preflight or claim; normal Luna requires the
 saved-PP consumer profile and never invokes OCR inference.
 It holds the OS lock and backend batch lease until terminal completion. Request the

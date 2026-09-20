@@ -182,7 +182,8 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
     return str(prepared)
 
 
-def publish_host_descriptor(profile, python=None, *, config=None, name='receipt-ocr-host.json'):
+def publish_host_descriptor(profile, python=None, *, config=None, name='receipt-ocr-host.json',
+                            include_config=True):
     """Publish only a locally verified profile and fixed worker executable paths."""
     profile_path = Path(profile)
     if (not profile_path.is_absolute() or not profile_path.is_file()
@@ -199,15 +200,17 @@ def publish_host_descriptor(profile, python=None, *, config=None, name='receipt-
     if descriptor.exists() and (not descriptor.is_file() or descriptor.is_symlink() or descriptor.is_junction()):
         raise ClientError('Processing host descriptor must be a regular file.')
     settings = json.loads(profile_path.read_text(encoding='utf-8'))
-    config_value = config or settings.get('client_config')
-    if not isinstance(config_value, str):
-        raise ClientError('Use an explicit prepared client configuration.')
-    config_path = Path(config_value)
-    if (not config_path.is_absolute() or not config_path.is_file()
-            or config_path.is_symlink() or config_path.is_junction()):
-        raise ClientError('Use a prepared regular absolute client configuration.')
-    body = json.dumps(dict(python=str(worker_python), worker_profile=str(profile_path),
-                           client_config=str(config_path))).encode()
+    body = dict(python=str(worker_python), worker_profile=str(profile_path))
+    if include_config:
+        config_value = config or settings.get('client_config')
+        if not isinstance(config_value, str):
+            raise ClientError('Use an explicit prepared client configuration.')
+        config_path = Path(config_value)
+        if (not config_path.is_absolute() or not config_path.is_file()
+                or config_path.is_symlink() or config_path.is_junction()):
+            raise ClientError('Use a prepared regular absolute client configuration.')
+        body['client_config'] = str(config_path)
+    body = json.dumps(body).encode()
     candidate = descriptor.parent / ('processing-host-' + os.urandom(6).hex() + '.json')
     write_new_file(candidate, body)
     try:

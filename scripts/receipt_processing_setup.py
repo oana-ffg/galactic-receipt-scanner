@@ -25,8 +25,7 @@ def ensure_consumer_profile(config, *, node=None, renderer=None):
     if not renderer_value:
         raise ClientError('Install Poppler for saved-PP PDF generation and verification.')
     renderer_path = check_renderer(Path(renderer_value).resolve(strict=True))
-    value = dict(origin=client.origin, repository=str(REPO),
-                 client_config=str(Path(config).resolve(strict=True)), node=node_path,
+    value = dict(origin=client.origin, repository=str(REPO), node=node_path,
                  renderer=renderer_path, confirmation_provider='ppocr')
     candidate = root / ('profile-' + os.urandom(6).hex() + '.json')
     write_new_file(candidate, json.dumps(value).encode())
@@ -45,7 +44,8 @@ def main():
     parser.add_argument('--worker-python')
     args = parser.parse_args()
     profile = ensure_consumer_profile(args.config, node=args.node, renderer=args.renderer)
-    descriptor = publish_host_descriptor(profile, args.worker_python, name='processing-host.json')
+    descriptor = publish_host_descriptor(profile, args.worker_python,
+                                         name='processing-host.json', include_config=False)
     print(json.dumps({'profile': profile, 'descriptor': descriptor}))
 
 

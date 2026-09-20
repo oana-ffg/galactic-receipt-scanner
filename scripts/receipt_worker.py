@@ -1776,6 +1776,7 @@ class Worker:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--profile", required=True, action=Once)
+    parser.add_argument("--client-config", required=True, action=Once)
     parser.add_argument("--resume", action=Once)
     args = parser.parse_args()
     try:
@@ -1785,7 +1786,11 @@ def main():
             "stage": "profile_read", "claim_started": False,
             "error": "The prepared profile is unreadable in this execution context. Check the required launch permissions; this worker has not started."}), flush=True)
         return 1
-    worker = Worker(json.loads(profile_text), args.resume, args.profile)
+    config_path = Path(args.client_config)
+    require(config_path.is_absolute() and config_path.is_file() and not config_path.is_symlink(),
+            "Use the fresh private client configuration for this run.")
+    profile = {**json.loads(profile_text), "client_config": str(config_path.resolve(strict=True))}
+    worker = Worker(profile, args.resume, args.profile)
     disable_console_echo()
     print(json.dumps(worker.preflight()), flush=True)
     heartbeat = threading.Thread(target=worker.heartbeat, daemon=True)

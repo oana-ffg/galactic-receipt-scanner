@@ -58,10 +58,7 @@ export async function mountAgentAccess(app: HTMLElement) {
         button.onclick = () =>
           void perform(async () => {
             button.disabled = true;
-            await api(`/api/connections/${connection.id}/revoke`, {
-              method: "POST",
-              body: "{}",
-            });
+            await revokeConnection(connection.id);
             await refresh();
           });
         row.append(button);
@@ -88,12 +85,16 @@ export async function mountAgentAccess(app: HTMLElement) {
       }
     });
   const provision = async (input: Record<string, unknown>) => {
-    const result = await api<object>("/api/connections", {
+    return api<object>("/api/connections", {
       method: "POST",
       body: JSON.stringify(input),
     });
-    await refresh();
-    return result;
+  };
+  const revokeConnection = async (id: string) => {
+    return api<{ revoked: boolean }>(
+      `/api/connections/${encodeURIComponent(id)}/revoke`,
+      { method: "POST", body: "{}" },
+    );
   };
   app.querySelector<HTMLInputElement>("#connection-file")!.onchange = (event) =>
     void perform(async () => {
@@ -118,6 +119,7 @@ export async function mountAgentAccess(app: HTMLElement) {
       create.disabled = true;
       try {
         const result = await provision(request);
+        await refresh();
         if (blobUrl) URL.revokeObjectURL(blobUrl);
         blobUrl = URL.createObjectURL(
           new Blob([JSON.stringify(result)], { type: "application/json" }),
@@ -153,6 +155,22 @@ export async function mountAgentAccess(app: HTMLElement) {
     },
     annotations: { readOnlyHint: false },
     execute: provision,
+  });
+  context?.registerTool({
+    name: "revoke_processing_connection",
+    description:
+      "Revoke one exact processing or backup connection through the signed-in owner session. Use the connection ID returned when that connection was created. Revocation is a write action.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connection_id: { type: "string", format: "uuid" },
+      },
+      required: ["connection_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
+    execute: (input: { connection_id: string }) =>
+      revokeConnection(input.connection_id),
   });
   context?.registerTool({
     name: "list_processing_connections",

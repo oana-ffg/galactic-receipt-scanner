@@ -36,12 +36,24 @@ call APIs. Its private task contains the complete template, evidence and optiona
 
 For the coordinator, read only the repository's ignored regular
 `.local/processing-host.json` to obtain the prepared Python executable. The deterministic
-batch controller reads the protected worker profile and client configuration internally;
-Terra must not open them, test the credentials, list captures or download an original as a
-preflight. A real profile/access failure returned by the controller is the setup failure.
+batch controller reads the protected credential-free worker profile internally. Terra must
+create one fresh one-day processing connection for this batch through the signed-in
+`/agent-access` page, complete the encrypted handoff into a new private run directory, and
+pass only that client-config path to the controller. It must not open the resulting files,
+test the credentials, list captures or download an original as a preflight. A real
+profile/access failure returned by the controller is the setup failure.
 If the host descriptor is missing or redirected, follow the existing connection setup;
 never scan secret stores, invent alternate runtimes or print credentials. OCR production
 remains exclusively in `receipt-ocr-nightly`.
+
+The saved automation invocation authorizes creation of exactly one fresh processing
+connection for its batch and revocation of that exact connection when the controller ends.
+Never reuse a prior batch's client config. In a `finally` cleanup after success, empty queue,
+busy result or failure, call `revoke_processing_connection` with the returned connection ID,
+confirm `revoked:true`, then run `receipt_connection.mjs destroy` on that batch's private
+connection directory. The server's one-day expiry is only crash containment. If revocation
+cannot be confirmed, preserve the private directory so the owner can identify/revoke the
+connection; do not delete the evidence or start another batch.
 
 Do not create a recurring schedule from a bare invocation. Respect actual permission
 failures and the repair-before-block procedure; the defaults do not bypass approvals.

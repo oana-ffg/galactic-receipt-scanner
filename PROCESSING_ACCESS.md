@@ -35,10 +35,14 @@ credential alone does not authorize scanner data access.
 4. Complete the handoff with the helper. The Python API client reads its private config,
    which points to the private credential file. There is **no gopass dependency**. POSIX
    permissions are checked; on Windows use a user-private directory with an appropriate ACL.
-5. Verify access with `status` and a downloaded original whose hash/size match metadata.
+5. For a scheduled Luna batch, pass this fresh config to the controller, then revoke the
+   exact connection and destroy its private connection directory at the end of the run.
    Test writes, revocation and wrong credentials only against synthetic isolated storage.
 
-Credentials last 1–365 days, as requested when connecting. The owner manages named
+Credentials can last 1–365 days, as requested when connecting. Scheduled Luna processing
+uses a new one-day connection per batch, revokes it at terminal cleanup, and deletes the
+temporary local plaintext files only after revocation is confirmed; one day is the crash
+fallback, not the expected lifetime. The owner manages named
 connections, scope, expiry, last use and revocation on `/agent-access`. The server stores
 only the scanner credential's hash, plus an encrypted handoff response for safe retries.
 Revocation/expiry applies to every subsequent authenticated request. In-flight operations

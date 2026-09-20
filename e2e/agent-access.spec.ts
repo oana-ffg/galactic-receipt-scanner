@@ -31,13 +31,25 @@ test("owner creates and revokes a connection through site tools without revealin
   );
   expect(envelope.id).toBe(request.request_id);
   expect(JSON.stringify(envelope)).not.toContain("synthetic-gateway");
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(
     page.getByText(/Synthetic backup.*Read-only backup.*Active/),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Revoke", exact: true })
-    .last()
-    .click();
+  let failRefresh = true;
+  await page.route("**/api/connections*", async (route) => {
+    if (failRefresh && route.request().method() === "GET") await route.abort();
+    else await route.continue();
+  });
+  const revoked = await page.evaluate(
+    async (connectionId) =>
+      (window as any).siteTools.revoke_processing_connection.execute({
+        connection_id: connectionId,
+      }),
+    request.request_id,
+  );
+  expect(revoked).toEqual({ revoked: true });
+  failRefresh = false;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText(/Synthetic backup.*Revoked/)).toBeVisible();
 });
 
@@ -56,13 +68,11 @@ test("manual request upload exposes purpose and downloads only an encrypted resp
       public_key: publicKey.export({ format: "jwk" }),
     },
   };
-  await page
-    .getByLabel("Connection request file")
-    .setInputFiles({
-      name: "request.json",
-      mimeType: "application/json",
-      buffer: Buffer.from(JSON.stringify(request)),
-    });
+  await page.getByLabel("Connection request file").setInputFiles({
+    name: "request.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(request)),
+  });
   await expect(
     page.getByText("Synthetic processor · processing · 1 day(s)"),
   ).toBeVisible();

@@ -24,13 +24,17 @@ hourly first pass.
 
 1. Read the repository `AGENTS.md` and
    [receipt-data-access](../receipt-data-access/SKILL.md). Discover this host's prepared
-   runtimes and connection from `.local/processing-host.json`; verify the origin against
-   owner-authenticated Sites metadata. Keep credentials private. Supply only actual
+   runtimes from `.local/processing-host.json`. Create one fresh one-day processing
+   connection for this Astra batch through the signed-in `/agent-access` page, complete
+   its encrypted handoff into a new private run directory, and pass that config explicitly
+   to the controller and verification helper. Never reuse a prior batch config. Keep
+   credentials private. Supply only actual
    paths and non-secret ownership/scope evidence to Astra, never receipt values or OCR.
    Use the owner's subscription-backed managed agents; no paid inference APIs.
 2. Hold the existing receipt batch guard for the whole batch using
    [batch coordination](../receipt-processing/references/luna-protocol.md#batch-coordination).
-   Append `--workflow astra` when launching this guard: Astra uses the independent
+   Append `--workflow astra --client-config PRIVATE_CLIENT_CONFIG` when launching this
+   guard: Astra uses the independent
    verification protocol below rather than the bounded Luna completion counter.
    Keep its live session ID and an ignored coordinator checkpoint. Respect busy/blocked
    state; do not clear an earlier blocked batch merely to start verification. This guard
@@ -68,6 +72,11 @@ hourly first pass.
    exact request/response and guard, stop dispatching, and mark the guard blocked as
    documented. No replacement worker may retry an uncertain write. Reconciliation is
    the primary coordinator's responsibility under owner direction, not a new Terra task.
+9. In a `finally` cleanup for success, empty queue, busy result or failure, revoke this
+   exact connection with `revoke_processing_connection`. After confirmed `revoked:true`,
+   run `receipt_connection.mjs destroy` on its private directory. If revocation cannot be
+   confirmed, preserve the directory for exact owner recovery and do not start another
+   batch. The one-day expiry is crash containment, not normal retention.
 
 The legacy Astra API path does not register itself as a bounded Luna worker: the guard's
 `finish` alone is therefore not proof that Astra completed. Require the independent

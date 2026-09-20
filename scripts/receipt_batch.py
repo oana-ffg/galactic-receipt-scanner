@@ -46,14 +46,18 @@ class BatchLeaseStartError(Exception):
 class ProcessingBatchLease:
     """Keep retroactive Jev merges out of a live Luna verification batch."""
 
-    def __init__(self, repo):
+    def __init__(self, repo, client_config):
         host_path = regular_path(regular_path(repo / ".local") / "processing-host.json")
         host = json.loads(host_path.read_text(encoding="utf-8"))
         profile_path = regular_path(Path(host["worker_profile"]))
         require(profile_path.is_absolute() and profile_path.is_file(), "Prepared worker profile is unavailable.")
         profile = json.loads(profile_path.read_text(encoding="utf-8"))
         require(Path(profile["repository"]).resolve() == repo.resolve(), "Prepared profile belongs to another checkout.")
-        self.client = ScannerClient(credentials(profile["client_config"]))
+        config_path = regular_path(Path(client_config))
+        require(config_path.is_absolute() and config_path.is_file(),
+                "Use the fresh private client configuration for this batch.")
+        profile = {**profile, "client_config": str(config_path)}
+        self.client = ScannerClient(credentials(config_path))
         require(self.client.origin == profile["origin"], "Batch lease destination differs from the prepared profile.")
         self.profile = profile
         self.profile_path = profile_path
@@ -136,6 +140,14 @@ class BatchGuard:
     def lease_healthy(self):
         if self.lease is not None:
             self.lease.require_healthy()
+
+    def verify_run(self, run_id):
+        return verify_run(
+            self.base.parent.parent,
+            run_id,
+            self.owner,
+            client=getattr(self.lease, "client", None),
+        )
 
     def finish_lease(self, require_healthy=True):
         if self.lease is not None:
@@ -264,7 +276,7 @@ class BatchGuard:
                     "error": result.get("error", "Deterministic completion did not finish."),
                 }, "next": "retry-controller", "retry_request": {"op": "complete", "run_id": run_id}}
             try:
-                proof = verify_run(self.base.parent.parent, run_id, self.owner)
+                proof = self.verify_run(run_id)
             except (ClientError, OSError):
                 return self.verification_retry({"op": "complete", "run_id": run_id})
             state = self.record_verification(proof)
@@ -275,7 +287,7 @@ class BatchGuard:
         if op == "verify":
             require(self.state.get("workflow", "luna") == "luna", "Astra uses its independent verification protocol.")
             self.check_worker_closed()
-            proof = verify_run(self.base.parent.parent, request.get("run_id"), self.owner)
+            proof = self.verify_run(request.get("run_id"))
             state = self.record_verification(proof)
             return {**state, "verification": proof,
                     "next": "finish" if state["completed_count"] >= state["requested_count"] else "dispatch"}
@@ -325,7 +337,7 @@ class BatchGuard:
     def finish_batch(self, reason, **values):
         self.check_worker_closed()
         runs = self.state.get("verified_runs", {})
-        refreshed = {rid: verify_run(self.base.parent.parent, rid, self.owner) for rid in runs}
+        refreshed = {rid: self.verify_run(rid) for rid in runs}
         self.save({**self.state, "verified_runs": refreshed, "phase": "finishing",
                    "stop_reason": reason, **values})
         return self.finish_pending_batch()
@@ -421,21 +433,22 @@ def main():
     parser.add_argument("--verify", action=Once)
     parser.add_argument("--count", type=int, action=Once)
     parser.add_argument("--workflow", choices=("luna", "astra"), action=Once)
+    parser.add_argument("--client-config", required=True, action=Once)
     args = parser.parse_args()
     # The scheduled owner's standing approval covers processing, never recovery.
     require(not args.resolve or args.owner != "receipt-processing-scheduled",
             "Scheduled processing cannot resolve an unfinished batch; use owner-directed recovery.")
     repo = Path(__file__).resolve().parent.parent
-    if args.verify is not None:
-        require(args.resolve is None and args.reason is None, "Verification cannot request recovery.")
-        print(json.dumps(verify_run(repo, args.verify, args.owner)), flush=True)
-        return
     base = repo / ".local" / "receipt-worker"
     try:
-        lease = ProcessingBatchLease(repo)
+        lease = ProcessingBatchLease(repo, args.client_config)
     except EXPECTED_BATCH_LEASE_ERRORS as error:
         print(json.dumps(batch_lease_failure("batch-lease-setup", error)), flush=True)
         raise SystemExit(1) from None
+    if args.verify is not None:
+        require(args.resolve is None and args.reason is None, "Verification cannot request recovery.")
+        print(json.dumps(verify_run(repo, args.verify, args.owner, client=lease.client)), flush=True)
+        return
     try:
         guard = BatchGuard(base, args.owner, lease)
     except BatchBusy:

@@ -6,7 +6,7 @@ import time
 from urllib.parse import urlencode
 import uuid
 
-from receipt_api import ScannerClient, UUID, credentials
+from receipt_api import UUID
 from receipt_worker import require, write_new_file
 
 
@@ -72,7 +72,7 @@ def superseded_documents(base, batch, run_id, document, affected_documents):
     return superseded
 
 
-def verify_run(repo, run_id, owner):
+def verify_run(repo, run_id, owner, *, client):
     require(isinstance(run_id, str) and len(run_id) == 32
             and all(c in "0123456789abcdef" for c in run_id), "Invalid worker run ID.")
     base = regular_path(regular_path(repo / ".local") / "receipt-worker")
@@ -121,7 +121,6 @@ def verify_run(repo, run_id, owner):
     require(profile_path.is_absolute(), "Prepared worker profile must be absolute.")
     profile = read_json(regular_path(profile_path))
     require(Path(profile["repository"]).resolve() == repo.resolve(), "Prepared profile belongs to another checkout.")
-    client = ScannerClient(credentials(profile["client_config"]))
     require(client.origin == profile["origin"] == state["origin"], "Verification destination differs from the worker.")
     checkpoint = client.get("/api/processing/readings?" + urlencode({
         "document_id": document_id, "checkpoint_token": claim["token"],

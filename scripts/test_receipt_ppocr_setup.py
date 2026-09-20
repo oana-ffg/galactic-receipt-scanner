@@ -114,6 +114,7 @@ class PPSetupTests(unittest.TestCase):
                 str(config), node=str(node), renderer=str(renderer))
         value = json.loads(Path(profile).read_text(encoding='utf-8'))
         self.assertEqual(value['confirmation_provider'], 'ppocr')
+        self.assertNotIn('client_config', value)
         self.assertNotIn('ppocr', value)
         client.configure_saved_ppocr.assert_called_once()
 
@@ -121,7 +122,7 @@ class PPSetupTests(unittest.TestCase):
         config = self.repo / 'client.json'
         config.write_text('{}', encoding='utf-8')
         profile = self.repo / 'profile.json'
-        profile.write_text(json.dumps({'client_config': str(config.resolve())}), encoding='utf-8')
+        profile.write_text('{}', encoding='utf-8')
         worker_python = self.executable(f'python{sys.version_info.major}.{sys.version_info.minor}')
 
         with patch.object(setup, 'REPO', self.repo), \
@@ -133,7 +134,9 @@ class PPSetupTests(unittest.TestCase):
 
         descriptor = json.loads(
             (self.repo / '.local' / 'processing-host.json').read_text(encoding='utf-8'))
-        self.assertEqual(descriptor['client_config'], str(config.resolve()))
+        self.assertEqual(set(descriptor), {'python', 'worker_profile'})
+        self.assertTrue(Path(descriptor['python']).samefile(worker_python))
+        self.assertTrue(Path(descriptor['worker_profile']).samefile(profile))
 
     def test_renderer_must_be_fixed_executable_and_pass_preflight(self):
         renderer = self.executable('pdftoppm')

@@ -234,7 +234,11 @@ class WorkerTests(unittest.TestCase):
         self.profile = dict(repository=str(self.repo), node=str(self.repo / "node.exe"), renderer=str(self.repo / "pdftoppm.exe"),
                             client_config="synthetic-config", origin=self.fake.origin)
         from receipt_batch import BatchGuard
-        self.batch = BatchGuard(self.repo / '.local' / 'receipt-worker', 'synthetic-task')
+        self.batch = BatchGuard(
+            self.repo / '.local' / 'receipt-worker',
+            'synthetic-task',
+            Mock(client=self.fake),
+        )
         self.batch.start()
         self.addCleanup(self.batch.close)
         self.worker = self.make_worker()
@@ -1097,8 +1101,6 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.fake.documents[DID]["revision"], 3)
 
     def test_grouped_retry_submit_retains_complete_guard_verification_acknowledgement(self):
-        import receipt_batch_verify
-
         value = extraction()
         value["vendor"] = None
         grouping = {"donor_ids": [OTHER], "capture_ids": [DID, OTHER],
@@ -1117,9 +1119,7 @@ class WorkerTests(unittest.TestCase):
         (self.repo / ".local" / "processing-host.json").write_text(
             json.dumps({"worker_profile": str(profile_path)}), encoding="utf-8")
         self.worker.lock.close()
-        with patch.object(receipt_batch_verify, "credentials", return_value={}), \
-             patch.object(receipt_batch_verify, "ScannerClient", return_value=self.fake):
-            result = self.batch.handle({"op": "verify", "run_id": self.worker.state["run_id"]})
+        result = self.batch.handle({"op": "verify", "run_id": self.worker.state["run_id"]})
         self.assertTrue(result["verification"]["verified"])
         self.assertEqual(result["verification"]["affected_document_ids"], [DID, OTHER])
         self.assertEqual(result["completed_count"], 1)
