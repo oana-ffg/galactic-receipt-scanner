@@ -16,7 +16,7 @@ const MAX_JEV_TEXT = 24_000;
 const AUTO_MATCH_PROBABILITY = 0.9;
 const AUTO_MATCH_CONFIDENCE = 0.75;
 const JEV_ELIGIBILITY_VERSION = 2;
-const JEV_PIPELINE_VERSION = 3;
+const JEV_PIPELINE_VERSION = 4;
 
 export const pageRoles = [
   "receipt",
@@ -51,6 +51,7 @@ type JevResponse = {
 type JevBudget = { remaining: number };
 
 class JevCheckpoint extends Error {}
+class JevMutationBusy extends Error {}
 type PageHead = {
   capture_id: string;
   source_sha256: string;
@@ -525,8 +526,8 @@ async function compareDocuments(
     env,
     "document-relationship",
     input,
-    { id: current.id, revision: current.revision },
-    { id: candidate.id, revision: candidate.revision },
+    { id: current.id },
+    { id: candidate.id },
     () =>
       callJev(
         env,
@@ -540,9 +541,9 @@ async function compareDocuments(
               continuation:
                 "They are different pages or sections of the same receipt or financial document, excluding separate payment evidence.",
               payment_match:
-                "One is purchase documentation and the other is payment evidence for that same transaction.",
+                "One is purchase documentation and the other is payment evidence for the same transaction. Require the merchant/vendor, amount, time, card suffix, terminal, authorization, transaction or reference evidence to be compatible; a shared date alone is not enough, and a material contradiction means unrelated.",
               unrelated:
-                "They do not belong to the same transaction or document.",
+                "They do not belong to the same transaction or document, including when merchant/vendor, amount, time, card, terminal, authorization, transaction or reference evidence materially conflicts.",
             },
           },
         },
@@ -588,16 +589,23 @@ async function saveDocuments(
   loadCaptures: () => Promise<Capture[]>,
   documents: ReceiptDocument[],
 ) {
-  const response = await documentRoute(
-    new Request(new URL("/api/documents", request.url), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ documents }),
-    }),
-    env,
-    loadCaptures,
-    { statements: [], trustedProcessing: true },
-  );
+  let response: Response | null;
+  try {
+    response = await documentRoute(
+      new Request(new URL("/api/documents", request.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documents }),
+      }),
+      env,
+      loadCaptures,
+      { statements: [], trustedProcessing: true },
+    );
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 409)
+      throw new JevMutationBusy();
+    throw error;
+  }
   requireThat(response?.ok, 503, "Jev grouping could not be saved.");
   return (await response.json()) as {
     saved: { id: string; revision: number }[];
@@ -705,12 +713,32 @@ export async function mergeDocuments(
 
 async function documentsAreUnlocked(env: Env, documents: ReceiptDocument[]) {
   if (!documents.length) return true;
-  const active = await env.DB.prepare(
-    `SELECT document_id FROM processing_lock WHERE id=1 AND expires>unixepoch()*1000 AND document_id IN (${documents.map(() => "?").join(",")})`,
+  const current = new Map(
+    (await storedDocuments(env)).map((document) => [document.id, document]),
+  );
+  if (
+    documents.some((document) => {
+      const persisted = current.get(document.id);
+      return (persisted?.revision ?? 0) !== document.revision;
+    })
   )
-    .bind(...documents.map((document) => document.id))
-    .first<{ document_id: string }>();
-  return !active;
+    return false;
+  if (
+    documents.some(
+      (document) => current.get(document.id)?.processing ?? document.processing,
+    )
+  ) {
+    const batch = await env.DB.prepare(
+      "SELECT 1 AS active FROM processing_batch_lease WHERE id=1 AND expires>unixepoch()*1000",
+    ).first<{ active: number }>();
+    if (batch) return false;
+  }
+  const active = await env.DB.prepare(
+    "SELECT document_id FROM processing_lock WHERE id=1 AND expires>unixepoch()*1000",
+  ).first<{ document_id: string }>();
+  return (
+    !active || !documents.some((document) => document.id === active.document_id)
+  );
 }
 
 async function classifyDocument(
@@ -1038,6 +1066,11 @@ async function pipelineNeedsRun(
   if (unfinished) return true;
   const boundary = current.at(-1);
   if (!boundary) return false;
+  if (
+    captureOrder(boundary) >
+    `${latest.snapshot_created_at}\u0000${latest.snapshot_capture_id}`
+  )
+    return true;
   const probe: JevPipelineRun = {
     ...latest,
     snapshot_created_at: boundary.created_at,
@@ -1088,7 +1121,7 @@ async function claimPipelineStep(env: Env, run: JevPipelineRun) {
   const token = crypto.randomUUID();
   const now = new Date().toISOString();
   const claimed = await env.DB.prepare(
-    "UPDATE jev_pipeline_runs SET step_token=?,step_started_at=?,updated_at=? WHERE id=? AND phase!='complete' AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
+    "UPDATE jev_pipeline_runs SET step_token=?,step_started_at=?,updated_at=? WHERE id=? AND phase!='complete' AND (phase!='dates' OR NOT EXISTS(SELECT 1 FROM processing_batch_lease WHERE id=1 AND expires>unixepoch()*1000)) AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
   )
     .bind(token, now, now, run.id)
     .first<JevPipelineRun>();
@@ -1278,20 +1311,16 @@ async function documentHeadReady(
 export async function jevReadyDocuments(
   env: Env,
   documents: ReceiptDocument[],
-  currentCaptureIds: Set<string>,
+  captures: Capture[] = [],
 ) {
-  const pipeline = await activePipelineRun(env);
-  const unfinished = (
-    await env.DB.prepare(
-      "SELECT capture_id FROM jev_jobs WHERE status IN ('pending','running','failed','classified')",
-    ).all<{ capture_id: string }>()
-  ).results.some((job) => currentCaptureIds.has(job.capture_id));
-  if (pipeline || unfinished) return new Map<string, JevDocumentHead>();
   const heads = await jevDocumentHeads(env);
   const artifacts = (
     await env.DB.prepare(
       "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
     ).all<{ capture_id: string; sha256: string }>()
+  ).results;
+  const pageHeadRows = (
+    await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
   ).results;
   const ready = new Map<string, JevDocumentHead>();
   for (const document of documents) {
@@ -1302,6 +1331,45 @@ export async function jevReadyDocuments(
       (await documentHeadReady(env, document, head, pages, artifacts))
     )
       ready.set(document.id, head);
+  }
+  if (captures.length) {
+    const completed = await env.DB.prepare(
+      "SELECT snapshot_created_at,snapshot_capture_id FROM jev_pipeline_runs WHERE version=? AND phase='complete' ORDER BY created_at DESC,id DESC LIMIT 1",
+    )
+      .bind(JEV_PIPELINE_VERSION)
+      .first<{
+        snapshot_created_at: string;
+        snapshot_capture_id: string;
+      }>();
+    const current = captures
+      .filter((capture) => capture.is_current)
+      .sort(
+        (a, b) =>
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      );
+    const boundary = completed
+      ? `${completed.snapshot_created_at}\u0000${completed.snapshot_capture_id}`
+      : null;
+    const newStart = boundary
+      ? current.findIndex((capture) => captureOrder(capture) > boundary)
+      : 0;
+    if (newStart >= 0) {
+      const headByCapture = new Map(
+        pageHeadRows.map((head) => [head.capture_id, head]),
+      );
+      const missingIndex = current.findIndex((capture, index) => {
+        if (index < newStart) return false;
+        const head = headByCapture.get(capture.id);
+        return !head || head.source_sha256 !== capture.sha256;
+      });
+      if (missingIndex > 0) {
+        const precedingCaptureId = current[missingIndex - 1].id;
+        const openTail = documents.find((document) =>
+          document.pages.some((page) => page.captureId === precedingCaptureId),
+        );
+        if (openTail) ready.delete(openTail.id);
+      }
+    }
   }
   return ready;
 }
@@ -1458,7 +1526,38 @@ async function groupPipelineStep(
   const { all, active } = await pipelineDocuments(env, captures, run);
   if (!active.length)
     return { phase: "dates" as const, cursor: null, result: null };
-  const saved = parsePipelineCursor<{ active_id?: unknown }>(run);
+  const saved = parsePipelineCursor<{
+    active_id?: unknown;
+    finalize_id?: unknown;
+    next_id?: unknown;
+    terminal?: unknown;
+  }>(run);
+  if (typeof saved?.finalize_id === "string") {
+    const document = active.find((item) => item.id === saved.finalize_id);
+    if (!document)
+      return {
+        phase: "group" as const,
+        cursor: JSON.stringify({ active_id: active[0].id }),
+        result: { status: "cursor-reset" },
+      };
+    if (!(await documentsAreUnlocked(env, [document])))
+      return {
+        phase: "group" as const,
+        cursor: run.cursor,
+        result: { status: "busy" },
+        busy: true,
+      };
+    const result = await finalizePipelineDocument(env, document);
+    if (saved.terminal === true)
+      return { phase: "dates" as const, cursor: null, result };
+    const nextId =
+      typeof saved.next_id === "string" ? saved.next_id : active[0].id;
+    return {
+      phase: "group" as const,
+      cursor: JSON.stringify({ active_id: nextId }),
+      result,
+    };
+  }
   const activeId =
     typeof saved?.active_id === "string" ? saved.active_id : active[0].id;
   const original = all.find((document) => document.id === activeId);
@@ -1472,9 +1571,63 @@ async function groupPipelineStep(
     };
   const current = active[index];
   const next = active[index + 1];
-  if (!next) return { phase: "dates" as const, cursor: null, result: null };
+  if (!next) {
+    const currentIds = new Set(current.pages.map((page) => page.captureId));
+    const order = captures
+      .filter((capture) => capture.is_current)
+      .sort(
+        (a, b) =>
+          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      );
+    const lastIndex = Math.max(
+      ...current.pages.map((page) =>
+        order.findIndex((capture) => capture.id === page.captureId),
+      ),
+    );
+    const later = order
+      .slice(lastIndex + 1)
+      .find((capture) => !currentIds.has(capture.id));
+    if (later) {
+      if (!(await markDocumentsWaitingForOcr(env, active.slice(index))))
+        return {
+          phase: "group" as const,
+          cursor: run.cursor,
+          result: { status: "busy" },
+          busy: true,
+        };
+      return {
+        phase: "complete" as const,
+        cursor: null,
+        result: { status: "waiting-for-ocr" },
+        waiting: true,
+      };
+    }
+    return {
+      phase: "group" as const,
+      cursor: JSON.stringify({
+        finalize_id: current.id,
+        terminal: true,
+      }),
+      result: { status: "boundary" },
+    };
+  }
   const currentEvidence = await documentEvidence(env, current);
   const nextEvidence = await documentEvidence(env, next);
+  if (!currentEvidence || !nextEvidence) {
+    if (!(await markDocumentsWaitingForOcr(env, active.slice(index))))
+      return {
+        phase: "group" as const,
+        cursor: run.cursor,
+        result: { status: "busy" },
+        busy: true,
+      };
+    return {
+      phase: "complete" as const,
+      cursor: null,
+      result: { status: "waiting-for-ocr" },
+      waiting: true,
+    };
+  }
   const relevant = (evidence: Awaited<ReturnType<typeof documentEvidence>>) =>
     evidence?.heads.some(
       (head) => head.role === "receipt" || head.role === "payment_evidence",
@@ -1482,7 +1635,10 @@ async function groupPipelineStep(
   if (!relevant(currentEvidence) || !relevant(nextEvidence))
     return {
       phase: "group" as const,
-      cursor: JSON.stringify({ active_id: next.id }),
+      cursor: JSON.stringify({
+        finalize_id: current.id,
+        next_id: next.id,
+      }),
       result: { status: "boundary" },
     };
   const decision = await compareDocuments(env, next, current, { remaining: 1 });
@@ -1499,16 +1655,28 @@ async function groupPipelineStep(
         await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
       ).results.map((head) => [head.capture_id, head.role]),
     );
-    const merged = await mergeDocuments(
-      request,
-      env,
-      loadCaptures,
-      next,
-      current,
-      decision.answer.choice as "continuation" | "payment_match",
-      roles,
-      all,
-    );
+    let merged: ReceiptDocument | null;
+    try {
+      merged = await mergeDocuments(
+        request,
+        env,
+        loadCaptures,
+        next,
+        current,
+        decision.answer.choice as "continuation" | "payment_match",
+        roles,
+        all,
+      );
+    } catch (error) {
+      if (error instanceof JevMutationBusy)
+        return {
+          phase: "group" as const,
+          cursor: run.cursor,
+          result: { status: "busy" },
+          busy: true,
+        };
+      throw error;
+    }
     if (merged)
       return {
         phase: "group" as const,
@@ -1518,8 +1686,102 @@ async function groupPipelineStep(
   }
   return {
     phase: "group" as const,
-    cursor: JSON.stringify({ active_id: next.id }),
+    cursor: JSON.stringify({
+      finalize_id: current.id,
+      next_id: next.id,
+    }),
     result: { status: "boundary" },
+  };
+}
+
+async function markDocumentsWaitingForOcr(
+  env: Env,
+  documents: ReceiptDocument[],
+) {
+  const captureIds = [
+    ...new Set(
+      documents.flatMap((document) =>
+        document.pages.map((page) => page.captureId),
+      ),
+    ),
+  ];
+  if (!captureIds.length) return true;
+  if (!(await documentsAreUnlocked(env, documents))) return false;
+  const now = new Date().toISOString();
+  for (let index = 0; index < captureIds.length; index += 99) {
+    const chunk = captureIds.slice(index, index + 99);
+    await env.DB.prepare(
+      `UPDATE jev_jobs SET status='waiting',updated_at=? WHERE status='classified' AND capture_id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(now, ...chunk)
+      .run();
+  }
+  const documentIds = documents.map((document) => document.id);
+  for (let index = 0; index < documentIds.length; index += 100) {
+    const chunk = documentIds.slice(index, index + 100);
+    await env.DB.prepare(
+      `DELETE FROM jev_document_heads WHERE document_id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(...chunk)
+      .run();
+  }
+  return true;
+}
+
+async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
+  const evidence = await documentEvidence(env, document);
+  if (!evidence) {
+    for (const page of document.pages)
+      await env.DB.prepare(
+        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
+      )
+        .bind(new Date().toISOString(), page.captureId)
+        .run();
+    return {
+      status: "ineligible",
+      document_id: document.id,
+      reason: "document_evidence_incomplete",
+    };
+  }
+  const head =
+    (await env.DB.prepare(
+      "SELECT * FROM jev_document_heads WHERE document_id=?",
+    )
+      .bind(document.id)
+      .first<JevDocumentHead>()) ?? null;
+  const assessment = head
+    ? await env.DB.prepare("SELECT task FROM jev_assessments WHERE id=?")
+        .bind(head.assessment_id)
+        .first<{ task: string }>()
+    : null;
+  const artifacts = (
+    await env.DB.prepare(
+      "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
+    ).all<{ capture_id: string; sha256: string }>()
+  ).results;
+  const alreadyCurrent =
+    head?.page_fingerprint === (await pageFingerprint(document)) &&
+    assessment?.task === "document-classification" &&
+    (await documentHeadReady(env, document, head, evidence.heads, artifacts));
+  if (!alreadyCurrent) {
+    const classification = await classifyDocument(env, document, {
+      remaining: 1,
+    });
+    requireThat(
+      classification,
+      503,
+      "Final Jev document evidence is unavailable.",
+    );
+  }
+  for (const page of document.pages)
+    await env.DB.prepare(
+      "UPDATE jev_jobs SET status='complete',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
+    )
+      .bind(new Date().toISOString(), page.captureId)
+      .run();
+  return {
+    status: alreadyCurrent ? "verified" : "classified",
+    document_id: document.id,
   };
 }
 
@@ -1572,73 +1834,23 @@ async function documentPipelineStep(
   const document =
     active[(afterId && previousIndex < 0 ? -1 : previousIndex) + 1];
   if (!document) return { remaining: 0, cursor: null, result: null };
-  const cursor = JSON.stringify({ after_id: document.id });
-  const artifacts = (
-    await env.DB.prepare(
-      "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
-    ).all<{ capture_id: string; sha256: string }>()
-  ).results;
-  const evidence = await documentEvidence(env, document);
-  if (!evidence) {
-    for (const page of document.pages)
-      await env.DB.prepare(
-        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status='classified'",
-      )
-        .bind(new Date().toISOString(), page.captureId)
-        .run();
+  if (!(await documentsAreUnlocked(env, [document])))
     return {
       remaining: 1,
-      cursor,
-      result: {
-        status: "ineligible",
-        document_id: document.id,
-        reason: "document_evidence_incomplete",
-      },
+      cursor: run.cursor,
+      result: null,
+      busy: true,
     };
-  }
-  const head =
-    (await env.DB.prepare(
-      "SELECT * FROM jev_document_heads WHERE document_id=?",
-    )
-      .bind(document.id)
-      .first<JevDocumentHead>()) ?? null;
-  const assessment = head
-    ? await env.DB.prepare("SELECT task FROM jev_assessments WHERE id=?")
-        .bind(head.assessment_id)
-        .first<{ task: string }>()
-    : null;
-  const alreadyCurrent =
-    head?.document_revision === document.revision &&
-    head.page_fingerprint === (await pageFingerprint(document)) &&
-    assessment?.task === "document-classification" &&
-    (await documentHeadReady(env, document, head, evidence.heads, artifacts));
-  if (!alreadyCurrent) {
-    const classification = await classifyDocument(env, document, {
-      remaining: 1,
-    });
-    requireThat(
-      classification,
-      503,
-      "Final Jev document evidence is unavailable.",
-    );
-  }
-  for (const page of document.pages)
-    await env.DB.prepare(
-      "UPDATE jev_jobs SET status='complete',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status='classified'",
-    )
-      .bind(new Date().toISOString(), page.captureId)
-      .run();
+  const cursor = JSON.stringify({ after_id: document.id });
+  const result = await finalizePipelineDocument(env, document);
   return {
     remaining: 1,
     cursor,
-    result: {
-      status: alreadyCurrent ? "verified" : "classified",
-      document_id: document.id,
-    },
+    result,
   };
 }
 
-async function reconcileMatchingDates(
+async function reconcileDetachedPayments(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
@@ -1682,7 +1894,7 @@ async function reconcileMatchingDates(
         requireThat(
           found,
           503,
-          "Pinned PP OCR is unavailable for date reconciliation.",
+          "Pinned PP OCR is unavailable for detached-payment ranking.",
         );
         dates = ocrDateCandidates(found.value.text);
       }
@@ -1705,9 +1917,9 @@ async function reconcileMatchingDates(
     pageHeadRows.map((row) => [row.capture_id, row]),
   );
   const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
-  type DatedDocument = { document: ReceiptDocument; dates: Set<string> };
-  const purchases: DatedDocument[] = [];
-  const payments: DatedDocument[] = [];
+  type RankedDocument = { document: ReceiptDocument; dates: Set<string> };
+  const purchases: RankedDocument[] = [];
+  const payments: RankedDocument[] = [];
   for (const document of documents) {
     const heads = document.pages.map((page) =>
       pageHeadsByCapture.get(page.captureId),
@@ -1722,7 +1934,6 @@ async function reconcileMatchingDates(
     const hasReceipt = heads.some((head) => head!.role === "receipt");
     const hasPayment = heads.some((head) => head!.role === "payment_evidence");
     const dates = new Set<string>();
-    if (document.receiptDate) dates.add(document.receiptDate);
     for (const head of heads) {
       let parsed: unknown;
       try {
@@ -1741,35 +1952,27 @@ async function reconcileMatchingDates(
       );
       parsed.forEach((date) => dates.add(date));
     }
-    if (!dates.size) continue;
     if (hasReceipt && !hasPayment) purchases.push({ document, dates });
     if (hasPayment && !hasReceipt) payments.push({ document, dates });
   }
   purchases.sort((a, b) => a.document.id.localeCompare(b.document.id));
   payments.sort((a, b) => a.document.id.localeCompare(b.document.id));
-  const byDate = (items: DatedDocument[]) => {
-    const grouped = new Map<string, DatedDocument[]>();
-    for (const item of items)
-      for (const date of item.dates)
-        grouped.set(date, [...(grouped.get(date) ?? []), item]);
-    return grouped;
-  };
-  const purchasesByDate = byDate(purchases);
-  const paymentsByDate = byDate(payments);
-  const dates = [...purchasesByDate.keys()]
-    .filter((date) => paymentsByDate.has(date))
-    .sort();
   const budget: JevBudget = { remaining: 1 };
   let cursor = after;
   try {
-    for (const date of dates) {
-      for (const purchase of purchasesByDate.get(date) ?? []) {
-        for (const payment of paymentsByDate.get(date) ?? []) {
-          const shared = [...purchase.dates]
-            .filter((candidate) => payment.dates.has(candidate))
-            .sort();
-          if (shared[0] !== date) continue;
-          const key = `${date}|${purchase.document.id}|${payment.document.id}`;
+    for (const dateRank of [0, 1, 2] as const) {
+      for (const payment of payments) {
+        for (const purchase of purchases) {
+          const sharedDate = [...purchase.dates].some((date) =>
+            payment.dates.has(date),
+          );
+          const pairRank = sharedDate
+            ? 0
+            : purchase.dates.size === 0 || payment.dates.size === 0
+              ? 1
+              : 2;
+          if (pairRank !== dateRank) continue;
+          const key = `${dateRank}|${payment.document.id}|${purchase.document.id}`;
           if (after !== null && key <= after) continue;
           const decision = await compareDocuments(
             env,
@@ -1791,16 +1994,23 @@ async function reconcileMatchingDates(
             ]))
           )
             return { result: null, remaining: 1, busy: true, next: cursor };
-          const merged = await mergeDocuments(
-            request,
-            env,
-            loadCaptures,
-            purchase.document,
-            payment.document,
-            "payment_match",
-            roles,
-            allDocuments,
-          );
+          let merged: ReceiptDocument | null;
+          try {
+            merged = await mergeDocuments(
+              request,
+              env,
+              loadCaptures,
+              purchase.document,
+              payment.document,
+              "payment_match",
+              roles,
+              allDocuments,
+            );
+          } catch (error) {
+            if (error instanceof JevMutationBusy)
+              return { result: null, remaining: 1, busy: true, next: cursor };
+            throw error;
+          }
           if (!merged) {
             cursor = key;
             continue;
@@ -2028,15 +2238,16 @@ export async function jevRoute(
         return json({
           result: step.result,
           phase: step.phase,
-          remaining: 1,
+          remaining: step.phase === "complete" ? 0 : 1,
           busy: step.busy ?? false,
+          waiting: "waiting" in step && step.waiting === true,
           blocked: blocked?.count ?? 0,
         });
       }
       if (run.phase === "dates") {
         const cursor = parsePipelineCursor<{ after?: unknown }>(run);
         const after = typeof cursor?.after === "string" ? cursor.after : null;
-        const step = await reconcileMatchingDates(
+        const step = await reconcileDetachedPayments(
           request,
           env,
           loadCaptures,
@@ -2078,7 +2289,7 @@ export async function jevRoute(
           result: step.result,
           phase,
           remaining: step.remaining,
-          busy: false,
+          busy: "busy" in step && step.busy === true,
           blocked: blocked?.count ?? 0,
         });
       }

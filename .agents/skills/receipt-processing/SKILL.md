@@ -67,15 +67,28 @@ for Astra. Its legacy Luna examples do not implement reassessment; do not use th
 
 ## Document flow
 
-PP-OCR and Jev own the pre-Luna preparation step. The resumable Jev pipeline freezes a
-capture snapshot, classifies every page, groups adjacent whole documents forward in scan
-order until the first non-match, reconciles detached receipt-only/payment-only documents
-that share an exact normalized date, then performs one final whole-document classification.
-Document role and purchase category share that final Jev request. The pipeline saves
-page-level, document-level and relationship decisions with separate probabilities,
-confidence and provenance. Blank OCR is deterministic `misc` and makes no Jev request.
-Luna remains globally gated until the entire snapshot reaches `complete`; it never sees
-partly grouped or partly classified documents.
+PP-OCR and Jev own the pre-Luna preparation step. Each PP-OCR upload queues a page-role
+classification. The resumable Jev worker then walks whole documents forward in scan order:
+a match extends the active group and the first classified non-match closes it. If the next
+raw capture exists but lacks exact PP/Jev page evidence, the worker stops and leaves the
+active group unavailable instead of inventing a boundary. It final-classifies each closed
+group immediately; document role and purchase category share that request. Luna may claim
+any exact-layout closed group while Jev continues elsewhere, but never an open or partly
+classified group.
+
+Detached receipt-only/payment-only reconciliation is a later enrichment pass. Exact
+normalized date matches are tried first, followed by missing/ambiguous and apparently
+conflicting dates; OCR date parsing never excludes a candidate. Jev decides from the full
+evidence, including merchant, amount, time, card suffix, terminal, authorization and
+reference, with material contradictions weighing against a match. This later pass does not
+gate Luna field extraction. The batch guard holds and autonomously renews a backend lease
+while Luna work is being verified. During that lease Jev defers detached reconciliation
+and any consecutive merge that would revise an already processed document; it may still
+classify pages, close untouched groups and prepare new Luna work. Losing the lease is a
+fail-closed batch error before another worker is dispatched.
+The pipeline saves page-level, document-level and relationship decisions with separate
+probabilities, confidence and provenance. Blank OCR is deterministic `misc` and makes no
+Jev request.
 
 Jev page roles are `receipt`, `payment_evidence`, `account_record`, `cash_withdrawal`, and
 `misc`. Document role is separate from page role, association and purchase category. Jev
@@ -174,9 +187,10 @@ worker. Keep coordination in this task until the batch reaches a terminal outcom
 If the actual guard/worker session is lost, follow the failure and reconciliation rules;
 the checkpoint does not authorize a replacement process or a new task to take ownership.
 
-Keep each handoff and result compact. Jev has already performed the chronological and
-detached-evidence matching before the claim. Luna receives only the frozen assembled
-document, PP evidence and Jev assessment; it does not fetch neighbors or regroup pages.
+Keep each handoff and result compact. Jev has already closed the chronological
+consecutive group before the claim. Detached payment enrichment may still run later.
+Luna receives only the frozen assembled document, PP evidence and Jev assessment; it
+does not fetch neighbors or regroup pages.
 
 Before counting each worker, send `{"op":"verify","run_id":"ACTUAL_RUN_ID"}` through
 the **same live batch guard session** and require `verification.verified: true`.
@@ -295,13 +309,19 @@ disagreement stays low for human review even when Astra and Luna agree.
 
 ## Grouping and originals
 
-The backend owns ordinary grouping. For a frozen snapshot it first classifies all pages,
-then compares each next whole document with the active preceding group. A match extends
-that group; the first non-match closes it and makes the next document the active group.
-The integrated end pass checks earlier complementary receipt/payment documents only when
-their normalized dates match. Only high-probability, high-confidence Jev matches are
-applied. The model decision remains append-only even when no merge is made. One final
-whole-document role/category classification runs only after membership is stable.
+The backend owns ordinary grouping. For a frozen snapshot it first classifies available
+pages, then compares each next whole document with the active preceding group. A match
+extends that group; the first classified non-match closes it and makes the next document
+the active group. Missing PP/Jev evidence on the next raw capture stops the pass without
+closing the active group. Each closed group receives its whole-document role/category
+classification immediately and can proceed to Luna independently.
+
+The integrated later pass checks earlier complementary receipt/payment documents, trying
+shared OCR dates first without excluding missing or apparently conflicting dates, then asks
+Jev to decide from all transaction evidence.
+Only high-probability, high-confidence Jev matches are applied. The model decision remains
+append-only even when no merge is made. A final refresh keeps whole-document classification
+pinned to any layout enriched by a detached payment match.
 
 Luna treats the current ordered layout as frozen. If source pixels reveal a wrong merge,
 duplicate, missing page or incorrect order, record the concrete issue with low confidence

@@ -438,7 +438,7 @@ def main():
     parser.add_argument("--credentials-stdin", action="store_true", help="Read credentials from a secure provider pipe, never a command argument")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
-    commands.add_parser("jev-backfill", help="Run the resumable Jev page, grouping, date-match, and final-document pipeline")
+    commands.add_parser("jev-backfill", help="Run the resumable Jev page, grouping, detached-payment, and final-document pipeline")
     get = commands.add_parser("get", help="Read a relative processing API path")
     get.add_argument("path")
     post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing endpoint")
@@ -487,10 +487,15 @@ def main():
         processed = 0
         last = None
         stable_complete = False
+        deferred = False
         while True:
             last = json.loads(client.request("/api/jev/backfill", b"{}"))
             if last.get("busy"):
-                raise ClientError("Jev backfill is waiting for an active pipeline step or document claim; rerun it after that owner finishes.")
+                remaining = last.get("remaining")
+                if not isinstance(remaining, int) or remaining <= 0:
+                    raise ClientError("Jev backfill returned an invalid busy response.")
+                deferred = True
+                break
             if last.get("result") is not None:
                 processed += 1
             remaining = last.get("remaining")
@@ -507,9 +512,14 @@ def main():
         blocked = last.get("blocked", 0)
         if not isinstance(blocked, int) or blocked < 0:
             raise ClientError("Jev backfill returned an invalid blocked count.")
-        if blocked:
-            raise ClientError(f"Jev backfill left {blocked} blocked job(s); inspect status before retrying.")
-        result = {"complete": True, "processed": processed, "remaining": 0, "blocked": 0, "last": last}
+        if deferred:
+            result = {"complete": False, "deferred": True, "processed": processed,
+                      "remaining": last["remaining"], "phase": last.get("phase"),
+                      "blocked": blocked, "last": last}
+        else:
+            if blocked:
+                raise ClientError(f"Jev backfill left {blocked} blocked job(s); inspect status before retrying.")
+            result = {"complete": True, "processed": processed, "remaining": 0, "blocked": 0, "last": last}
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":

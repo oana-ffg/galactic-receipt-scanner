@@ -42,6 +42,8 @@ type Lock = {
 };
 const STAGE_MODEL = { small: "gpt-5.6-luna", large: "gpt-6-astra" } as const;
 const LEASE_MS = 20 * 60 * 1000;
+const BATCH_LEASE_MS = 30 * 60 * 1000;
+const BATCH_ID = /^[0-9a-f]{32}$/;
 const MAX_SUBMITTED_DOCUMENTS = 20;
 async function activeLock(env: Env) {
   return env.DB.prepare(
@@ -609,7 +611,7 @@ export async function processingRoute(
     const current = new Set(
       captures.filter((c) => c.is_current).map((c) => c.id),
     );
-    const jevReady = await jevReadyDocuments(env, docs, current);
+    const jevReady = await jevReadyDocuments(env, docs, captures);
     const time = new Map(captures.map((c) => [c.id, c.created_at]));
     const candidates = docs
       .filter(
@@ -666,10 +668,20 @@ export async function processingRoute(
     // Exactly one document lease across both stages. The head predicate rejects stale selection.
     const result = await env.DB.prepare(
       `INSERT INTO processing_lock(id,token,stage,document_id,revision,expires,draft)
-      SELECT 1,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=? AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete')
+      SELECT 1,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=? AND (?=1 OR EXISTS(SELECT 1 FROM jev_document_heads WHERE document_id=?)) AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
       ON CONFLICT(id) DO UPDATE SET token=excluded.token,stage=excluded.stage,document_id=excluded.document_id,revision=excluded.revision,expires=excluded.expires,draft=NULL WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
     )
-      .bind(token, input.stage, d.id, d.revision, LEASE_MS, d.id, d.revision)
+      .bind(
+        token,
+        input.stage,
+        d.id,
+        d.revision,
+        LEASE_MS,
+        d.id,
+        d.revision,
+        targeted ? 1 : 0,
+        d.id,
+      )
       .first();
     if (!result) return json({ claim: null, reason: "busy-or-changed" });
     return json({
@@ -681,6 +693,60 @@ export async function processingRoute(
         jev: await jevSummary(env, d),
       },
     });
+  }
+  if (path === "/api/processing/batch-lease" && method === "POST") {
+    requireThat(
+      request.headers.has("authorization"),
+      403,
+      "Receipt batch coordination requires scoped machine credentials.",
+    );
+    const input = await bodyJson(request);
+    const op = typeof input.op === "string" ? input.op : "";
+    requireThat(
+      ["acquire", "renew", "release"].includes(op) &&
+        typeof input.batch_id === "string" &&
+        BATCH_ID.test(input.batch_id) &&
+        typeof input.owner === "string" &&
+        input.owner.trim().length > 0 &&
+        input.owner.length <= 200,
+      400,
+      "Use a valid receipt batch lease request.",
+    );
+    if (op === "release") {
+      const released = await env.DB.prepare(
+        "DELETE FROM processing_batch_lease WHERE id=1 AND batch_id=? AND owner=? RETURNING batch_id",
+      )
+        .bind(input.batch_id, input.owner)
+        .first<{ batch_id: string }>();
+      return json({ released: Boolean(released) });
+    }
+    const now = new Date().toISOString();
+    if (op === "renew") {
+      const renewed = await env.DB.prepare(
+        "UPDATE processing_batch_lease SET expires=unixepoch()*1000+?,updated_at=? WHERE id=1 AND batch_id=? AND owner=? AND expires>unixepoch()*1000 RETURNING expires",
+      )
+        .bind(BATCH_LEASE_MS, now, input.batch_id, input.owner)
+        .first<{ expires: number }>();
+      return json(
+        renewed
+          ? { lease: { batch_id: input.batch_id, expires: renewed.expires } }
+          : { lease: null, reason: "expired-or-replaced" },
+      );
+    }
+    const acquired = await env.DB.prepare(
+      `INSERT INTO processing_batch_lease(id,batch_id,owner,expires,created_at,updated_at)
+       SELECT 1,?,?,unixepoch()*1000+?,?,? WHERE NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
+       ON CONFLICT(id) DO UPDATE SET batch_id=excluded.batch_id,owner=excluded.owner,expires=excluded.expires,created_at=excluded.created_at,updated_at=excluded.updated_at
+       WHERE processing_batch_lease.expires<=unixepoch()*1000 OR (processing_batch_lease.batch_id=excluded.batch_id AND processing_batch_lease.owner=excluded.owner)
+       RETURNING expires`,
+    )
+      .bind(input.batch_id, input.owner, BATCH_LEASE_MS, now, now)
+      .first<{ expires: number }>();
+    return json(
+      acquired
+        ? { lease: { batch_id: input.batch_id, expires: acquired.expires } }
+        : { lease: null, reason: "busy" },
+    );
   }
   if (path === "/api/processing/pdf-review" && method === "POST") {
     requireThat(

@@ -190,6 +190,14 @@ export const processingLock = sqliteTable("processing_lock", {
   expires: integer("expires").notNull(),
   draft: text("draft"),
 });
+export const processingBatchLease = sqliteTable("processing_batch_lease", {
+  id: integer("id").primaryKey(),
+  batch_id: text("batch_id").notNull().unique(),
+  owner: text("owner").notNull(),
+  expires: integer("expires").notNull(),
+  created_at: text("created_at").notNull(),
+  updated_at: text("updated_at").notNull(),
+});
 export const processingAttempts = sqliteTable("processing_attempts", {
   token: text("token").primaryKey(),
   document_id: text("document_id").notNull(),

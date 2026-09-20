@@ -229,7 +229,7 @@ async function category() {
 async function claim(stage = "small") {
   return (await ok("/api/processing/claim", { stage }, true)).claim;
 }
-it("does not offer Luna work until the current layout has a Jev pass", async () => {
+it("offers exact-layout Jev work between pipeline steps but not during an owned step", async () => {
   const c = await capture(false);
   expect(await claim()).toBeNull();
   const db = await mf.getD1Database("DB");
@@ -241,26 +241,72 @@ it("does not offer Luna work until the current layout has a Jev pass", async () 
   const now = new Date().toISOString();
   await db
     .prepare(
-      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,created_at,updated_at) VALUES(?,3,'group',?,?,?,?)",
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,created_at,updated_at) VALUES(?,4,'group',?,?,?,?)",
     )
     .bind(crypto.randomUUID(), c.created_at, c.id, now, now)
     .run();
-  expect(await claim()).toBeNull();
-  await db.prepare("UPDATE jev_pipeline_runs SET phase='complete'").run();
   const lease = await claim();
   expect(lease.document.id).toBe(c.id);
-});
-it("globally gates ready receipts while another current Jev job is unfinished", async () => {
-  const ready = await capture();
-  const unfinished = await capture(false);
+  await ok("/api/processing/release", { token: lease.token }, true);
+  await db
+    .prepare(
+      "UPDATE jev_pipeline_runs SET step_token=?,step_started_at=? WHERE phase!='complete'",
+    )
+    .bind(crypto.randomUUID(), now)
+    .run();
   expect(await claim()).toBeNull();
-  const db = await mf.getD1Database("DB");
-  const artifact = await db
-    .prepare("SELECT sha256 FROM artifacts WHERE capture_id=? AND kind='ocr'")
-    .bind(unfinished.id)
-    .first<any>();
-  await seedJevReady(unfinished, artifact.sha256);
+});
+it("does not globally gate a ready receipt behind another unfinished Jev job", async () => {
+  await capture(false);
+  const ready = await capture();
   expect((await claim()).document.id).toBe(ready.id);
+});
+it("withholds the ready tail when the next raw capture has not reached Jev", async () => {
+  const first = await capture();
+  const second = await capture(false);
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:00.000Z", first.id)
+    .run();
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:01.000Z", second.id)
+    .run();
+  expect(await claim()).toBeNull();
+});
+it("coordinates a renewable batch lease without exposing it to owner-only calls", async () => {
+  const request = {
+    op: "acquire",
+    batch_id: "a".repeat(32),
+    owner: "synthetic-coordinator",
+  };
+  expect((await req("/api/processing/batch-lease", request)).status).toBe(403);
+  expect(
+    (await ok("/api/processing/batch-lease", request, true)).lease,
+  ).toMatchObject({
+    batch_id: request.batch_id,
+  });
+  expect(
+    (
+      await ok(
+        "/api/processing/batch-lease",
+        { ...request, batch_id: "b".repeat(32) },
+        true,
+      )
+    ).lease,
+  ).toBeNull();
+  expect(
+    (await ok("/api/processing/batch-lease", { ...request, op: "renew" }, true))
+      .lease,
+  ).toMatchObject({ batch_id: request.batch_id });
+  expect(
+    await ok(
+      "/api/processing/batch-lease",
+      { ...request, op: "release" },
+      true,
+    ),
+  ).toEqual({ released: true });
 });
 it("excludes documents already verified by the active local batch", async () => {
   const first = await capture(),
@@ -900,6 +946,44 @@ it("targets an awaiting-pages review without falling back to the queue or bypass
   const readings = await ok(`/api/processing/readings?document_id=${first.id}`);
   expect(JSON.stringify(readings)).toContain("fragment");
   expect(JSON.stringify(readings)).toContain("gpt-6-astra");
+});
+it("allows an explicitly targeted investigation after PP and Jev evidence becomes unavailable", async () => {
+  const c = await capture();
+  const cat = await category();
+  const small = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: small.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(cat),
+    },
+    true,
+  );
+  const target = (await ok(`/api/documents/${c.id}`)).document;
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("DELETE FROM artifacts WHERE capture_id=? AND kind='ocr'")
+    .bind(c.id)
+    .run();
+  await db
+    .prepare("DELETE FROM jev_page_heads WHERE capture_id=?")
+    .bind(c.id)
+    .run();
+  await db
+    .prepare("DELETE FROM jev_document_heads WHERE document_id=?")
+    .bind(c.id)
+    .run();
+
+  const review = (
+    await ok(
+      "/api/processing/claim",
+      { stage: "large", document_id: c.id, revision: target.revision },
+      true,
+    )
+  ).claim;
+  expect(review.document.id).toBe(c.id);
+  await ok("/api/processing/release", { token: review.token }, true);
 });
 it("checks all receipts even at high certainty, gates Astra comparison, preserves blind parses", async () => {
   const c = await capture(),

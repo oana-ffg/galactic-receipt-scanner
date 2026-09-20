@@ -8,6 +8,26 @@ from unittest.mock import patch
 import receipt_batch as module
 
 
+class FakeLease:
+    def __init__(self):
+        self.batch_id = None
+        self.events = []
+
+    def start(self, batch_id, owner):
+        self.batch_id = batch_id
+        self.events.append(("start", batch_id, owner))
+
+    def require_healthy(self):
+        self.events.append(("healthy", self.batch_id))
+
+    def finish(self, require_healthy=True):
+        self.events.append(("finish", self.batch_id, require_healthy))
+        self.batch_id = None
+
+    def close(self):
+        self.events.append(("close", self.batch_id))
+
+
 class BatchGuardTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -35,6 +55,35 @@ class BatchGuardTests(unittest.TestCase):
         first.handle(dict(op='finish'))
         first.close()
         self.assertEqual(self.guard().start()['phase'], 'active')
+
+    def test_live_batch_lease_spans_verification_and_releases_after_finish(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        state = guard.start(1)
+        proof = dict(verified=True, run_id='a' * 32, document_id='receipt')
+        with patch.object(module, 'verify_run', return_value=proof):
+            guard.handle(dict(op='verify', run_id='a' * 32))
+            guard.handle(dict(op='finish'))
+        self.assertEqual(lease.events[0], ('start', state['batch_id'], 'synthetic-task'))
+        self.assertIn(('healthy', state['batch_id']), lease.events)
+        self.assertEqual(lease.events[-1], ('finish', state['batch_id'], True))
+        self.assertIsNone(lease.batch_id)
+
+    def test_lost_lease_can_still_record_and_release_a_blocked_batch(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        state = guard.start(1)
+
+        def lost():
+            raise module.InputError('Synthetic lease expired.')
+
+        lease.require_healthy = lost
+        result = guard.handle(dict(op='block', reason='Stop after the lease expired.'))
+        self.assertEqual(result['phase'], 'blocked')
+        self.assertEqual(result['lease_error'], 'Synthetic lease expired.')
+        self.assertIn(('finish', state['batch_id'], False), lease.events)
 
     def test_unclean_exit_requires_exact_owner_resolution(self):
         first = self.guard()
@@ -70,6 +119,7 @@ class BatchGuardTests(unittest.TestCase):
 
     def test_input_eof_blocks_and_preserves_batch(self):
         with patch.object(module, '__file__', str(Path(self.tmp.name) / 'scripts' / 'receipt_batch.py')), \
+             patch.object(module, 'ProcessingBatchLease', return_value=FakeLease()), \
              patch.object(module.sys, 'argv', ['receipt_batch.py', '--owner', 'synthetic-task']), \
              patch.object(module.sys, 'stdin', io.StringIO('')), \
              patch.object(module.sys, 'stdout', io.StringIO()):

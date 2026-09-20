@@ -4,6 +4,7 @@ import { newDocument } from "../web/documents";
 import {
   loadPurchaseCategoryChoices,
   documentEvidence,
+  jevReadyDocuments,
   jevSummary,
   mergeDocuments,
   pageFingerprint,
@@ -133,13 +134,17 @@ async function paymentJevResponse(
       const choices = Object.keys(question.criteria);
       const selected =
         name === "page_role"
-          ? text.includes("PAYMENT SLIP")
-            ? "payment_evidence"
-            : "receipt"
+          ? text.includes("BANK STATEMENT")
+            ? "account_record"
+            : text.includes("PAYMENT SLIP")
+              ? "payment_evidence"
+              : "receipt"
           : name === "document_role"
-            ? text.includes("PAYMENT SLIP") && !text.includes("SHOP RECEIPT")
-              ? "payment_evidence_only"
-              : "purchase_document"
+            ? text.includes("BANK STATEMENT")
+              ? "account_record"
+              : text.includes("PAYMENT SLIP") && !text.includes("SHOP RECEIPT")
+                ? "payment_evidence_only"
+                : "purchase_document"
             : name === "purchase_category"
               ? "unresolved"
               : relationship;
@@ -1189,6 +1194,7 @@ it("groups forward once per adjacent document and preserves the first boundary",
   expect(relationshipPairs).toEqual([
     { current: captures[1].id, candidate: captures[0].id },
     { current: captures[2].id, candidate: captures[1].id },
+    { current: captures[1].id, candidate: captures[0].id },
   ]);
   expect(
     await db
@@ -1258,7 +1264,20 @@ it("persists the forward grouping cursor between requests", async () => {
       "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
     )
     .first<{ cursor: string }>();
-  expect(JSON.parse(cursor!.cursor)).toEqual({ active_id: captures[1].id });
+  expect(JSON.parse(cursor!.cursor)).toEqual({
+    finalize_id: captures[0].id,
+    next_id: captures[1].id,
+  });
+
+  await runBackfill(processingToken);
+  const finalized = await db
+    .prepare(
+      "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
+    )
+    .first<{ cursor: string }>();
+  expect(JSON.parse(finalized!.cursor)).toEqual({
+    active_id: captures[1].id,
+  });
 
   await saveCapture(captures[1].id);
   expect(await runBackfill(processingToken)).toMatchObject({
@@ -1277,7 +1296,188 @@ it("persists the forward grouping cursor between requests", async () => {
     `${captures[2].id}|${captures[0].id}`,
   ]);
 });
-it("reconciles detached payment evidence only against receipts with the same OCR date", async () => {
+
+it("leaves the open tail unclassified until the following raw capture has PP OCR", async () => {
+  const processingToken = `rsc_${"o".repeat(43)}`;
+  const relationshipPairs: string[] = [];
+  let captures: any[] = [];
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      let relationship: "continuation" | "unrelated" = "unrelated";
+      if (body.questions.relationship) {
+        relationshipPairs.push(
+          `${body.state.current.document_id}|${body.state.candidate.document_id}`,
+        );
+        if (
+          body.state.current.document_id === captures[2]?.id &&
+          body.state.candidate.document_id === captures[1]?.id
+        )
+          relationship = "continuation";
+      }
+      return paymentJevResponse(request, relationship);
+    },
+  });
+  captures = [await saveCapture(), await saveCapture(), await saveCapture()];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries())
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(`2026-01-01T00:00:0${index}.000Z`, capture.id)
+      .run();
+  await seedHistoricalOcr(
+    captures[0],
+    "FIRST SHOP RECEIPT\nTOTAL 10.00",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    captures[1],
+    "SECOND SHOP RECEIPT PAGE 1",
+    "2026-01-01T00:00:01.000Z",
+  );
+
+  const first = await drainBackfill(processingToken);
+  expect(
+    first.results.some(
+      (step) => step.result?.status === "waiting-for-ocr" && step.waiting,
+    ),
+  ).toBe(true);
+  expect(relationshipPairs).toEqual([`${captures[1].id}|${captures[0].id}`]);
+  expect(
+    await db
+      .prepare("SELECT document_id FROM jev_document_heads WHERE document_id=?")
+      .bind(captures[0].id)
+      .first(),
+  ).toEqual({ document_id: captures[0].id });
+  expect(
+    await db
+      .prepare("SELECT document_id FROM jev_document_heads WHERE document_id=?")
+      .bind(captures[1].id)
+      .first(),
+  ).toBeNull();
+  expect(
+    await db
+      .prepare("SELECT status FROM jev_jobs WHERE capture_id=?")
+      .bind(captures[1].id)
+      .first(),
+  ).toEqual({ status: "waiting" });
+
+  await seedHistoricalOcr(
+    captures[2],
+    "SECOND SHOP RECEIPT PAGE 2\nTOTAL 20.00",
+    "2026-01-01T00:00:02.000Z",
+  );
+  await drainBackfill(processingToken);
+  const catalog = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  expect(
+    catalog.documents.find((document: any) => document.id === captures[1].id)
+      .pages,
+  ).toHaveLength(2);
+  expect(
+    await db
+      .prepare("SELECT document_id FROM jev_document_heads WHERE document_id=?")
+      .bind(captures[1].id)
+      .first(),
+  ).toEqual({ document_id: captures[1].id });
+});
+
+it("withholds a previously terminal document as soon as a newer raw capture exists", async () => {
+  const processingToken = `rsc_${"t".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const first = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:00.000Z", first.id)
+    .run();
+  await seedHistoricalOcr(
+    first,
+    "FIRST SHOP RECEIPT TOTAL 10.00",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await drainBackfill(processingToken);
+  const catalog = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  const firstDocument = catalog.documents.find(
+    (document: any) => document.id === first.id,
+  );
+  const env = {
+    DB: db,
+    BUCKET: await mf.getR2Bucket("BUCKET"),
+  } as any;
+  expect(
+    (await jevReadyDocuments(env, [firstDocument], [first])).has(first.id),
+  ).toBe(true);
+
+  const second = await saveCapture();
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:01.000Z", second.id)
+    .run();
+  expect(
+    (
+      await jevReadyDocuments(
+        env,
+        [firstDocument, newDocument(second)],
+        [first, second],
+      )
+    ).has(first.id),
+  ).toBe(false);
+
+  const waiting = await drainBackfill(processingToken);
+  expect(
+    waiting.results.some(
+      (step) => step.result?.status === "waiting-for-ocr" && step.waiting,
+    ),
+  ).toBe(true);
+  expect(
+    await db
+      .prepare("SELECT document_id FROM jev_document_heads WHERE document_id=?")
+      .bind(first.id)
+      .first(),
+  ).toBeNull();
+});
+
+it("marks an open tail larger than the D1 parameter limit as waiting", async () => {
+  const processingToken = `rsc_${"u".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+  });
+  const captures = [];
+  for (let index = 0; index < 101; index += 1)
+    captures.push(await saveCapture());
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:00.000Z", captures[0].id)
+    .run();
+  await seedHistoricalOcr(captures[0], "", "2026-01-01T00:00:00.000Z");
+
+  const waiting = await drainBackfill(processingToken, 20);
+  expect(
+    waiting.results.some(
+      (step) => step.result?.status === "waiting-for-ocr" && step.waiting,
+    ),
+  ).toBe(true);
+});
+
+it("tries shared dates first but lets Jev match apparently conflicting dates", async () => {
   const processingToken = `rsc_${"q".repeat(43)}`;
   const reconciliationPairs: { current: string; candidate: string }[] = [];
   let reconciling = false;
@@ -1287,7 +1487,8 @@ it("reconciles detached payment evidence only against receipts with the same OCR
     typesafeApiKey: "synthetic-key",
     outboundService: async (request: Request) => {
       const body = (await request.clone().json()) as any;
-      let relationship: "payment_match" | "unrelated" = "unrelated";
+      let relationship: "continuation" | "payment_match" | "unrelated" =
+        "unrelated";
       if (body.questions.relationship) {
         if (reconciling)
           reconciliationPairs.push({
@@ -1295,6 +1496,13 @@ it("reconciles detached payment evidence only against receipts with the same OCR
             candidate: body.state.candidate.document_id,
           });
         if (
+          !reconciling &&
+          body.state.current.ocr.includes("PAYMENT SLIP") &&
+          body.state.candidate.ocr.includes("PAYMENT SLIP")
+        )
+          relationship = "continuation";
+        else if (
+          reconciling &&
           body.state.current.ocr.includes("REFERENCE MATCH") &&
           body.state.candidate.ocr.includes("REFERENCE MATCH")
         )
@@ -1305,14 +1513,16 @@ it("reconciles detached payment evidence only against receipts with the same OCR
   });
   const payment = await saveCapture();
   const paymentContinuation = await saveCapture();
-  const otherDate = await saveCapture();
-  const matchingReceipt = await saveCapture();
+  const separator = await saveCapture();
+  const conflictingDateMatch = await saveCapture();
+  const sameDateWrongReceipt = await saveCapture();
   const db = await mf.getD1Database("DB");
   for (const [index, capture] of [
     payment,
     paymentContinuation,
-    otherDate,
-    matchingReceipt,
+    separator,
+    conflictingDateMatch,
+    sameDateWrongReceipt,
   ].entries())
     await db
       .prepare("UPDATE captures SET created_at=? WHERE id=?")
@@ -1329,18 +1539,59 @@ it("reconciles detached payment evidence only against receipts with the same OCR
     "2026-01-01T00:00:01.000Z",
   );
   await seedHistoricalOcr(
-    otherDate,
-    "SHOP RECEIPT 20/09/2026 REFERENCE OTHER",
+    separator,
+    "BANK STATEMENT BALANCE SUMMARY",
     "2026-01-01T00:00:02.000Z",
   );
   await seedHistoricalOcr(
-    matchingReceipt,
-    "SHOP RECEIPT 2026-09-19 REFERENCE MATCH",
+    conflictingDateMatch,
+    "SHOP RECEIPT 20/09/2026 REFERENCE MATCH",
     "2026-01-01T00:00:03.000Z",
+  );
+  await seedHistoricalOcr(
+    sameDateWrongReceipt,
+    "SHOP RECEIPT 2026-09-19 REFERENCE OTHER",
+    "2026-01-01T00:00:04.000Z",
   );
   let backfill: any;
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    if (backfill?.phase === "dates") reconciling = true;
+    backfill = await runBackfill(processingToken);
+    if (backfill.phase === "dates") break;
+  }
+  expect(backfill.phase).toBe("dates");
+  await db
+    .prepare(
+      "INSERT INTO processing_batch_lease(id,batch_id,owner,expires,created_at,updated_at) VALUES(1,?,?,unixepoch()*1000+60000,?,?)",
+    )
+    .bind(
+      "a".repeat(32),
+      "synthetic-coordinator",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    )
+    .run();
+  expect(
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM processing_batch_lease WHERE expires>unixepoch()*1000",
+      )
+      .first(),
+  ).toEqual({ count: 1 });
+  expect(
+    await db
+      .prepare(
+        "SELECT phase FROM jev_pipeline_runs WHERE phase!='complete' ORDER BY created_at DESC LIMIT 1",
+      )
+      .first(),
+  ).toEqual({ phase: "dates" });
+  reconciling = true;
+  expect(await runBackfill(processingToken)).toMatchObject({
+    phase: "dates",
+    busy: true,
+  });
+  expect(reconciliationPairs).toEqual([]);
+  await db.prepare("DELETE FROM processing_batch_lease WHERE id=1").run();
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     backfill = await runBackfill(processingToken);
     if (backfill.remaining === 0) break;
   }
@@ -1350,7 +1601,8 @@ it("reconciles detached payment evidence only against receipts with the same OCR
   });
 
   expect(reconciliationPairs).toEqual([
-    { current: matchingReceipt.id, candidate: payment.id },
+    { current: sameDateWrongReceipt.id, candidate: payment.id },
+    { current: conflictingDateMatch.id, candidate: payment.id },
   ]);
   const catalog = await (
     await mf.dispatchFetch(`${origin}/api/documents`, {
@@ -1358,27 +1610,30 @@ it("reconciles detached payment evidence only against receipts with the same OCR
     })
   ).json<any>();
   const retained = catalog.documents.find(
-    (document: any) => document.id === matchingReceipt.id,
+    (document: any) => document.id === conflictingDateMatch.id,
   );
   const donor = catalog.documents.find(
     (document: any) => document.id === payment.id,
   );
   const separate = catalog.documents.find(
-    (document: any) => document.id === otherDate.id,
+    (document: any) => document.id === sameDateWrongReceipt.id,
   );
   expect(retained.pages.map((page: any) => page.captureId)).toEqual([
-    matchingReceipt.id,
+    conflictingDateMatch.id,
     payment.id,
     paymentContinuation.id,
   ]);
-  expect(donor).toMatchObject({ pages: [], mergedInto: matchingReceipt.id });
+  expect(donor).toMatchObject({
+    pages: [],
+    mergedInto: conflictingDateMatch.id,
+  });
   expect(
     catalog.documents.find(
       (document: any) => document.id === paymentContinuation.id,
     ),
-  ).toMatchObject({ pages: [], mergedInto: matchingReceipt.id });
+  ).toMatchObject({ pages: [], mergedInto: conflictingDateMatch.id });
   expect(separate.pages.map((page: any) => page.captureId)).toEqual([
-    otherDate.id,
+    sameDateWrongReceipt.id,
   ]);
   expect(
     (
@@ -1390,7 +1645,7 @@ it("reconciles detached payment evidence only against receipts with the same OCR
   ).toBe(true);
 });
 
-it("does not date-match a current payment against a receipt capture retired after the snapshot", async () => {
+it("does not match a current payment against a receipt capture retired after the snapshot", async () => {
   const processingToken = `rsc_${"x".repeat(43)}`;
   const reconciliationPairs: string[] = [];
   let reconciling = false;
@@ -1464,7 +1719,7 @@ it("does not date-match a current payment against a receipt capture retired afte
   ).toEqual([expect.objectContaining({ captureId: payment.id })]);
 });
 
-it("checkpoints same-date reconciliation without repeating candidate pairs", async () => {
+it("checkpoints ranked reconciliation without repeating candidate pairs", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   const reconciliationPairs: string[] = [];
   let reconciling = false;
@@ -1677,6 +1932,108 @@ it("serializes forward grouping with the pipeline step lease", async () => {
     remaining: 1,
     busy: false,
   });
+});
+
+it("retries a merge when a document revision changes during Jev comparison", async () => {
+  const processingToken = `rsc_${"w".repeat(43)}`;
+  let releaseRelationship!: () => void;
+  const relationshipReleased = new Promise<void>((resolve) => {
+    releaseRelationship = resolve;
+  });
+  let markRelationshipStarted!: () => void;
+  const relationshipStarted = new Promise<void>((resolve) => {
+    markRelationshipStarted = resolve;
+  });
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      if (body.questions.relationship) {
+        markRelationshipStarted();
+        await relationshipReleased;
+      }
+      return matchingPaymentJevResponse(request);
+    },
+  });
+  const captures = [await saveCapture(), await saveCapture()];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries()) {
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(
+      capture,
+      `${index ? "SHOP RECEIPT" : "PAYMENT SLIP"} TOTAL 12.34`,
+      createdAt,
+    );
+  }
+  const persisted = newDocument(captures[0]);
+  const initialSave = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [persisted] }),
+  });
+  expect(initialSave.status).toBe(200);
+  let step: any;
+  for (let index = 0; index < 10; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "group") break;
+  }
+  const grouping = runBackfill(processingToken);
+  await relationshipStarted;
+  const current = await (
+    await mf.dispatchFetch(`${origin}/api/documents/${captures[0].id}`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  current.document.vendor = "Owner correction during comparison";
+  const changed = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [current.document] }),
+  });
+  expect(changed.status).toBe(200);
+  releaseRelationship();
+  expect(await grouping).toMatchObject({
+    phase: "group",
+    remaining: 1,
+    busy: true,
+  });
+  const beforeRetry = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  expect(
+    beforeRetry.documents.find(
+      (document: any) => document.id === captures[0].id,
+    ).pages,
+  ).toHaveLength(1);
+
+  await drainBackfill(processingToken);
+  const afterRetry = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  expect(
+    afterRetry.documents.find((document: any) => document.id === captures[1].id)
+      .pages,
+  ).toHaveLength(2);
 });
 
 it("creates only one active pipeline when initial backfill requests overlap", async () => {

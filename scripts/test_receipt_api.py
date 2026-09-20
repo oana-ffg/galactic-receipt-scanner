@@ -158,6 +158,33 @@ class ClientTests(unittest.TestCase):
             call("/api/jev/backfill", b"{}"),
         ])
 
+    def test_jev_backfill_reports_intentional_busy_state_as_deferred(self):
+        output = io.StringIO()
+        self.client.request = Mock(return_value=json.dumps({
+            "result": None, "phase": "dates", "remaining": 1,
+            "busy": True, "blocked": 0,
+        }).encode())
+        with patch("receipt_api.credentials", return_value={}), \
+                patch("receipt_api.ScannerClient", return_value=self.client), \
+                patch("sys.argv", ["receipt_api.py", "jev-backfill"]), redirect_stdout(output):
+            main()
+        self.assertEqual(json.loads(output.getvalue()), {
+            "complete": False,
+            "deferred": True,
+            "processed": 0,
+            "remaining": 1,
+            "phase": "dates",
+            "blocked": 0,
+            "last": {
+                "result": None,
+                "phase": "dates",
+                "remaining": 1,
+                "busy": True,
+                "blocked": 0,
+            },
+        })
+        self.client.request.assert_called_once_with("/api/jev/backfill", b"{}")
+
     def test_jev_backfill_fails_closed_when_jobs_are_blocked(self):
         self.client.request = Mock(return_value=json.dumps({
             "result": None, "remaining": 0, "blocked": 2

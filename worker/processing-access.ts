@@ -24,6 +24,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
     method === "POST" &&
     ([
       "/api/processing/claim",
+      "/api/processing/batch-lease",
       "/api/processing/renew",
       "/api/processing/release",
       "/api/processing/draft",
