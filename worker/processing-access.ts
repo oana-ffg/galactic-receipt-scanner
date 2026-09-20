@@ -33,6 +33,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/processing/categories",
       "/api/processing/pdf-review",
       "/api/jev/backfill",
+      "/api/jev/reconcile-matching-dates",
     ].includes(path) ||
       new RegExp(`^/api/documents/${id}/pdf$`).test(path) ||
       new RegExp(`^/api/captures/${id}/artifacts/ocr$`).test(path))

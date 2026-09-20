@@ -66,9 +66,11 @@ for Astra. Its legacy Luna examples do not implement reassessment; do not use th
 
 PP-OCR and Jev now own the pre-Luna preparation step. When exact-layout PP is saved, the
 backend classifies each page, compares it with the immediately preceding whole document,
-searches older complementary receipt/payment-evidence documents when needed, and saves
-page-level and document-level decisions with separate probabilities, confidence and
-provenance. Blank OCR is deterministic `misc` and makes no Jev request.
+and stops that consecutive chain on the first non-match. After the ordinary Jev backfill,
+run the separate date-reconciliation pass: it checks only receipt-only/payment-only
+documents that share an exact normalized date from pinned PP-OCR or a stored extraction.
+It saves page-level, document-level and relationship decisions with separate probabilities,
+confidence and provenance. Blank OCR is deterministic `misc` and makes no Jev request.
 
 Jev page roles are `receipt`, `payment_evidence`, `account_record`, `cash_withdrawal`, and
 `misc`. Document role is separate from page role, association and purchase category. Jev
@@ -288,9 +290,10 @@ disagreement stays low for human review even when Astra and Luna agree.
 ## Grouping and originals
 
 The backend owns ordinary grouping. It compares each new Jev-classified receipt/payment
-page against the immediately preceding whole document, then searches earlier complementary
-documents when one side lacks payment evidence. Only high-probability, high-confidence Jev
-matches are applied. The model decision remains append-only even when no merge is made.
+page against the immediately preceding whole document and stops that consecutive chain on
+the first non-match. A separate end pass checks earlier complementary receipt/payment
+documents only when their normalized dates match. Only high-probability, high-confidence
+Jev matches are applied. The model decision remains append-only even when no merge is made.
 
 Luna treats the current ordered layout as frozen. If source pixels reveal a wrong merge,
 duplicate, missing page or incorrect order, record the concrete issue with low confidence

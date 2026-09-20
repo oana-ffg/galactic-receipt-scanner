@@ -268,6 +268,7 @@ export const jevPageHeads = sqliteTable("jev_page_heads", {
   confidence: integer("confidence").notNull(),
   model: text("model").notNull(),
   assessment_id: text("assessment_id").notNull(),
+  date_candidates: text("date_candidates"),
   updated_at: text("updated_at").notNull(),
 });
 export const jevDocumentHeads = sqliteTable("jev_document_heads", {

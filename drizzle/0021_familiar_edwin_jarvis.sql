@@ -1,0 +1,1 @@
+ALTER TABLE `jev_page_heads` ADD `date_candidates` text;

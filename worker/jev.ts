@@ -16,6 +16,7 @@ const MAX_JEV_TEXT = 24_000;
 const AUTO_MATCH_PROBABILITY = 0.9;
 const AUTO_MATCH_CONFIDENCE = 0.75;
 const JEV_ELIGIBILITY_VERSION = 2;
+const ASSOCIATION_COMPLETE = JSON.stringify({ version: 2, complete: true });
 
 export const pageRoles = [
   "receipt",
@@ -59,6 +60,7 @@ type PageHead = {
   confidence: number;
   model: string;
   assessment_id: string;
+  date_candidates: string | null;
   updated_at: string;
 };
 export type JevDocumentHead = {
@@ -80,6 +82,40 @@ export type JevDocumentHead = {
 const scaled = (value: number) => Math.round(value * 1_000_000);
 const unscaled = (value: number | null) =>
   value === null ? null : value / 1_000_000;
+
+function normalizedDate(year: number, month: number, day: number) {
+  const value = new Date(Date.UTC(year, month - 1, day));
+  if (
+    value.getUTCFullYear() !== year ||
+    value.getUTCMonth() !== month - 1 ||
+    value.getUTCDate() !== day
+  )
+    return null;
+  return `${year.toString().padStart(4, "0")}-${month
+    .toString()
+    .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+}
+
+function ocrDateCandidates(text: string) {
+  const dates = new Set<string>();
+  const add = (year: string, month: string, day: string) => {
+    const normalized = normalizedDate(
+      Number(year.length === 2 ? `20${year}` : year),
+      Number(month),
+      Number(day),
+    );
+    if (normalized) dates.add(normalized);
+  };
+  for (const match of text.matchAll(
+    /\b(20\d{2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})\b/g,
+  ))
+    add(match[1], match[2], match[3]);
+  for (const match of text.matchAll(
+    /\b(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*((?:20)?\d{2})\b/g,
+  ))
+    add(match[3], match[2], match[1]);
+  return [...dates].sort();
+}
 
 async function sha256(value: unknown) {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -396,8 +432,9 @@ async function classifyPage(
   const answer = result.answers.page_role;
   validateChoice(answer, pageRoles);
   const now = new Date().toISOString();
+  const dates = JSON.stringify(ocrDateCandidates(text));
   await env.DB.prepare(
-    "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(capture_id) DO UPDATE SET source_sha256=excluded.source_sha256,ocr_sha256=excluded.ocr_sha256,role=excluded.role,probability=excluded.probability,confidence=excluded.confidence,model=excluded.model,assessment_id=excluded.assessment_id,updated_at=excluded.updated_at",
+    "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,date_candidates,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(capture_id) DO UPDATE SET source_sha256=excluded.source_sha256,ocr_sha256=excluded.ocr_sha256,role=excluded.role,probability=excluded.probability,confidence=excluded.confidence,model=excluded.model,assessment_id=excluded.assessment_id,date_candidates=excluded.date_candidates,updated_at=excluded.updated_at",
   )
     .bind(
       capture.id,
@@ -408,6 +445,7 @@ async function classifyPage(
       scaled(answer.confidence),
       result.model,
       saved.id,
+      dates,
       now,
     )
     .run();
@@ -420,6 +458,7 @@ async function classifyPage(
     confidence: scaled(answer.confidence),
     model: result.model,
     assessment_id: saved.id,
+    date_candidates: dates,
     updated_at: now,
   };
 }
@@ -833,7 +872,7 @@ async function tryAssociations(
   budget: JevBudget,
 ) {
   const captures = await loadCaptures();
-  let current = await currentDocument(env, captures, captureId);
+  const current = await currentDocument(env, captures, captureId);
   if (!current) return { document: null, deferred: false };
   const ordered = captures
     .filter((capture) => capture.is_current)
@@ -847,12 +886,89 @@ async function tryAssociations(
   const pageHeadRows = (
     await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
   ).results;
-  const pageHeads = new Map(pageHeadRows.map((row) => [row.capture_id, row]));
   const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
   const allDocuments = records(await storedDocuments(env), captures);
   const docs = allDocuments.filter(
     (document) => !document.mergedInto && !document.duplicateOf,
   );
+  if (job.association_progress) {
+    let saved: {
+      version?: unknown;
+      status?: unknown;
+      current_id?: unknown;
+      current_revision?: unknown;
+      candidate_id?: unknown;
+      candidate_revision?: unknown;
+      relationship?: unknown;
+      scope?: unknown;
+      next?: unknown;
+    };
+    try {
+      saved = JSON.parse(job.association_progress);
+    } catch {
+      throw new HttpError(409, "Saved Jev association state is invalid.");
+    }
+    if (saved.status === "decision" && saved.version === 2) {
+      const relationship = saved.relationship;
+      requireThat(
+        (relationship === "continuation" || relationship === "payment_match") &&
+          typeof saved.current_id === "string" &&
+          typeof saved.candidate_id === "string" &&
+          Number.isSafeInteger(saved.current_revision) &&
+          Number.isSafeInteger(saved.candidate_revision),
+        409,
+        "Saved Jev association state is invalid.",
+      );
+      const originalCurrent = allDocuments.find(
+        (document) => document.id === saved.current_id,
+      );
+      const originalCandidate = allDocuments.find(
+        (document) => document.id === saved.candidate_id,
+      );
+      if (
+        originalCurrent?.mergedInto === originalCandidate?.id ||
+        originalCandidate?.mergedInto === originalCurrent?.id
+      )
+        return { document: current, deferred: false };
+      requireThat(
+        originalCurrent &&
+          originalCandidate &&
+          !originalCurrent.mergedInto &&
+          !originalCurrent.duplicateOf &&
+          !originalCandidate.mergedInto &&
+          !originalCandidate.duplicateOf &&
+          originalCurrent.revision === saved.current_revision &&
+          originalCandidate.revision === saved.candidate_revision,
+        409,
+        "The documents changed before the saved Jev association could be applied.",
+      );
+      if (
+        !(await documentsAreUnlocked(env, [originalCurrent, originalCandidate]))
+      )
+        return { document: current, deferred: true };
+      const merged = await mergeDocuments(
+        request,
+        env,
+        loadCaptures,
+        originalCurrent,
+        originalCandidate,
+        relationship,
+        roles,
+        allDocuments,
+      );
+      return { document: merged ?? current, deferred: false };
+    }
+    // Version 1 wrote its cursor after completing a step, or with next=0
+    // when there were no steps. Retire that old broad-search cursor without
+    // replaying its predecessor decision against a possibly expanded group.
+    if (
+      typeof saved.scope === "string" &&
+      Number.isInteger(saved.next) &&
+      Number(saved.next) >= 0
+    )
+      return { document: current, deferred: false };
+    requireThat(false, 409, "Saved Jev association state is invalid.");
+  }
   const currentEvidence = await documentEvidence(env, current);
   if (
     !currentEvidence ||
@@ -861,7 +977,6 @@ async function tryAssociations(
     )
   )
     return { document: current, deferred: false };
-  const currentHeads = currentEvidence.heads;
   const firstIndex = Math.min(
     ...current.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
   );
@@ -876,141 +991,40 @@ async function tryAssociations(
         document.pages.some((page) => page.captureId === previousCapture.id),
       )
     : null;
-  const hasReceipt = currentHeads.some((head) => head.role === "receipt");
-  const hasPayment = currentHeads.some(
-    (head) => head.role === "payment_evidence",
-  );
-  const currentLast = Math.max(
-    ...current.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
-  );
-  const candidates: ReceiptDocument[] = [];
-  if (hasReceipt !== hasPayment)
-    for (const document of docs) {
-      if (document.id === current.id || document.id === previous?.id) continue;
-      const indexes = document.pages.map(
-        (page) => orderIndex.get(page.captureId) ?? -1,
-      );
-      if (Math.max(...indexes) >= currentLast) continue;
-      const heads = document.pages
-        .map((page) => pageHeads.get(page.captureId))
-        .filter((head): head is PageHead => !!head);
-      if (heads.length !== document.pages.length) continue;
-      const candidateHasReceipt = heads.some((head) => head.role === "receipt");
-      const candidateHasPayment = heads.some(
-        (head) => head.role === "payment_evidence",
-      );
-      if (
-        (hasReceipt &&
-          !hasPayment &&
-          candidateHasPayment &&
-          !candidateHasReceipt) ||
-        (hasPayment &&
-          !hasReceipt &&
-          candidateHasReceipt &&
-          !candidateHasPayment)
-      )
-        candidates.push(document);
-    }
-  candidates.sort((a, b) => {
-    const latest = (document: ReceiptDocument) =>
-      Math.max(
-        ...document.pages.map((page) => orderIndex.get(page.captureId) ?? -1),
-      );
-    return latest(b) - latest(a);
-  });
-  const documentToken = (document: ReceiptDocument) => ({
-    id: document.id,
-    revision: document.revision,
-    pages: document.pages.map((page) => {
-      const head = pageHeads.get(page.captureId);
-      return {
-        capture_id: page.captureId,
-        source_sha256: head?.source_sha256 ?? null,
-        ocr_sha256: head?.ocr_sha256 ?? null,
-        role: head?.role ?? null,
-      };
-    }),
-  });
-  const steps = [
-    ...(previous && previous.id !== current.id
-      ? [{ kind: "previous" as const, document: previous }]
-      : []),
-    ...candidates.map((document) => ({
-      kind: "payment" as const,
-      document,
-    })),
-  ];
-  const scope = await sha256({
-    current: documentToken(current),
-    steps: steps.map((step) => ({
-      kind: step.kind,
-      document: documentToken(step.document),
-    })),
-  });
-  let next = 0;
-  if (job.association_progress)
-    try {
-      const saved = JSON.parse(job.association_progress) as {
-        scope?: unknown;
-        next?: unknown;
-      };
-      if (
-        saved.scope === scope &&
-        Number.isInteger(saved.next) &&
-        Number(saved.next) >= 0 &&
-        Number(saved.next) <= steps.length
-      )
-        next = Number(saved.next);
-    } catch {
-      next = 0;
-    }
-  const saveProgress = async () => {
-    job.association_progress = JSON.stringify({ scope, next });
+  if (!previous || previous.id === current.id)
+    return { document: current, deferred: false };
+  const decision = await compareDocuments(env, current, previous, budget);
+  if (decision && shouldAutoMerge(decision.answer)) {
+    if (!(await documentsAreUnlocked(env, [current, previous])))
+      return { document: current, deferred: true };
+    const progress = JSON.stringify({
+      version: 2,
+      status: "decision",
+      current_id: current.id,
+      current_revision: current.revision,
+      candidate_id: previous.id,
+      candidate_revision: previous.revision,
+      relationship: decision.answer.choice,
+    });
     const saved = await env.DB.prepare(
       "UPDATE jev_jobs SET association_progress=? WHERE id=? AND status='running' AND run_token=? RETURNING id",
     )
-      .bind(job.association_progress, job.id, job.run_token)
+      .bind(progress, job.id, job.run_token)
       .first<{ id: string }>();
     requireThat(saved, 409, "Jev job ownership changed.");
-  };
-  let processed = 0;
-  while (next < steps.length && processed < 5) {
-    const step = steps[next];
-    const decision = await compareDocuments(
+    job.association_progress = progress;
+    const merged = await mergeDocuments(
+      request,
       env,
+      loadCaptures,
       current,
-      step.document,
-      budget,
+      previous,
+      decision.answer.choice as "continuation" | "payment_match",
+      roles,
+      allDocuments,
     );
-    const accepted =
-      step.kind === "previous"
-        ? decision && shouldAutoMerge(decision.answer)
-        : decision?.answer.choice === "payment_match" &&
-          shouldAutoMerge(decision.answer);
-    if (
-      accepted &&
-      decision &&
-      (await documentsAreUnlocked(env, [current, step.document]))
-    ) {
-      const merged = await mergeDocuments(
-        request,
-        env,
-        loadCaptures,
-        current,
-        step.document,
-        decision.answer.choice as "continuation" | "payment_match",
-        roles,
-        allDocuments,
-      );
-      if (merged) return { document: merged, deferred: false };
-    }
-    next += 1;
-    processed += 1;
-    await saveProgress();
+    if (merged) return { document: merged, deferred: false };
   }
-  if (next < steps.length) return { document: current, deferred: true };
-  if (job.association_progress !== JSON.stringify({ scope, next }))
-    await saveProgress();
   return { document: current, deferred: false };
 }
 
@@ -1072,16 +1086,29 @@ async function processJob(
   const budget: JevBudget = { remaining: 3 };
   try {
     await classifyPage(env, capture, job.ocr_sha256, value, budget);
-    const association = await tryAssociations(
-      request,
-      env,
-      loadCaptures,
-      capture.id,
-      job,
-      budget,
-    );
-    if (association.deferred) return { eligible: true, deferred: true };
-    const document = association.document;
+    let document: ReceiptDocument | null;
+    if (job.association_progress === ASSOCIATION_COMPLETE) {
+      document =
+        (await currentDocument(env, await loadCaptures(), capture.id)) ?? null;
+    } else {
+      const association = await tryAssociations(
+        request,
+        env,
+        loadCaptures,
+        capture.id,
+        job,
+        budget,
+      );
+      if (association.deferred) return { eligible: true, deferred: true };
+      document = association.document;
+      const saved = await env.DB.prepare(
+        "UPDATE jev_jobs SET association_progress=? WHERE id=? AND status='running' AND run_token=? RETURNING id",
+      )
+        .bind(ASSOCIATION_COMPLETE, job.id, job.run_token)
+        .first<{ id: string }>();
+      requireThat(saved, 409, "Jev job ownership changed.");
+      job.association_progress = ASSOCIATION_COMPLETE;
+    }
     if (!document)
       return {
         eligible: false,
@@ -1366,6 +1393,228 @@ export async function jevSummary(env: Env, document: ReceiptDocument) {
   };
 }
 
+async function reconcileMatchingDates(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+) {
+  const input = (await request.json().catch(() => ({}))) as { after?: unknown };
+  requireThat(
+    input.after === undefined ||
+      input.after === null ||
+      (typeof input.after === "string" && input.after.length <= 120),
+    400,
+    "The date-reconciliation cursor is invalid.",
+  );
+  const after = typeof input.after === "string" ? input.after : null;
+  const captures = await loadCaptures();
+  const allDocuments = records(await storedDocuments(env), captures);
+  const documents = allDocuments.filter(
+    (document) => !document.mergedInto && !document.duplicateOf,
+  );
+  const activePages = new Map(
+    documents.flatMap((document) =>
+      document.pages.map((page) => [page.captureId, page] as const),
+    ),
+  );
+  const unindexed = (
+    await env.DB.prepare(
+      "SELECT * FROM jev_page_heads WHERE date_candidates IS NULL ORDER BY updated_at,capture_id LIMIT 25",
+    ).all<PageHead>()
+  ).results;
+  if (unindexed.length) {
+    for (const head of unindexed) {
+      const page = activePages.get(head.capture_id);
+      let dates: string[] = [];
+      if (page && head.source_sha256 === page.sha256) {
+        const found = await pinnedPpOcr(env, page, head.ocr_sha256);
+        requireThat(
+          found,
+          503,
+          "Pinned PP OCR is unavailable for date reconciliation.",
+        );
+        dates = ocrDateCandidates(found.value.text);
+      }
+      await env.DB.prepare(
+        "UPDATE jev_page_heads SET date_candidates=? WHERE capture_id=? AND date_candidates IS NULL",
+      )
+        .bind(JSON.stringify(dates), head.capture_id)
+        .run();
+    }
+    return {
+      result: { status: "indexed", pages: unindexed.length },
+      remaining: 1,
+      next: null,
+    };
+  }
+  const pageHeadRows = (
+    await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
+  ).results;
+  const pageHeadsByCapture = new Map(
+    pageHeadRows.map((row) => [row.capture_id, row]),
+  );
+  const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
+  const documentHeads = new Map(
+    (
+      await env.DB.prepare(
+        "SELECT * FROM jev_document_heads",
+      ).all<JevDocumentHead>()
+    ).results.map((head) => [head.document_id, head]),
+  );
+  for (const document of documents) {
+    const heads = document.pages
+      .map((page) => pageHeadsByCapture.get(page.captureId))
+      .filter((head): head is PageHead => !!head);
+    if (
+      heads.length !== document.pages.length ||
+      !heads.some((head) => head.role === "receipt") ||
+      !heads.some((head) => head.role === "payment_evidence")
+    )
+      continue;
+    const head = documentHeads.get(document.id);
+    if (
+      head?.document_revision === document.revision &&
+      head.page_fingerprint === (await pageFingerprint(document))
+    )
+      continue;
+    const classification = await classifyDocument(env, document, {
+      remaining: 2,
+    });
+    requireThat(
+      classification,
+      503,
+      "Merged document evidence is unavailable for Jev reclassification.",
+    );
+    return {
+      result: { status: "reclassified", document_id: document.id },
+      remaining: 1,
+      next: null,
+    };
+  }
+  type DatedDocument = { document: ReceiptDocument; dates: Set<string> };
+  const purchases: DatedDocument[] = [];
+  const payments: DatedDocument[] = [];
+  for (const document of documents) {
+    const heads = document.pages.map((page) =>
+      pageHeadsByCapture.get(page.captureId),
+    );
+    if (
+      heads.some(
+        (head, index) =>
+          !head || head.source_sha256 !== document.pages[index].sha256,
+      )
+    )
+      continue;
+    const hasReceipt = heads.some((head) => head!.role === "receipt");
+    const hasPayment = heads.some((head) => head!.role === "payment_evidence");
+    const dates = new Set<string>();
+    if (document.receiptDate) dates.add(document.receiptDate);
+    for (const head of heads) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(head!.date_candidates ?? "[]");
+      } catch {
+        throw new HttpError(503, "Stored Jev date candidates are invalid.");
+      }
+      requireThat(
+        Array.isArray(parsed) &&
+          parsed.every(
+            (date) =>
+              typeof date === "string" && /^20\d{2}-\d{2}-\d{2}$/.test(date),
+          ),
+        503,
+        "Stored Jev date candidates are invalid.",
+      );
+      parsed.forEach((date) => dates.add(date));
+    }
+    if (!dates.size) continue;
+    if (hasReceipt && !hasPayment) purchases.push({ document, dates });
+    if (hasPayment && !hasReceipt) payments.push({ document, dates });
+  }
+  purchases.sort((a, b) => a.document.id.localeCompare(b.document.id));
+  payments.sort((a, b) => a.document.id.localeCompare(b.document.id));
+  const byDate = (items: DatedDocument[]) => {
+    const grouped = new Map<string, DatedDocument[]>();
+    for (const item of items)
+      for (const date of item.dates)
+        grouped.set(date, [...(grouped.get(date) ?? []), item]);
+    return grouped;
+  };
+  const purchasesByDate = byDate(purchases);
+  const paymentsByDate = byDate(payments);
+  const dates = [...purchasesByDate.keys()]
+    .filter((date) => paymentsByDate.has(date))
+    .sort();
+  const budget: JevBudget = { remaining: 1 };
+  let cursor = after;
+  try {
+    for (const date of dates) {
+      for (const purchase of purchasesByDate.get(date) ?? []) {
+        for (const payment of paymentsByDate.get(date) ?? []) {
+          const shared = [...purchase.dates]
+            .filter((candidate) => payment.dates.has(candidate))
+            .sort();
+          if (shared[0] !== date) continue;
+          const key = `${date}|${purchase.document.id}|${payment.document.id}`;
+          if (after !== null && key <= after) continue;
+          const decision = await compareDocuments(
+            env,
+            purchase.document,
+            payment.document,
+            budget,
+          );
+          if (
+            decision?.answer.choice !== "payment_match" ||
+            !shouldAutoMerge(decision.answer)
+          ) {
+            cursor = key;
+            continue;
+          }
+          if (
+            !(await documentsAreUnlocked(env, [
+              purchase.document,
+              payment.document,
+            ]))
+          )
+            return { result: null, remaining: 1, busy: true, next: cursor };
+          const merged = await mergeDocuments(
+            request,
+            env,
+            loadCaptures,
+            purchase.document,
+            payment.document,
+            "payment_match",
+            roles,
+            allDocuments,
+          );
+          if (!merged) {
+            cursor = key;
+            continue;
+          }
+          const classification = await classifyDocument(env, merged, {
+            remaining: 2,
+          });
+          requireThat(
+            classification,
+            503,
+            "Merged document evidence is unavailable for Jev reclassification.",
+          );
+          return {
+            result: { status: "merged", document_id: merged.id },
+            remaining: 1,
+            next: null,
+          };
+        }
+      }
+    }
+  } catch (error) {
+    if (error instanceof JevCheckpoint)
+      return { result: null, remaining: 1, next: cursor };
+    throw error;
+  }
+  return { result: null, remaining: 0, next: null };
+}
+
 export async function jevRoute(
   request: Request,
   env: Env,
@@ -1466,6 +1715,11 @@ export async function jevRoute(
       next: candidates.length > limit ? documents.at(-1)!.id : null,
     });
   }
+  if (
+    url.pathname === "/api/jev/reconcile-matching-dates" &&
+    request.method === "POST"
+  )
+    return json(await reconcileMatchingDates(request, env, loadCaptures));
   if (url.pathname === "/api/jev/backfill" && request.method === "POST") {
     const captures = await loadCaptures();
     const current = captures

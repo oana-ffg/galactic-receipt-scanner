@@ -404,6 +404,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     commands.add_parser("jev-backfill", help="Classify every current PP-OCR scan through the Site's pinned Jev model")
+    commands.add_parser("jev-reconcile-dates", help="Match detached Jev receipt/payment documents with the same normalized date")
     get = commands.add_parser("get", help="Read a relative processing API path")
     get.add_argument("path")
     post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing endpoint")
@@ -464,6 +465,25 @@ def main():
         if blocked:
             raise ClientError(f"Jev backfill left {blocked} blocked job(s); inspect status before retrying.")
         result = {"complete": True, "processed": processed, "remaining": 0, "blocked": 0, "last": last}
+    elif args.command == "jev-reconcile-dates":
+        processed = 0
+        after = None
+        while True:
+            body = json.dumps({"after": after}, separators=(",", ":")).encode()
+            last = json.loads(client.request("/api/jev/reconcile-matching-dates", body))
+            if last.get("result") is not None:
+                processed += 1
+            remaining = last.get("remaining")
+            if remaining == 0:
+                break
+            if not isinstance(remaining, int) or remaining < 0:
+                raise ClientError("Jev date reconciliation returned an invalid remaining count.")
+            after = last.get("next")
+            if after is not None and not isinstance(after, str):
+                raise ClientError("Jev date reconciliation returned an invalid cursor.")
+            if last.get("busy"):
+                raise ClientError("Jev date reconciliation is waiting for an active document claim; rerun it after processing finishes.")
+        result = {"complete": True, "processed": processed, "remaining": 0, "last": last}
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":
