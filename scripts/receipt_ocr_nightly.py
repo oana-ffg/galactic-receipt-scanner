@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resume PP OCR for a completed scan day and older unfinished current captures."""
+"""Resume PP OCR for every unfinished current capture saved before this run."""
 import argparse
 from datetime import date, datetime, time as daytime, timedelta, timezone
 import hashlib
@@ -41,6 +41,13 @@ def day_window(day, zone):
     start = datetime.combine(day, daytime.min, tzinfo=tz)
     end = datetime.combine(day + timedelta(days=1), daytime.min, tzinfo=tz)
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def scan_window(day, zone, now):
+    """Use an explicit calendar day only when requested; normal catch-up runs through now."""
+    scan_day = day or now.date()
+    start, end = day_window(scan_day, zone)
+    return scan_day, start, end if day is not None else now.astimezone(timezone.utc)
 
 
 def inventory(client, end):
@@ -201,7 +208,8 @@ def main():
     parser.add_argument('--config')
     parser.add_argument('--worker-profile')
     parser.add_argument('--timezone', default='Europe/Copenhagen')
-    parser.add_argument('--date', type=date.fromisoformat, help='Scan day; defaults to the previous local calendar day')
+    parser.add_argument('--date', type=date.fromisoformat,
+                        help='Explicit historical calendar-day scope; normal runs catch up through now')
     parser.add_argument('--cpu', action='store_true', help='Install/use CPU even when a GPU profile is configured')
     parser.add_argument('--node')
     parser.add_argument('--inventory-only', action='store_true', help='Read-only inventory; no runtime installation or OCR')
@@ -231,10 +239,7 @@ def main():
         run_logged([sys.executable, '-m', 'pip', 'install', 'tzdata>=2025.2,<2027'], setup_root, 'install-timezones')
         tz = ZoneInfo(args.timezone)
     now = datetime.now(tz)
-    day = args.date or (now.date() if requirement else now.date() - timedelta(days=1))
-    start, end = day_window(day, args.timezone)
-    if requirement:
-        end = now.astimezone(timezone.utc)
+    day, start, end = scan_window(args.date, args.timezone, now)
     captures = inventory(client, end)
     awaiting_ocr = [capture for capture in captures if needs_ocr(capture)]
     summary = dict(scan_day=day.isoformat(), timezone=args.timezone, cutoff=end.isoformat(), eligible=len(captures),

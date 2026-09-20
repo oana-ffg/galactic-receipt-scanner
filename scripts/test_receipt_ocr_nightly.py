@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 
 from receipt_api import ClientError, ScannerClient
 import receipt_ocr_nightly as nightly
-from receipt_ocr_nightly import CachedBackend, day_window, drain, fingerprint, inventory, needs_ocr, read_requirement, prepare_requirement
+from receipt_ocr_nightly import CachedBackend, day_window, drain, fingerprint, inventory, needs_ocr, read_requirement, prepare_requirement, scan_window
 from receipt_ppocr_setup import install_models, MODELS, check_node
 
 
@@ -142,6 +142,17 @@ class NightlyTests(unittest.TestCase):
         _, end = day_window(date(2026, 9, 16), 'Europe/Copenhagen')
         self.assertEqual([c['id'] for c in inventory(self.client, end)], ['backlog', 'wanted'])
         self.assertIn('before=cursor', self.client.get.call_args.args[0])
+
+    def test_normal_scan_window_catches_up_through_now_without_a_date(self):
+        now = datetime(2026, 9, 20, 15, 45, tzinfo=timezone.utc)
+        day, start, end = scan_window(None, 'Europe/Copenhagen', now)
+        self.assertEqual(day, date(2026, 9, 20))
+        self.assertEqual(start, datetime(2026, 9, 19, 22, tzinfo=timezone.utc))
+        self.assertEqual(end, now)
+
+        explicit_day, _, explicit_end = scan_window(date(2026, 9, 19), 'Europe/Copenhagen', now)
+        self.assertEqual(explicit_day, date(2026, 9, 19))
+        self.assertEqual(explicit_end, datetime(2026, 9, 19, 22, tzinfo=timezone.utc))
 
     def test_inventory_rejects_cursor_loop(self):
         self.client.get.return_value = dict(captures=[], next='repeat')
