@@ -69,10 +69,11 @@ group immediately; document role and purchase category share that request. The w
 offer Luna any exact-layout closed group while Jev continues elsewhere, but never an open
 or partly classified group.
 
-Detached receipt-only/payment-only reconciliation is a later enrichment pass. Exact
-normalized date matches are tried first, followed by missing/ambiguous and apparently
-conflicting dates; OCR date parsing never excludes a candidate. Jev decides from the full
-evidence, including merchant, amount, time, card suffix, terminal, authorization and
+Detached payment reconciliation is a later enrichment pass. Receipt-backed documents remain
+candidates even after one payment slip is attached because one transaction may have multiple
+slips. Exact normalized date matches are tried first, followed by missing/ambiguous and
+apparently conflicting dates; OCR date parsing never excludes a candidate. Jev decides from
+the full evidence, including merchant, amount, time, card suffix, terminal, authorization and
 reference, with material contradictions weighing against a match. This later pass does not
 gate Luna field extraction. The batch guard holds and autonomously renews a backend lease
 while Luna work is being verified. During that lease Jev defers detached reconciliation
@@ -272,9 +273,10 @@ the active group. Missing PP/Jev evidence on the next raw capture stops the pass
 closing the active group. Each closed group receives its whole-document role/category
 classification immediately and can proceed to Luna independently.
 
-The integrated later pass checks earlier complementary receipt/payment documents, trying
-shared OCR dates first without excluding missing or apparently conflicting dates, then asks
-Jev to decide from all transaction evidence.
+The integrated later pass checks earlier receipt-backed documents against detached payment
+documents, including receipts that already have a payment slip. It tries shared OCR dates
+first without excluding missing or apparently conflicting dates, then asks Jev to decide
+from all transaction evidence.
 Only high-probability, high-confidence Jev matches are applied. The model decision remains
 append-only even when no merge is made. A final refresh keeps whole-document classification
 pinned to any layout enriched by a detached payment match.

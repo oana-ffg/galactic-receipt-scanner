@@ -16,7 +16,7 @@ const MAX_JEV_TEXT = 24_000;
 const AUTO_MATCH_PROBABILITY = 0.9;
 const AUTO_MATCH_CONFIDENCE = 0.75;
 const JEV_ELIGIBILITY_VERSION = 2;
-const JEV_PIPELINE_VERSION = 4;
+const JEV_PIPELINE_VERSION = 5;
 
 export const pageRoles = [
   "receipt",
@@ -2043,7 +2043,10 @@ async function reconcileDetachedPayments(
       );
       parsed.forEach((date) => dates.add(date));
     }
-    if (hasReceipt && !hasPayment) purchases.push({ document, dates });
+    // A transaction can legitimately produce more than one detached payment slip.
+    // Keep receipt-backed documents eligible even after one slip has been attached;
+    // exact dates only rank candidates and Jev still decides from all evidence.
+    if (hasReceipt) purchases.push({ document, dates });
     if (hasPayment && !hasReceipt) payments.push({ document, dates });
   }
   purchases.sort((a, b) => a.document.id.localeCompare(b.document.id));

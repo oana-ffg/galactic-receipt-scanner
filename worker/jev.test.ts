@@ -983,6 +983,94 @@ it("backfills a historical receipt before its later matching payment slip", asyn
   ]);
 });
 
+it("lets Jev attach a second detached payment slip to a receipt that already has one", async () => {
+  const processingToken = `rsc_${"m".repeat(43)}`;
+  const secondSlipPairs: string[] = [];
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      let relationship: "continuation" | "payment_match" | "unrelated" =
+        "unrelated";
+      if (body.questions.relationship) {
+        const current = body.state.current.ocr as string;
+        const candidate = body.state.candidate.ocr as string;
+        if (
+          current.includes("SHOP RECEIPT") &&
+          candidate.includes("PAYMENT SLIP ONE")
+        )
+          relationship = "payment_match";
+        if (
+          current.includes("SHOP RECEIPT") &&
+          current.includes("PAYMENT SLIP ONE") &&
+          candidate.includes("PAYMENT SLIP TWO")
+        ) {
+          secondSlipPairs.push(
+            `${body.state.current.document_id}|${body.state.candidate.document_id}`,
+          );
+          relationship = "payment_match";
+        }
+      }
+      return paymentJevResponse(request, relationship);
+    },
+  });
+  const receipt = await saveCapture();
+  const firstSlip = await saveCapture();
+  const separator = await saveCapture();
+  const secondSlip = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of [
+    receipt,
+    firstSlip,
+    separator,
+    secondSlip,
+  ].entries())
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(`2026-01-01T00:00:0${index}.000Z`, capture.id)
+      .run();
+  await seedHistoricalOcr(
+    receipt,
+    "SHOP RECEIPT 21.09.2026 TOTAL 12.34",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    firstSlip,
+    "PAYMENT SLIP ONE 21.09.2026 TOTAL 12.34",
+    "2026-01-01T00:00:01.000Z",
+  );
+  await seedHistoricalOcr(
+    separator,
+    "BANK STATEMENT BALANCE SUMMARY",
+    "2026-01-01T00:00:02.000Z",
+  );
+  await seedHistoricalOcr(
+    secondSlip,
+    "PAYMENT SLIP TWO 21.09.2026 TOTAL 12.34",
+    "2026-01-01T00:00:03.000Z",
+  );
+
+  const { result } = await drainBackfill(processingToken);
+  expect(result).toMatchObject({ remaining: 0, blocked: 0 });
+  expect(secondSlipPairs).toEqual([`${receipt.id}|${secondSlip.id}`]);
+
+  const catalog = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  const merged = catalog.documents.find(
+    (document: any) => document.id === receipt.id,
+  );
+  expect(merged.pages.map((page: any) => page.captureId)).toEqual([
+    receipt.id,
+    firstSlip.id,
+    secondSlip.id,
+  ]);
+});
+
 it("does not let an older completed artifact hide a newer unqueued PP artifact", async () => {
   const processingToken = `rsc_${"d".repeat(43)}`;
   await mf.dispose();
