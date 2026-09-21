@@ -4,8 +4,7 @@ import type { DocumentView } from "./documents";
 export function receiptHandoff(doc: DocumentView) {
   const url = new URL("/review", location.origin);
   url.searchParams.set("document", doc.id);
-  const prompt = [
-    "Investigate what went wrong in the parsing of this receipt.",
+  const details = [
     `Receipt viewer: ${url.href}`,
     `Document ID: ${doc.id}`,
     `Saved document revision: ${doc.revision}`,
@@ -20,7 +19,6 @@ export function receiptHandoff(doc: DocumentView) {
       (page, index) =>
         `${index + 1}. Capture ${page.captureId}, SHA-256 ${page.sha256}`,
     ),
-    "Compare the original scans with the saved OCR, model readings and decision history for this revision. If the document has changed, distinguish the referenced result from the current one. Explain where the error first appeared and what evidence supports the diagnosis.",
   ].join("\n");
   const element = document.createElement("div");
   const controls = document.createElement("div");
@@ -35,17 +33,17 @@ export function receiptHandoff(doc: DocumentView) {
   status.setAttribute("role", "status");
   status.hidden = true;
   const fallback = document.createElement("textarea");
-  fallback.setAttribute("aria-label", "Receipt investigation prompt");
+  fallback.setAttribute("aria-label", "Receipt details");
   fallback.readOnly = true;
   fallback.rows = 6;
   fallback.hidden = true;
-  fallback.value = prompt;
+  fallback.value = details;
   copy.onclick = async () => {
     status.hidden = false;
     try {
-      await navigator.clipboard.writeText(prompt);
+      await navigator.clipboard.writeText(details);
       fallback.hidden = true;
-      status.textContent = "Copied. Paste into Codex and add what looks wrong.";
+      status.textContent = "Copied receipt details.";
     } catch {
       status.textContent =
         "Clipboard unavailable. Copy the selected text below and paste into Codex.";

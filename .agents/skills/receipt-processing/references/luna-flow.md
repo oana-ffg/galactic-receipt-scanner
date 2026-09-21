@@ -24,6 +24,12 @@ The task contains:
 Fill every field in the supplied extraction template. Never invent text, dates, quantities,
 purpose or amounts. Money is signed integer minor units; missing VAT is null, not zero.
 Preserve printed signs and do not count included VAT, informational savings or fees twice.
+Transcribe every visible purchase line, total, charge and tax amount in this result. When
+OCR is unclear, inspect the prepared preview. Keep a readable item description even if
+its amount is unreadable, with that amount null and a specific uncertainty. An empty
+`line_items` array is for a paper with no visible purchase lines, not for postponing work.
+Never use a blanket "financial verification deferred" note or leave readable financial
+fields blank for Astra. Astra verifies Luna's work; it does not perform Luna's skipped work.
 
 Use Jev's category as the starting value and choose only from the supplied category
 definitions. Do not research the merchant or create a category. Describe a visible grouping
@@ -39,6 +45,10 @@ Confidence:
 - low whenever Luna disagrees with PP or Jev;
 - medium when they agree but Luna remains unsure;
 - high only when they agree and Luna is sure.
+
+An intentionally partial financial extraction is not a valid low- or medium-confidence
+result. If evidence genuinely cannot resolve a field after inspection, explain that
+specific field and lower confidence accordingly.
 
 Write exactly one UTF-8 JSON object to `result_path` with exactly these keys:
 

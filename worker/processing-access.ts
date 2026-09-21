@@ -33,6 +33,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/processing/detach",
       "/api/processing/categories",
       "/api/processing/pdf-review",
+      "/api/processing/reparse",
       "/api/jev/backfill",
       "/api/jev/completeness",
     ].includes(path) ||

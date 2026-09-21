@@ -112,9 +112,11 @@ PDF generation/upload and source/hash/revision verification. Luna does not reque
 about locks, claims, retries, grouping, chronological neighbor matching, OCR execution,
 filesystem bookkeeping or PDF plumbing. Its work is:
 
-1. Extract fields from PP-OCR. Images are allowed but not required; use them when PP
-   confidence is low, text is ambiguous, a value conflicts, handwriting must be assessed,
-   or layout evidence matters.
+1. Extract every visible line item and financial field from PP-OCR. Inspect the prepared
+   images when OCR is ambiguous, low-confidence, or conflicts with another value. Never
+   leave readable items or amounts empty for a later financial pass. Use null for an
+   individual value only when it is absent or cannot be read after checking the evidence;
+   record the specific uncertainty. "Financial transcription deferred" is not an outcome.
 2. Check Jev when Jev confidence is low. Use Jev's category as the starting value and the
    active definitions as the decision boundary, without vendor research.
 3. Save Luna confidence as **low** whenever Luna disagrees with PP or Jev; **medium** when
@@ -122,7 +124,8 @@ filesystem bookkeeping or PDF plumbing. Its work is:
 4. Write one semantic result. The controller preserves audit checkpoints and PP/Jev pins,
    enforces confidence, submits it and creates the searchable PDF in the frozen layout.
 
-Low/medium is a successful Luna outcome queued for the separate Astra skill. Astra starts
+Low/medium is a successful Luna outcome queued for the separate Astra skill only after Luna
+has attempted the complete extraction. Astra starts
 with an independent pixel reading. **Any Astra disagreement with PP remains low even when
 Astra and Luna agree**, because those models are not independent corroboration. Missing PP
 makes the document ineligible for the automatic Astra parse queue and must be repaired before
@@ -241,7 +244,8 @@ model-review/awaiting-page/broken disposition is a document outcome, not by itse
 worker execution failure. **Continue with the next pending Luna document after such
 a saved outcome**, including low/medium certainty, OCR disagreement and arithmetic
 questions routed to Astra. Do not ask the owner to approve individual review flags.
-Later explicitly selected Astra audits handle financial review separately. In reports, distinguish
+Later explicitly selected Astra audits independently verify and correct financial fields;
+they do not replace Luna's initial extraction. In reports, distinguish
 "saved; queued for Astra" from a failed or uncertain network/journal operation.
 
 A saved small-stage result is not a fresh pending receipt for the next Luna. It becomes

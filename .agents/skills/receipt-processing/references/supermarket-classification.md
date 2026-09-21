@@ -30,5 +30,4 @@ labels rather than treating all meat or household goods as explicit cat products
 
 When certainty is below high, add **Confidence:** naming the uncertain fields and why the
 image, grouping or OCR evidence leaves them uncertain. Update after reassessment without
-rewriting the initial notes. High confidence does not certify deferred financial fields;
-retain the existing deferred-finance note.
+rewriting the initial notes.

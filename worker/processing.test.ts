@@ -308,6 +308,90 @@ it("coordinates a renewable batch lease without exposing it to owner-only calls"
     ),
   ).toEqual({ released: true });
 });
+it("queues an exact zero-item financial result for Luna without changing its saved reading", async () => {
+  const captureRecord = await capture();
+  const lease = await claim();
+  const incomplete = extraction();
+  incomplete.line_items = [];
+  incomplete.total_minor = null;
+  incomplete.charged_total_minor = null;
+  incomplete.vat_minor = null;
+  incomplete.certainty = "medium";
+  incomplete.uncertainties = ["Visible line items were not transcribed."];
+  await ok(
+    "/api/processing/submit",
+    { token: lease.token, model: "gpt-5.6-luna", extraction: incomplete },
+    true,
+  );
+  const before = (await ok(`/api/documents/${captureRecord.id}`)).document;
+  const request = {
+    documents: [{ id: before.id, revision: before.revision }],
+  };
+  expect((await req("/api/processing/reparse", request)).status).toBe(403);
+  const stale = await req(
+    "/api/processing/reparse",
+    { documents: [{ id: before.id, revision: before.revision + 1 }] },
+    true,
+  );
+  expect(stale.status, await stale.text()).toBe(409);
+  await ok("/api/processing/reparse", request, true);
+  const after = (await ok(`/api/documents/${captureRecord.id}`)).document;
+  expect(after.revision).toBe(before.revision + 1);
+  expect(after.processing.needs_reparse).toBe(true);
+  expect(after.processing.extraction).toEqual(before.processing.extraction);
+  expect((await req("/api/processing/reparse", request, true)).status).toBe(
+    409,
+  );
+  expect(
+    (await ok(`/api/documents/${captureRecord.id}/history`)).length,
+  ).toBeGreaterThan(1);
+});
+it("does not queue a Luna reparse when a batch starts just before its commit", async () => {
+  const captureRecord = await capture();
+  const lease = await claim();
+  const incomplete = extraction();
+  incomplete.line_items = [];
+  incomplete.total_minor = null;
+  incomplete.charged_total_minor = null;
+  incomplete.vat_minor = null;
+  incomplete.certainty = "medium";
+  await ok(
+    "/api/processing/submit",
+    { token: lease.token, model: "gpt-5.6-luna", extraction: incomplete },
+    true,
+  );
+  const before = (await ok(`/api/documents/${captureRecord.id}`)).document;
+  const db = await mf.getD1Database("DB");
+  const wrapped = {
+    prepare: db.prepare.bind(db),
+    batch: async (statements: D1PreparedStatement[]) => {
+      const now = new Date().toISOString();
+      await db
+        .prepare(
+          "INSERT INTO processing_batch_lease(id,batch_id,owner,expires,created_at,updated_at) VALUES(1,?,?,?,?,?)",
+        )
+        .bind("a".repeat(32), "synthetic-worker", Date.now() + 60000, now, now)
+        .run();
+      return db.batch(statements);
+    },
+  };
+  await expect(
+    processingRoute(
+      new Request(origin + "/api/processing/reparse", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          documents: [{ id: before.id, revision: before.revision }],
+        }),
+      }),
+      { DB: wrapped, BUCKET: await mf.getR2Bucket("BUCKET") } as unknown as Env,
+      async () => [{ ...captureRecord, is_current: true }],
+    ),
+  ).rejects.toMatchObject({ status: 409 });
+  const after = (await ok(`/api/documents/${captureRecord.id}`)).document;
+  expect(after.revision).toBe(before.revision);
+  expect(after.processing.needs_reparse).toBe(false);
+});
 it("excludes documents already verified by the active local batch", async () => {
   const first = await capture(),
     second = await capture();

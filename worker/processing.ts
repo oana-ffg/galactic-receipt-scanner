@@ -210,6 +210,80 @@ export async function processingRoute(
     path = url.pathname,
     method = request.method;
   if (!path.startsWith("/api/processing/")) return null;
+  if (path === "/api/processing/reparse" && method === "POST") {
+    requireThat(
+      request.headers.has("authorization"),
+      403,
+      "Use scoped machine credentials to queue a Luna reparse.",
+    );
+    requireThat(
+      !(await activeLock(env)),
+      409,
+      "Finish the active model claim before queueing a reparse.",
+    );
+    const lease = await env.DB.prepare(
+      "SELECT batch_id FROM processing_batch_lease WHERE id=1 AND expires>unixepoch()*1000",
+    ).first();
+    requireThat(
+      !lease,
+      409,
+      "Finish the active processing batch before queueing a reparse.",
+    );
+    const input = await bodyJson(request);
+    requireThat(
+      Array.isArray(input.documents) &&
+        input.documents.length > 0 &&
+        input.documents.length <= MAX_DOCUMENT_CHANGES,
+      400,
+      "Queue 1 to 100 saved documents at a time.",
+    );
+    const requested = input.documents as { id: string; revision: number }[];
+    requireThat(
+      requested.every(
+        (item) =>
+          item &&
+          UUID.test(item.id) &&
+          Number.isSafeInteger(item.revision) &&
+          item.revision > 0,
+      ) && new Set(requested.map((item) => item.id)).size === requested.length,
+      400,
+      "Use distinct saved document IDs and exact revisions.",
+    );
+    const stored = await storedDocuments(env);
+    const changed = requested.map(({ id, revision }) => {
+      const current = stored.find((doc) => doc.id === id);
+      requireThat(
+        current && current.revision === revision,
+        409,
+        "Document changed. Reload before queueing its reparse.",
+      );
+      requireThat(
+        !current.mergedInto &&
+          !current.duplicateOf &&
+          current.processing &&
+          financialTypes.includes(current.processing.extraction.type) &&
+          current.processing.extraction.line_items.length === 0 &&
+          !current.processing.needs_reparse &&
+          !current.processing.has_human_review,
+        409,
+        "Only unreviewed financial documents with no saved line items can be queued here.",
+      );
+      const doc = structuredClone(current);
+      doc.processing!.needs_reparse = true;
+      doc.processing!.large_model_confidence = null;
+      return doc;
+    });
+    // This assertion shares the document write transaction. A worker may acquire a
+    // claim after the reads above but before save, so the lease check must repeat here.
+    const guardToken = `reparse:${crypto.randomUUID()}`;
+    const guard = env.DB.prepare(
+      "INSERT INTO processing_commits(token,valid) SELECT ?,NOT EXISTS(SELECT 1 FROM processing_lock WHERE expires>unixepoch()*1000) AND NOT EXISTS(SELECT 1 FROM processing_batch_lease WHERE expires>unixepoch()*1000)",
+    ).bind(guardToken);
+    const clearGuard = env.DB.prepare(
+      "DELETE FROM processing_commits WHERE token=?",
+    ).bind(guardToken);
+    return save(request, env, load, changed, [guard, clearGuard]);
+  }
   if (path === "/api/processing/readings" && method === "GET") {
     const id = url.searchParams.get("document_id");
     requireThat(id && UUID.test(id), 400, "Choose a document.");
