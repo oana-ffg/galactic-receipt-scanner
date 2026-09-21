@@ -37,6 +37,55 @@ const MAX_JEV_TEXT = 24_000;
 const JEV_ELIGIBILITY_VERSION = 3;
 const JEV_PIPELINE_VERSION = 6;
 
+const relationshipPrompts = {
+  baseline: {
+    instructions:
+      "Classify the relationship between these two scanned documents.",
+    criteria: {
+      continuation:
+        "They are different pages or sections of the same receipt or financial document, excluding separate payment evidence.",
+      payment_match:
+        "One is purchase documentation and the other is payment evidence for the same transaction. Require the merchant/vendor, amount, time, card suffix, terminal, authorization, transaction or reference evidence to be compatible; a shared date alone is not enough, and a material contradiction means unrelated.",
+      unrelated:
+        "They do not belong to the same transaction or document, including when merchant/vendor, amount, time, card, terminal, authorization, transaction or reference evidence materially conflicts.",
+    },
+  },
+  evidence: {
+    instructions:
+      "Decide whether the two OCR-backed page groups add distinct evidence for ONE transaction. First distinguish itemized purchase paper from a card slip, and check whether a second purchase page is a duplicate scan. Compare printed merchant, date and time, receipt number, item overlap, purchase total, card charge, explicit fees, masked card digits and payment references. Compare purchase amount with purchase amount and fee-inclusive charge with fee-inclusive charge. Missing fields are unknown, not matching evidence. Scan order and a shared merchant or date alone do not establish a match. Select the most specific relationship supported by the text.",
+    criteria: {
+      continuation:
+        "Complementary or overlapping sections of the SAME purchase paper. The next page extends the item list or supplies its footer/total; overlapping boundary lines are allowed. Do not call two complete copies a continuation.",
+      payment_match:
+        "One group is purchase documentation and the other is a separate payment slip for the SAME transaction. Require a compatible printed transaction amount, including any explicit fee reconciliation, plus compatible merchant/date/time or a transaction reference. A conflicting known card suffix, unreconciled amount or different printed transaction is not a match.",
+      duplicate:
+        "The groups repeat substantially the same purchase paper, line items, total and transaction identifiers; this is a second image of the same page, not an additional page or payment slip.",
+      unrelated:
+        "Different transactions, a material contradiction, or insufficient affirmative evidence to join. Two complete purchases at the same merchant/date with different totals or references are unrelated.",
+    },
+  },
+  ordered: {
+    instructions:
+      "Use this decision order on the full OCR of both groups: (1) If the same purchase paper or item list is repeated with the same total/reference, choose duplicate. (2) If one side is a separate card slip, choose payment_match only when its base purchase amount or fee-inclusive charge reconciles with the receipt and merchant/date/time/reference are compatible; a different known card, unexplained amount or separate transaction means unrelated. (3) If both sides are parts of a purchase paper, choose continuation only when their item lists or structure genuinely connect, including a visible overlap at the page break. (4) Otherwise choose unrelated. Do not infer a transaction link from scan adjacency, merchant identity, or date alone. An explicit contradiction outweighs superficial similarity; unreadable fields are unknown.",
+    criteria: {
+      continuation:
+        "Distinct sections of one original purchase paper; the later section contributes new items, a footer or total, possibly repeating a few lines at the scan boundary.",
+      payment_match:
+        "A purchase paper and its distinct card payment slip for one charge, with reconciled amounts and compatible transaction details.",
+      duplicate:
+        "A retake or second scan of substantially the same purchase page and transaction, adding no distinct receipt section.",
+      unrelated:
+        "Separate transactions or insufficient positive evidence for a join, especially conflicting amount, card, date, time or receipt reference.",
+    },
+  },
+} as const;
+
+type RelationshipPrompt = keyof typeof relationshipPrompts;
+
+function relationshipQuestion(variant: RelationshipPrompt) {
+  return { relationship: { type: "choice" as const, ...relationshipPrompts[variant] } };
+}
+
 export const pageRoles = [
   "receipt",
   "payment_evidence",
@@ -657,21 +706,7 @@ async function compareDocuments(
       callJev(
         env,
         input,
-        {
-          relationship: {
-            type: "choice",
-            instructions:
-              "Classify the relationship between these two scanned documents.",
-            criteria: {
-              continuation:
-                "They are different pages or sections of the same receipt or financial document, excluding separate payment evidence.",
-              payment_match:
-                "One is purchase documentation and the other is payment evidence for the same transaction. Require the merchant/vendor, amount, time, card suffix, terminal, authorization, transaction or reference evidence to be compatible; a shared date alone is not enough, and a material contradiction means unrelated.",
-              unrelated:
-                "They do not belong to the same transaction or document, including when merchant/vendor, amount, time, card, terminal, authorization, transaction or reference evidence materially conflicts.",
-            },
-          },
-        },
+        relationshipQuestion("baseline"),
         budget,
       ),
     (result) =>
@@ -2453,6 +2488,104 @@ export async function jevRoute(
       confidence: decision.answer.confidence,
       assessment_id: decision.assessment_id,
       assessed: true,
+    });
+  }
+  if (
+    url.pathname === "/api/jev/relationship-benchmark" &&
+    request.method === "POST"
+  ) {
+    const input = await bodyJson(request);
+    requireThat(
+      typeof input.prompt_variant === "string" &&
+        Object.hasOwn(relationshipPrompts, input.prompt_variant),
+      400,
+      "Choose a supported relationship prompt.",
+    );
+    const variant = input.prompt_variant as RelationshipPrompt;
+    const validIds = (value: unknown): value is string[] =>
+      Array.isArray(value) &&
+      value.length >= 1 &&
+      value.length <= 4 &&
+      value.every((id) => typeof id === "string" && UUID.test(id)) &&
+      new Set(value).size === value.length;
+    requireThat(
+      validIds(input.left_page_ids) && validIds(input.right_page_ids) &&
+        new Set([...input.left_page_ids, ...input.right_page_ids]).size ===
+          input.left_page_ids.length + input.right_page_ids.length,
+      400,
+      "Provide two disjoint groups of current page IDs.",
+    );
+    const captures = await loadCaptures();
+    const currentIds = new Set(
+      captures.filter((capture) => capture.is_current).map((capture) => capture.id),
+    );
+    const documents = records(await storedDocuments(env), captures).filter(
+      (document) => !document.mergedInto && !document.duplicateOf,
+    );
+    const available = new Map(
+      documents.flatMap((document) =>
+        document.pages.map((page) => [page.captureId, { document, page }] as const),
+      ),
+    );
+    const group = (ids: string[]): ReceiptDocument => {
+      const first = available.get(ids[0]);
+      requireThat(first, 404, "Benchmark page is not in an active document.");
+      const pages = ids.map((id) => {
+        const selected = available.get(id);
+        requireThat(
+          selected && currentIds.has(id),
+          404,
+          "Benchmark page is not a current source page.",
+        );
+        return selected.page;
+      });
+      return { ...first.document, id: ids[0], pages };
+    };
+    const left = group(input.left_page_ids);
+    const right = group(input.right_page_ids);
+    const [leftEvidence, rightEvidence] = await Promise.all([
+      documentEvidence(env, left),
+      documentEvidence(env, right),
+    ]);
+    requireThat(
+      leftEvidence && rightEvidence &&
+        !leftEvidence.ocr.truncated && !rightEvidence.ocr.truncated &&
+        !leftEvidence.ocr.blank && !rightEvidence.ocr.blank,
+      409,
+      "Benchmark requires complete saved OCR for both page groups.",
+    );
+    const state = {
+      current: {
+        document_id: right.id,
+        ocr: rightEvidence.ocr.text,
+        pins: rightEvidence.ocr.pins,
+      },
+      candidate: {
+        document_id: left.id,
+        ocr: leftEvidence.ocr.text,
+        pins: leftEvidence.ocr.pins,
+      },
+    };
+    const response = await callJev(
+      env,
+      state,
+      relationshipQuestion(variant),
+      { remaining: 1 },
+    );
+    const answer = response.answers.relationship;
+    validateChoice(answer, Object.keys(relationshipPrompts[variant].criteria));
+    // This is an immutable-evidence experiment, not a current-document finding.
+    // A retake or newer OCR during inference does not change what Jev saw.
+    return json({
+      evidence_scope: "request_snapshot",
+      prompt_variant: variant,
+      model: response.model,
+      relationship: answer.choice,
+      probabilities: answer.probabilities,
+      confidence: answer.confidence,
+      left_page_ids: input.left_page_ids,
+      right_page_ids: input.right_page_ids,
+      ocr_pins: { left: leftEvidence.ocr.pins, right: rightEvidence.ocr.pins },
     });
   }
   if (url.pathname === "/api/jev/documents" && request.method === "GET") {
