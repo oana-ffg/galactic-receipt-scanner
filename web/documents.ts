@@ -125,6 +125,7 @@ export function retargetAbsorbedAliases(
   stored: ReceiptDocument[],
   targetId: string,
 ) {
+  const target = changed.find((document) => document.id === targetId);
   const absorbed = new Set(
     changed
       .filter((document) => document.mergedInto === targetId)
@@ -140,7 +141,16 @@ export function retargetAbsorbedAliases(
     )
       continue;
     const alias = structuredClone(previous);
-    if (absorbed.has(alias.mergedInto ?? "")) alias.mergedInto = targetId;
+    if (absorbed.has(alias.mergedInto ?? "")) {
+      alias.mergedInto = targetId;
+      if (target) {
+        const required = requiredMergeReviewReasons(alias, previous);
+        target.uncertainties = [
+          ...new Set([...target.uncertainties, ...required.uncertainties]),
+        ];
+        target.broken = [...new Set([...target.broken, ...required.broken])];
+      }
+    }
     if (absorbed.has(alias.duplicateOf ?? "")) alias.duplicateOf = targetId;
     changed.push(alias);
     changedIds.add(alias.id);

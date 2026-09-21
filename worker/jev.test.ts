@@ -423,6 +423,23 @@ it("retargets persisted merged and duplicate aliases when Jev absorbs their targ
     }),
   });
   expect(saved.status, await saved.text()).toBe(200);
+  const db = await mf.getD1Database("DB");
+  const priorAlias = {
+    ...mergedAlias,
+    revision: 2,
+    uncertainties: ["Synthetic unresolved OCR review."],
+    broken: ["Synthetic unresolved source error."],
+  };
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+      )
+      .bind(mergedAlias.id, 2, JSON.stringify(priorAlias), new Date().toISOString()),
+    db
+      .prepare("UPDATE document_heads SET revision=? WHERE id=?")
+      .bind(2, mergedAlias.id),
+  ]);
   const catalogResponse = await mf.dispatchFetch(`${origin}/api/documents`, {
     headers: ownerHeaders,
   });
@@ -430,7 +447,6 @@ it("retargets persisted merged and duplicate aliases when Jev absorbs their targ
   const documents = catalog.documents;
   const currentTarget = documents.find((item: any) => item.id === target.id);
   const currentDonor = documents.find((item: any) => item.id === donor.id);
-  const db = await mf.getD1Database("DB");
   const bucket = await mf.getR2Bucket("BUCKET");
   const merged = await mergeDocuments(
     new Request(origin),
@@ -447,6 +463,13 @@ it("retargets persisted merged and duplicate aliases when Jev absorbs their targ
     documents,
   );
   expect(merged?.id).toBe(target.id);
+  const destinationResponse = await mf.dispatchFetch(
+    `${origin}/api/documents/${target.id}`,
+    { headers: ownerHeaders },
+  );
+  const destination = (await destinationResponse.json<any>()).document;
+  expect(destination.uncertainties).toContain("Synthetic unresolved OCR review.");
+  expect(destination.broken).toContain("Synthetic unresolved source error.");
   for (const [id, relationship] of [
     [mergedAlias.id, "mergedInto"],
     [duplicateAlias.id, "duplicateOf"],
