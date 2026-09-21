@@ -6,6 +6,7 @@ import {
   filenameBase,
   invoiceDifference,
   mergeReviewReasons,
+  needsSourceIntervention,
   newDocument,
   validDate,
 } from "./documents";
@@ -14,6 +15,20 @@ const source = {
   id: "00000000-0000-4000-8000-000000000001",
   sha256: "a".repeat(64),
 } as Capture;
+it("flags missing-source findings and low-confidence completeness", () => {
+  const audit = (result: "yes" | "no" | "not_receipt", confidence: number) => ({
+    completenessAudit: {
+      result,
+      issue: result === "no" ? "missing_total" : "none",
+      confidence,
+      assessedAt: "2026-09-21T00:00:00Z",
+    },
+  });
+  expect(needsSourceIntervention(audit("no", 1))).toBe(true);
+  expect(needsSourceIntervention(audit("yes", 0.6))).toBe(true);
+  expect(needsSourceIntervention(audit("yes", 0.9))).toBe(false);
+  expect(needsSourceIntervention(audit("not_receipt", 1))).toBe(false);
+});
 describe("source-backed processing", () => {
   it("retains bounded processing evidence without changing existing notes", () => {
     expect(

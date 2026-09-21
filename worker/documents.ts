@@ -5,12 +5,14 @@ import {
 } from "../web/extraction";
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
+import { loadCompletenessAudits } from "./completeness-state";
 import {
   DOCUMENT_EVIDENCE_LIMIT,
   documentReasons,
   requiredMergeReviewReasons,
   filenameBase,
   newDocument,
+  needsSourceIntervention,
   validDate,
   type ReceiptDocument,
   type DocumentView,
@@ -279,6 +281,8 @@ export async function documentRoute(
       )
       .map(newDocument),
   ];
+  const { audits: completenessAudits, roles: jevRoles } =
+    await loadCompletenessAudits(env, docs);
   const reserved = await names(env);
   const fileRows = (
     await env.DB.prepare(
@@ -294,6 +298,13 @@ export async function documentRoute(
         JSON.stringify(JSON.parse(f.payload).pages) === JSON.stringify(d.pages),
     );
     const state = documentReasons(d);
+    const completenessAudit = completenessAudits.get(d.id) ?? null;
+    if (needsSourceIntervention({ completenessAudit })) {
+      state.reasons.unshift(
+        `Needs source intervention: ${completenessAudit!.result === "no" ? completenessAudit!.issue.replaceAll("_", " ") : "Jev could not confirm completeness confidently"}. Check the original paper and page grouping.`,
+      );
+      if (state.status === "ready") state.status = "review";
+    }
     if (!d.checks.visual && !d.mergedInto && !d.duplicateOf) {
       for (const [index, page] of d.pages.entries()) {
         const blur = captures.find((c) => c.id === page.captureId)?.metadata
@@ -345,6 +356,8 @@ export async function documentRoute(
     return {
       ...d,
       ...state,
+      completenessAudit,
+      jevRole: jevRoles.get(d.id) ?? null,
       filename,
       pdf: file ? { sha256: file.sha256, revision: file.revision } : null,
       scannedAt: d.pages.map(
@@ -401,6 +414,8 @@ export async function documentRoute(
               receiptDate: v.receiptDate,
               reference: v.reference,
               kind: v.kind,
+              jevRole: v.jevRole,
+              completenessAudit: v.completenessAudit,
               status: v.status,
               reasons: v.reasons.slice(0, 3),
               pageIds: v.pages.map((p) => p.captureId),

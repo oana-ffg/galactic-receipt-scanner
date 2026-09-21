@@ -8,7 +8,11 @@ import {
 } from "../web/documents";
 import { ocrTextArtifactMatchesPage, type OcrArtifact } from "../web/ocr-data";
 import { documentRoute, storedDocuments } from "./documents";
-import { HttpError, json, requireThat } from "./http";
+import {
+  COMPLETENESS_TASK,
+  loadCompletenessAudits,
+} from "./completeness-state";
+import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const JEV_MODEL = "jev-1.13.0";
@@ -325,6 +329,18 @@ async function pinnedPpOcr(
     : null;
 }
 
+export function summarizeDocumentOcr(pins: { text: string }[]) {
+  const text = pins
+    .map((pin, index) => `Page ${index + 1}:\n${pin.text}`)
+    .join("\n\n");
+  return {
+    blank: pins.every((pin) => !pin.text.trim()),
+    text: text.slice(0, MAX_JEV_TEXT),
+    characters: text.length,
+    truncated: text.length > MAX_JEV_TEXT,
+  };
+}
+
 async function documentOcr(
   env: Env,
   document: ReceiptDocument,
@@ -343,12 +359,8 @@ async function documentOcr(
     });
   }
   return {
-    blank: pins.every((pin) => !pin.text.trim()),
+    ...summarizeDocumentOcr(pins),
     pins: pins.map(({ text: _text, ...pin }) => pin),
-    text: pins
-      .map((pin, index) => `Page ${index + 1}:\n${pin.text}`)
-      .join("\n\n")
-      .slice(0, MAX_JEV_TEXT),
   };
 }
 
@@ -2185,6 +2197,10 @@ export async function jevRoute(
       .filter((document) => after === null || document.id > after)
       .slice(0, limit + 1);
     const documents = candidates.slice(0, limit);
+    const { audits: completenessAudits } = await loadCompletenessAudits(
+      env,
+      documents,
+    );
     const categories = (
       await env.DB.prepare("SELECT id,name FROM purchase_categories").all<{
         id: string;
@@ -2197,6 +2213,9 @@ export async function jevRoute(
     for (const document of documents) {
       const summary = await jevSummary(env, document);
       if (!summary.document) continue;
+      const evidence = summary.ready
+        ? await documentEvidence(env, document)
+        : null;
       const luna = document.processing?.extraction ?? null;
       const disagreements: string[] = [];
       if (luna) {
@@ -2220,6 +2239,9 @@ export async function jevRoute(
         document_id: document.id,
         revision: document.revision,
         ready: summary.ready,
+        ocr_characters: evidence?.ocr.characters ?? null,
+        ocr_truncated: evidence?.ocr.truncated ?? null,
+        completeness_audit: completenessAudits.get(document.id) ?? null,
         disagreements,
         jev: {
           ...summary.document,
@@ -2238,6 +2260,157 @@ export async function jevRoute(
     return json({
       documents: results,
       next: candidates.length > limit ? documents.at(-1)!.id : null,
+    });
+  }
+  if (url.pathname === "/api/jev/completeness" && request.method === "POST") {
+    const input = await bodyJson(request);
+    requireThat(
+      typeof input.document_id === "string" && UUID.test(input.document_id),
+      400,
+      "Provide a document ID for completeness assessment.",
+    );
+    const documents = records(await storedDocuments(env), await loadCaptures());
+    const document = documents.find((item) => item.id === input.document_id);
+    requireThat(
+      document && !document.mergedInto && !document.duplicateOf,
+      404,
+      "Current document not found.",
+    );
+    const summary = await jevSummary(env, document);
+    if (!summary.ready)
+      return json({
+        document_id: document.id,
+        revision: document.revision,
+        result: "not_ready",
+        assessed: false,
+        reason: "Jev or PP evidence is pending",
+      });
+    if (summary.document?.role !== "purchase_document")
+      return json({
+        document_id: document.id,
+        revision: document.revision,
+        result: "not_purchase",
+        assessed: false,
+        reason: summary.document?.role ?? "Jev classification is pending",
+      });
+    const evidence = await documentEvidence(env, document);
+    requireThat(evidence, 409, "Current PP OCR evidence is incomplete.");
+    const fingerprint = await pageFingerprint(document);
+    const completenessCriteria = {
+      yes: "This purchase document appears to include all receipt or invoice sections, continuous line entries, and its own printed total. A separate card slip alone cannot establish the purchase total. Choose yes only when the available pages themselves support completeness.",
+      no: "A receipt page or line section appears missing, the purchase total/footer is absent, a section is cut off or unreadable, page continuity is doubtful, or a payment slip is being used to fill a gap. Also choose no when completeness cannot be established from the available evidence; a human must inspect the paper.",
+      not_receipt:
+        "The document was classified as a purchase document in error and contains no purchase receipt, invoice, or credit note.",
+    };
+    const issueCriteria = {
+      none: "No source completeness concern is visible.",
+      missing_total:
+        "The purchase document has no visible printed purchase total or footer; a payment slip does not fill this gap.",
+      missing_lines_or_page:
+        "Line items, a continuation page, or a section of the purchase paper appears absent or cut off.",
+      page_or_slip_mismatch:
+        "Included pages or payment evidence may belong to different transactions.",
+      unreadable_or_uncertain:
+        "The scan or OCR is too unclear to establish completeness.",
+      evidence_too_long:
+        "The combined OCR exceeds the model input limit, so all pages and the footer could not be assessed together.",
+      not_receipt: "There is no purchase document here.",
+    };
+    const saved = await assess(
+      env,
+      COMPLETENESS_TASK,
+      {
+        ocr_text: evidence.ocr.text,
+        truncated: evidence.ocr.truncated,
+        pins: evidence.ocr.pins,
+        page_fingerprint: fingerprint,
+        completeness_criteria: completenessCriteria,
+        issue_criteria: issueCriteria,
+      },
+      { id: document.id, revision: document.revision },
+      null,
+      () =>
+        evidence.ocr.truncated
+          ? Promise.resolve({
+              model: "rule:oversized-ocr",
+              answers: {
+                completeness: {
+                  type: "choice" as const,
+                  choice: "no",
+                  probabilities: { yes: 0, no: 1, not_receipt: 0 },
+                  confidence: 1,
+                },
+                issue: {
+                  type: "choice" as const,
+                  choice: "evidence_too_long",
+                  probabilities: Object.fromEntries(
+                    Object.keys(issueCriteria).map((key) => [
+                      key,
+                      key === "evidence_too_long" ? 1 : 0,
+                    ]),
+                  ),
+                  confidence: 1,
+                },
+              },
+            })
+          : callJev(
+              env,
+              { ocr_text: evidence.ocr.text },
+              {
+                completeness: {
+                  type: "choice",
+                  instructions:
+                    "Check the purchase paper as a whole. Decide whether every page, line section, and the printed purchase total appear present. Do not infer a missing receipt total from a card slip.",
+                  criteria: completenessCriteria,
+                },
+                issue: {
+                  type: "choice",
+                  instructions:
+                    "Name the main source issue. Choose none only when completeness is yes.",
+                  criteria: issueCriteria,
+                },
+              },
+            ),
+      (result) => {
+        validateChoice(
+          result.answers.completeness,
+          Object.keys(completenessCriteria),
+        );
+        validateChoice(result.answers.issue, Object.keys(issueCriteria));
+        requireThat(
+          (result.answers.completeness.choice === "yes") ===
+            (result.answers.issue.choice === "none") &&
+            (result.answers.completeness.choice === "not_receipt") ===
+              (result.answers.issue.choice === "not_receipt"),
+          503,
+          "Jev returned conflicting completeness answers.",
+        );
+      },
+    );
+    const current = records(
+      await storedDocuments(env),
+      await loadCaptures(),
+    ).find((item) => item.id === document.id);
+    const currentEvidence = current
+      ? await documentEvidence(env, current)
+      : null;
+    requireThat(
+      current &&
+        current.revision === document.revision &&
+        (await pageFingerprint(current)) === fingerprint &&
+        JSON.stringify(currentEvidence?.ocr.pins) ===
+          JSON.stringify(evidence.ocr.pins),
+      409,
+      "Document changed during completeness assessment; rerun it.",
+    );
+    return json({
+      document_id: document.id,
+      revision: document.revision,
+      result: saved.result.answers.completeness.choice,
+      issue: saved.result.answers.issue.choice,
+      confidence: saved.result.answers.completeness.confidence,
+      assessment_id: saved.id,
+      assessed: true,
     });
   }
   if (url.pathname === "/api/jev/backfill" && request.method === "POST") {

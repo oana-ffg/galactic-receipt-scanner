@@ -8,6 +8,7 @@ export const documentTypes = [
   "atm",
   "note",
   "other",
+  "not-receipt",
 ] as const;
 export type DocumentType = (typeof documentTypes)[number];
 export type Certainty = "low" | "medium" | "high";

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
@@ -505,6 +505,62 @@ def run_jev_backfill(client, *, sleep=time.sleep):
     }
 
 
+def run_jev_completeness(client):
+    """Screen current Jev purchase documents without changing their grouping or Luna claims."""
+    after = None
+    counts = {"yes": 0, "no": 0, "not_receipt": 0, "already_assessed": 0,
+              "low_confidence_yes": 0, "not_purchase": 0, "not_ready": 0,
+              "oversized_ocr": 0}
+    largest_ocr_chars = 0
+    needs_human = []
+    while True:
+        path = "/api/jev/documents?limit=25"
+        if after:
+            path += "&after=" + quote(after, safe="")
+        page = client.get(path)
+        for document in page["documents"]:
+            chars = document.get("ocr_characters")
+            if isinstance(chars, int):
+                largest_ocr_chars = max(largest_ocr_chars, chars)
+            if document.get("ocr_truncated"):
+                counts["oversized_ocr"] += 1
+            if document["jev"]["role"] != "purchase_document":
+                counts["not_purchase"] += 1
+                continue
+            if not document["ready"]:
+                counts["not_ready"] += 1
+                continue
+            prior = document.get("completeness_audit")
+            if prior:
+                counts["already_assessed"] += 1
+                if prior["result"] == "no" or (prior["result"] == "yes" and prior["confidence"] < 0.75):
+                    needs_human.append(document["document_id"])
+                continue
+            payload = json.dumps({"document_id": document["document_id"]}).encode()
+            result = json.loads(client.request("/api/jev/completeness", payload))
+            if not result.get("assessed"):
+                if result.get("result") == "not_ready":
+                    counts["not_ready"] += 1
+                elif result.get("result") == "not_purchase":
+                    counts["not_purchase"] += 1
+                else:
+                    raise ClientError("Jev completeness returned an invalid skipped outcome.")
+                continue
+            outcome = result["result"]
+            if outcome not in {"yes", "no", "not_receipt"}:
+                raise ClientError("Jev completeness returned an invalid outcome.")
+            counts[outcome] += 1
+            if outcome == "no" or (outcome == "yes" and result["confidence"] < 0.75):
+                needs_human.append(document["document_id"])
+                if outcome == "yes":
+                    counts["low_confidence_yes"] += 1
+        after = page.get("next")
+        if not after:
+            break
+    return {"counts": counts, "largest_ocr_characters": largest_ocr_chars,
+            "needs_human_document_ids": needs_human}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=".local/processing-access.json")
@@ -513,6 +569,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     commands.add_parser("jev-backfill", help="Run the resumable Jev page, grouping, detached-payment, and final-document pipeline")
+    commands.add_parser("jev-completeness", help="Assess current Jev purchase documents for missing source pages, lines, and totals")
     get = commands.add_parser("get", help="Read a relative processing API path")
     get.add_argument("path")
     post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing endpoint")
@@ -559,6 +616,8 @@ def main():
         result = {**client.get("/api/processing/access"), "origin": client.origin}
     elif args.command == "jev-backfill":
         result = run_jev_backfill(client)
+    elif args.command == "jev-completeness":
+        result = run_jev_completeness(client)
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":

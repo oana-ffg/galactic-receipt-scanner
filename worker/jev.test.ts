@@ -11,6 +11,7 @@ import {
   prepareJevMerge,
   queueJevJob,
   shouldAutoMerge,
+  summarizeDocumentOcr,
 } from "./jev";
 import {
   ocrArtifactMatchesPage,
@@ -174,6 +175,7 @@ async function unrelatedPaymentJevResponse(request: Request) {
 
 async function syntheticJevResponse(request: Request) {
   const body = (await request.json()) as any;
+  const text = JSON.stringify(body.state);
   const answers = Object.fromEntries(
     Object.entries<any>(body.questions).map(([name, question]) => {
       const choices = Object.keys(question.criteria);
@@ -184,7 +186,15 @@ async function syntheticJevResponse(request: Request) {
             ? "purchase_document"
             : name === "purchase_category"
               ? "unresolved"
-              : "unrelated";
+              : name === "completeness"
+                ? text.includes("TOTAL")
+                  ? "yes"
+                  : "no"
+                : name === "issue"
+                  ? text.includes("TOTAL")
+                    ? "none"
+                    : "missing_total"
+                  : "unrelated";
       return [
         name,
         {
@@ -220,6 +230,16 @@ it("only auto-groups a positive relationship with conservative confidence", () =
   expect(shouldAutoMerge(answer("payment_match", 0.89, 1))).toBe(false);
   expect(shouldAutoMerge(answer("continuation", 1, 0.74))).toBe(false);
   expect(shouldAutoMerge(answer("unrelated", 1, 1))).toBe(false);
+});
+
+it("marks combined OCR truncated when a later receipt footer is outside Jev's input", () => {
+  const summary = summarizeDocumentOcr([
+    { text: "line\n".repeat(5_000) },
+    { text: "PRINTED TOTAL 12,34" },
+  ]);
+  expect(summary.characters).toBeGreaterThan(24_000);
+  expect(summary.truncated).toBe(true);
+  expect(summary.text).not.toContain("PRINTED TOTAL");
 });
 
 it("pins Jev readiness to page order, crop, rotation, and source hash", async () => {
@@ -674,6 +694,40 @@ it("completes each page job without starving a multi-page document and binds the
   expect(summary.pages.map((page) => page.capture_id)).toEqual(
     captures.map((capture) => capture.id),
   );
+  const assess = () =>
+    mf.dispatchFetch(`${origin}/api/jev/completeness`, {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: JSON.stringify({ document_id: document.id }),
+    });
+  const firstAssessment = await assess();
+  expect(firstAssessment.status, await firstAssessment.clone().text()).toBe(
+    200,
+  );
+  expect(await firstAssessment.json<any>()).toMatchObject({
+    result: "yes",
+    issue: "none",
+    assessed: true,
+  });
+  const repeatedAssessment = await assess();
+  expect(repeatedAssessment.status).toBe(200);
+  expect(await repeatedAssessment.json<any>()).toMatchObject({ result: "yes" });
+  const auditedDocument = await mf.dispatchFetch(
+    `${origin}/api/documents/${document.id}`,
+    { headers: ownerHeaders },
+  );
+  expect(
+    (await auditedDocument.json<any>()).document.completenessAudit,
+  ).toMatchObject({
+    result: "yes",
+    issue: "none",
+  });
   const now = new Date().toISOString();
   await db
     .prepare(

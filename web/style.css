@@ -687,6 +687,14 @@ header {
   color: #f1c76b;
   min-height: 1.5em;
 }
+#review-intervention-alert:not(:empty),
+.review-intervention-warning {
+  border: 2px solid #f1a35b;
+  border-radius: 0.5rem;
+  background: #3a291d;
+  color: #ffe6ca;
+  padding: 0.75rem 1rem;
+}
 @media (max-width: 760px) {
   .review-workspace {
     grid-template-columns: 1fr;

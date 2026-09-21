@@ -71,6 +71,13 @@ export interface ReceiptDocument {
 }
 export interface DocumentView extends ReceiptDocument {
   filename: string | null;
+  jevRole?: string | null;
+  completenessAudit?: {
+    result: "yes" | "no" | "not_receipt";
+    issue: string;
+    confidence: number;
+    assessedAt: string;
+  } | null;
   status:
     | "ready"
     | "processing"
@@ -83,6 +90,16 @@ export interface DocumentView extends ReceiptDocument {
   reasons: string[];
   scannedAt: string[];
   pdf: { sha256: string; revision: number } | null;
+}
+
+export function needsSourceIntervention(
+  doc: Pick<DocumentView, "completenessAudit">,
+): boolean {
+  const audit = doc.completenessAudit;
+  return (
+    audit?.result === "no" ||
+    (audit?.result === "yes" && audit.confidence < 0.75)
+  );
 }
 
 export function retargetAbsorbedAliases(
@@ -237,8 +254,9 @@ export function documentReasons(doc: ReceiptDocument): {
     reasons.push(
       "Extracted amounts do not balance; reread the source and check page completeness before treating the document as broken.",
     );
-  if (!doc.vendor) reasons.push("Vendor needs identification.");
-  if (!doc.receiptDate)
+  if (!doc.vendor && doc.kind !== "not-receipt")
+    reasons.push("Vendor needs identification.");
+  if (!doc.receiptDate && doc.kind !== "not-receipt")
     reasons.push("Receipt date needs identification; scan date is separate.");
   if (doc.kind === "unknown")
     reasons.push("Document type needs identification.");

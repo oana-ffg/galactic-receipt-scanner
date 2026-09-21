@@ -9,10 +9,23 @@ from contextlib import redirect_stdout
 from unittest.mock import Mock, patch, call
 from urllib.error import URLError
 from urllib.request import Request
-from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, main
+from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, main, run_jev_completeness
 
 
 class ClientTests(unittest.TestCase):
+    def test_completeness_race_does_not_count_an_unready_receipt_as_not_receipt(self):
+        document = {"document_id": self.id, "ready": True,
+                    "jev": {"role": "purchase_document"},
+                    "completeness_audit": None, "ocr_characters": 1000,
+                    "ocr_truncated": False}
+        self.client.get = Mock(return_value={"documents": [document], "next": None})
+        self.client.request = Mock(return_value=json.dumps(
+            {"assessed": False, "result": "not_ready"}).encode())
+        result = run_jev_completeness(self.client)
+        self.assertEqual(result["counts"]["not_ready"], 1)
+        self.assertEqual(result["counts"]["not_receipt"], 0)
+        self.assertEqual(result["needs_human_document_ids"], [])
+
     def test_pp_profile_binds_matching_destination_and_runtimes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
