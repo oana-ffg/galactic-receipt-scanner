@@ -80,4 +80,47 @@ test("manual request upload exposes purpose and downloads only an encrypted resp
   await expect(
     page.getByRole("link", { name: "Download encrypted response" }),
   ).toBeVisible();
+  const response = page.getByRole("textbox", {
+    name: /Encrypted response/,
+  });
+  await expect(response).toBeVisible();
+  const envelope = JSON.parse(await response.inputValue());
+  expect(envelope.id).toBe(request.request.request_id);
+  expect(envelope.sealed.algorithm).toBe("RSA-OAEP-256+A256GCM");
+  expect(JSON.stringify(envelope)).not.toContain("synthetic-gateway");
+});
+
+test("encrypted response remains available when connection list refresh fails", async ({
+  page,
+}) => {
+  await page.goto("/agent-access");
+  const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const request = {
+    origin: new URL(page.url()).origin,
+    request: {
+      request_id: crypto.randomUUID(),
+      name: "Synthetic processor with refresh failure",
+      scope: "processing",
+      days: 1,
+      public_key: publicKey.export({ format: "jwk" }),
+    },
+  };
+  await page.getByLabel("Connection request file").setInputFiles({
+    name: "request.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(request)),
+  });
+  await expect(
+    page.getByRole("button", { name: "Approve connection" }),
+  ).toBeEnabled();
+  await page.route("**/api/connections", async (route) => {
+    if (route.request().method() === "GET") await route.abort();
+    else await route.continue();
+  });
+  await page.getByRole("button", { name: "Approve connection" }).click();
+  const response = page.getByRole("textbox", { name: /Encrypted response/ });
+  await expect(response).toBeVisible();
+  expect(JSON.parse(await response.inputValue()).id).toBe(
+    request.request.request_id,
+  );
 });

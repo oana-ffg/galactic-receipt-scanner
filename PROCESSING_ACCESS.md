@@ -27,7 +27,9 @@ credential alone does not authorize scanner data access.
 1. Use the [data-access skill](.agents/skills/receipt-data-access/SKILL.md). The Node helper
    creates a host-local RSA key pair and a public request bound to the Site and purpose.
 2. Terra uses `create_processing_connection` on `/agent-access`. The owner can instead
-   upload the request file on that page and download its encrypted response. Both paths
+   upload the request file on that page and download or copy its encrypted response. The
+   copy field supports browsers that cannot deliver a local download; pass that JSON to
+   `receipt_connection.mjs complete-stdin`. Both paths
    use the same owner-authorized route and validations.
 3. The response uses RSA-OAEP/SHA-256 to wrap an AES-256-GCM key. Only the requesting
    host can decrypt the credential bundle; browser/model-visible results contain ciphertext.
