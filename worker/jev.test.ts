@@ -244,7 +244,7 @@ async function syntheticJevResponse(request: Request) {
   return Response.json({ model: "jev-1.13.0", answers });
 }
 
-it("only auto-groups a positive relationship with conservative confidence", () => {
+it("follows Jev's relationship choice without a score gate", () => {
   const answer = (
     choice: "continuation" | "payment_match" | "unrelated",
     probability: number,
@@ -259,9 +259,8 @@ it("only auto-groups a positive relationship with conservative confidence", () =
     },
     confidence,
   });
-  expect(shouldAutoMerge(answer("continuation", 0.9, 0.75))).toBe(true);
-  expect(shouldAutoMerge(answer("payment_match", 0.89, 1))).toBe(false);
-  expect(shouldAutoMerge(answer("continuation", 1, 0.74))).toBe(false);
+  expect(shouldAutoMerge(answer("continuation", 0.4, 0.09))).toBe(true);
+  expect(shouldAutoMerge(answer("payment_match", 0.5, 0.1))).toBe(true);
   expect(shouldAutoMerge(answer("unrelated", 1, 1))).toBe(false);
 });
 
@@ -1068,6 +1067,67 @@ it("backfills a historical receipt before its later matching payment slip", asyn
     receipt.id,
     payment.id,
   ]);
+});
+
+it("replays a saved low-score continuation when upgrading the pipeline", async () => {
+  const processingToken = `rsc_${"v".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const first = await saveCapture();
+  const second = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of [first, second].entries()) {
+    const at = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(at, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT SECTION ${index}`, at);
+  }
+  await drainBackfill(processingToken);
+  const assessment = await db
+    .prepare(
+      "SELECT id,payload FROM jev_assessments WHERE task='document-relationship'",
+    )
+    .first<{ id: string; payload: string }>();
+  expect(assessment).not.toBeNull();
+  const payload = JSON.parse(assessment!.payload);
+  payload.response.answers.relationship = {
+    type: "choice",
+    choice: "continuation",
+    probabilities: { continuation: 0.4, payment_match: 0.22, unrelated: 0.38 },
+    confidence: 0.09,
+  };
+  await db
+    .prepare("UPDATE jev_assessments SET payload=? WHERE id=?")
+    .bind(JSON.stringify(payload), assessment!.id)
+    .run();
+  await db
+    .prepare("UPDATE jev_pipeline_runs SET version=5 WHERE phase='complete'")
+    .run();
+  await drainBackfill(processingToken);
+  const catalog = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, { headers: ownerHeaders })
+  ).json<any>();
+  const active = catalog.documents.filter(
+    (document: any) => !document.mergedInto && !document.duplicateOf,
+  );
+  expect(active).toHaveLength(1);
+  expect(active[0].pages.map((page: any) => page.captureId)).toEqual([
+    first.id,
+    second.id,
+  ]);
+  expect(
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship'",
+      )
+      .first(),
+  ).toEqual({ count: 1 });
 });
 
 it("lets Jev attach a second detached payment slip to a receipt that already has one", async () => {

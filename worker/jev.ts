@@ -31,10 +31,8 @@ const COMPLETENESS_DECISIONS = {
     "The document was classified as a purchase document in error and contains no purchase receipt, invoice, or credit note.",
 } as const;
 const MAX_JEV_TEXT = 24_000;
-const AUTO_MATCH_PROBABILITY = 0.9;
-const AUTO_MATCH_CONFIDENCE = 0.75;
 const JEV_ELIGIBILITY_VERSION = 2;
-const JEV_PIPELINE_VERSION = 5;
+const JEV_PIPELINE_VERSION = 6;
 
 export const pageRoles = [
   "receipt",
@@ -157,11 +155,7 @@ export async function pageFingerprint(document: ReceiptDocument) {
 }
 
 export function shouldAutoMerge(answer: ChoiceAnswer) {
-  return (
-    answer.choice !== "unrelated" &&
-    (answer.probabilities[answer.choice] ?? 0) >= AUTO_MATCH_PROBABILITY &&
-    answer.confidence >= AUTO_MATCH_CONFIDENCE
-  );
+  return answer.choice === "continuation" || answer.choice === "payment_match";
 }
 
 function validateChoice(
