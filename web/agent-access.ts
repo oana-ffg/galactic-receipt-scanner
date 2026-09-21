@@ -18,22 +18,13 @@ export async function mountAgentAccess(app: HTMLElement) {
     <section><h2>Connect a worker</h2><p>Have your agent prepare a connection request, then approve it here or ask the agent to use this page’s site tools. Only the requesting worker can unlock the response.</p>
     <label>Connection request file <input id="connection-file" type="file" accept="application/json,.json"></label>
     <p id="connection-summary"></p><button id="connection-create" disabled>Approve connection</button>
-    <a id="connection-download" hidden download="connection-response.json">Download encrypted response</a>
-    <label id="connection-response-label" hidden>Encrypted response (copy if the download is unavailable)
-      <textarea id="connection-response" readonly spellcheck="false" rows="6"></textarea>
-    </label></section>
+    <a id="connection-download" hidden download="connection-response.json">Download encrypted response</a></section>
     <section><h2>Connections</h2><button id="connection-refresh" class="secondary">Refresh</button><div id="connection-list"></div><button id="connection-more" class="secondary" hidden>Load older connections</button></section></main>`;
   const status = app.querySelector<HTMLElement>("#connection-status")!;
   const list = app.querySelector<HTMLElement>("#connection-list")!;
   const create = app.querySelector<HTMLButtonElement>("#connection-create")!;
   const download = app.querySelector<HTMLAnchorElement>(
     "#connection-download",
-  )!;
-  const responseLabel = app.querySelector<HTMLElement>(
-    "#connection-response-label",
-  )!;
-  const response = app.querySelector<HTMLTextAreaElement>(
-    "#connection-response",
   )!;
   let request: Record<string, unknown> | undefined;
   let blobUrl: string | undefined;
@@ -109,11 +100,6 @@ export async function mountAgentAccess(app: HTMLElement) {
     void perform(async () => {
       request = undefined;
       create.disabled = true;
-      response.value = "";
-      responseLabel.hidden = true;
-      download.hidden = true;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-      blobUrl = undefined;
       const file = (event.target as HTMLInputElement).files?.[0];
       if (!file) return;
       if (file.size > 16384) throw Error("Connection request is too large.");
@@ -133,16 +119,13 @@ export async function mountAgentAccess(app: HTMLElement) {
       create.disabled = true;
       try {
         const result = await provision(request);
-        const encryptedResponse = JSON.stringify(result);
+        await refresh();
         if (blobUrl) URL.revokeObjectURL(blobUrl);
         blobUrl = URL.createObjectURL(
-          new Blob([encryptedResponse], { type: "application/json" }),
+          new Blob([JSON.stringify(result)], { type: "application/json" }),
         );
         download.href = blobUrl;
         download.hidden = false;
-        response.value = encryptedResponse;
-        responseLabel.hidden = false;
-        await refresh();
       } finally {
         create.disabled = false;
       }
