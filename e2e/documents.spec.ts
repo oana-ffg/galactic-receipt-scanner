@@ -28,7 +28,8 @@ test.beforeEach(async ({ page }) => {
     });
   });
 });
-test.afterEach(async () => {
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
   await isolated?.dispose();
 });
 const isolatedRequest = {
@@ -309,7 +310,7 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
   });
   await expect(check).not.toBeChecked();
   await page.getByRole("button", { name: "Save review", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText(/Review saved/);
+  await expect(page.locator("#review-message")).toHaveText(/Review saved/);
   const checked = await request.get(`/api/documents/${ids[0]}`);
   expect((await checked.json()).document.checks.pdf).toBe(false);
 });

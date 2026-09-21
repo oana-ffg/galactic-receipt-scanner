@@ -4,6 +4,8 @@ import { sha256 } from "./checksum";
 import { messageOf } from "./errors";
 import type { DocumentView } from "./documents";
 import { ocrConfidence, ocrTranscript } from "./ocr-confidence";
+import { scanCrop } from "./receipt-crop";
+import type { Capture } from "./types";
 
 export interface ReviewOcr {
   engine: string;
@@ -30,9 +32,11 @@ export async function readReviewOcr(doc: DocumentView, signal?: AbortSignal) {
     signal?.throwIfAborted();
     let detail;
     try {
-      detail = await api<{
-        artifacts: { kind: string; sha256: string; created_at: string }[];
-      }>(`/api/captures/${page.captureId}`, { signal: requestSignal() });
+      detail = await api<
+        Capture & {
+          artifacts: { kind: string; sha256: string; created_at: string }[];
+        }
+      >(`/api/captures/${page.captureId}`, { signal: requestSignal() });
     } catch (error) {
       signal?.throwIfAborted();
       errors.push(`Page ${index + 1}: ${messageOf(error)}`);
@@ -71,21 +75,16 @@ export async function readReviewOcr(doc: DocumentView, signal?: AbortSignal) {
             `Saved OCR on page ${index + 1} has no engine or transcript.`,
           );
         const region = value.source.region;
-        const crop = page.crop;
+        const crop = scanCrop(detail, value.source.pixels);
         const sameRegion = Boolean(
           region &&
-          (crop
-            ? region.left === crop[0] &&
-              region.top === crop[1] &&
-              region.width === crop[2] - crop[0] &&
-              region.height === crop[3] - crop[1]
-            : region.left === 0 &&
-              region.top === 0 &&
-              region.width === value.source.pixels?.[0] &&
-              region.height === value.source.pixels?.[1]) &&
+          region.left <= crop[0] &&
+          region.top <= crop[1] &&
+          region.left + region.width >= crop[2] &&
+          region.top + region.height >= crop[3] &&
           (value.source.rotation ?? 0) === page.rotation,
         );
-        // Prefer the current crop; within either region class the API's newest version wins.
+        // Prefer OCR covering the scan crop; within either class newest wins.
         const previous = candidates.get(engine);
         if (previous && (previous.sameRegion || !sameRegion)) continue;
         candidates.set(engine, {

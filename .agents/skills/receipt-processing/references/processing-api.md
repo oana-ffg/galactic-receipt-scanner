@@ -16,7 +16,7 @@ the ordinary immutable Luna draft and preparing every frozen region, POST
 `/api/processing/confirmation` with `token`, `provider: "ppocr"`, the unchanged
 `pixel_pdf_sha256`, and ordered `artifacts: [{capture_id, sha256}]` for all retained
 pages. Each pin must resolve to stored PP-OCRv6 evidence with the same source hash,
-crop and rotation. The response preserves `ppocr` provenance and `evidence.initial_ocr`
+matching rotation and an OCR region covering the saved scan crop. The response preserves `ppocr` provenance and `evidence.initial_ocr`
 plus initial arithmetic. `assess`/`submit` use the existing confirmation hash and full
 reassessment contract. Prior Qwen-format confirmations below remain readable and
 supported for explicitly selected legacy/full-audit workflows, not the default pass.
@@ -143,8 +143,9 @@ extraction field exactly once. Submit stores the updated reading in `processing_
 initial Luna remains in `processing_drafts`, Qwen/evidence in `processing_confirmations`.
 Legacy no-draft clients remain compatible but are not the new skill flow.
 Use the actual model: gpt-5.6-luna for small, gpt-6-astra for large. **Omit documents when
-grouping and page layout are unchanged**; include copied document records when saving
-new crop/rotation bounds. Extraction is not a legacy document record.
+grouping and page rotation are unchanged**; include copied document records when saving
+new rotation bounds. Extraction is not a legacy document record. Document pages have no
+separate crop field; the capture's scan outline controls cropping.
 
 The server saves provenance, computes arithmetic and compares numeric readings with exact
 PP-OCR. Missing PP is rejected at submission rather than converted into a confidence result;
@@ -167,8 +168,8 @@ Deep-copy those records and carry IDs, revisions, hashes and existing metadata f
 programmatically. Keep the claimed document as the retained target.
 
 1. Move actual page objects into their visually verified order. Pages contain
-   `captureId,sha256,rotation,crop,type?`; rotations are 0/90/180/270 and crop is null or
-   original-pixel [left,top,right,bottom]. Do not reconstruct source hashes.
+   `captureId,sha256,rotation,type?`; rotations are 0/90/180/270. The capture's saved
+   scan crop is used automatically. Do not reconstruct source hashes.
 2. Transfer each page's existing annotations with it. Preserve unique backs/handwriting;
    detecting handwriting does not authorize transcribing it.
 3. For every document whose page membership changes, set all checks

@@ -3,6 +3,9 @@
 The deterministic controller already selected and claimed this exact-layout Jev-ready
 document, loaded its saved PP-OCR and category definitions, prepared verified page previews,
 and is renewing the lease. Luna performs no setup or processing mechanics.
+The previews use the saved scan crop. Do not select, adjust or submit a crop.
+If it visibly excludes paper, report that source problem in the result's uncertainty;
+the owner decides whether to change the scan crop.
 
 ## Assignment
 

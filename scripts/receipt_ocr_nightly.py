@@ -27,27 +27,25 @@ def save_json(path, value):
 def fingerprint(capture, layout=None):
     value = {key: capture.get(key) for key in ('id', 'sha256', 'manual_outline')}
     value['quad'] = ((capture.get('metadata') or {}).get('quality') or {}).get('quad')
-    if layout and (layout['crop'] is not None or layout['rotation'] != 0):
-        value['page_layout'] = {key: layout[key] for key in ('source_sha256', 'crop', 'rotation')}
+    if layout and layout['rotation'] != 0:
+        value['page_rotation'] = {key: layout[key] for key in ('source_sha256', 'rotation')}
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def current_page_layouts(client):
-    """Read saved document-page layouts without loading financial document contents."""
+    """Read page rotation only; crop belongs to the capture outline."""
     response = client.get('/api/processing/ocr-layouts')
     rows = response.get('layouts') if isinstance(response, dict) else None
     if not isinstance(rows, list):
         raise ClientError('Invalid document-page OCR layout inventory.')
     layouts = {}
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {'capture_id', 'source_sha256', 'crop', 'rotation'}:
+        if not isinstance(row, dict) or set(row) != {'capture_id', 'source_sha256', 'rotation'}:
             raise ClientError('Invalid document-page OCR layout.')
-        cid, sha, crop, rotation = (row[key] for key in ('capture_id', 'source_sha256', 'crop', 'rotation'))
+        cid, sha, rotation = (row[key] for key in ('capture_id', 'source_sha256', 'rotation'))
         if (not isinstance(cid, str) or not UUID.fullmatch(cid) or cid in layouts or
                 not isinstance(sha, str) or not SHA.fullmatch(sha) or type(rotation) is not int or
-                rotation not in (0, 90, 180, 270) or
-                (crop is not None and (not isinstance(crop, list) or len(crop) != 4 or
-                 any(type(v) is not int for v in crop) or not (0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3])))):
+                rotation not in (0, 90, 180, 270)):
             raise ClientError('Invalid document-page OCR layout.')
         layouts[cid] = row
     return layouts
@@ -56,14 +54,31 @@ def current_page_layouts(client):
 def page_layout(capture, layouts):
     layout = layouts.get(capture['id'])
     if layout and layout['source_sha256'] != capture['sha256']:
-        raise ClientError('Document-page crop belongs to a different source image.')
+        raise ClientError('Document-page rotation belongs to a different source image.')
     return layout
 
 
 def needs_layout_recheck(capture, layouts, state):
     layout = page_layout(capture, layouts)
     prior = state['completed'].get(capture['id'])
-    return not prior or prior['fingerprint'] != fingerprint(capture, layout)
+    return bool(prior and prior.get('scan_fingerprint') and
+                prior['scan_fingerprint'] != fingerprint(capture, layout))
+
+
+def baseline_scan_fingerprints(captures, layouts, state):
+    """Start tracking scan outline changes without re-OCRing legacy artifacts."""
+    changed = False
+    for capture in captures:
+        if needs_ocr(capture):
+            continue
+        cid = capture['id']
+        prior = state['completed'].get(cid) or {}
+        if prior.get('scan_fingerprint'):
+            continue
+        state['completed'][cid] = {**prior, 'scan_fingerprint': fingerprint(capture, page_layout(capture, layouts))}
+        state['completed'][cid].pop('fingerprint', None)
+        changed = True
+    return changed
 
 
 def utc(value):
@@ -168,12 +183,16 @@ def read_requirement(path, origin):
 
 
 def prepare_requirement(client, value, root):
-    """Also fulfill Luna's exact region, which may differ from the standard scan outline."""
+    """Fulfill only the saved scan crop; Luna cannot request another region."""
     cid = value['capture_id']
     original = client.original(cid, root / 'originals')
     if original['sha256'] != value['source_sha256']:
         raise ClientError('Requested OCR source hash changed; preserve the Luna claim for review.')
-    prepared = client.prepare(cid, root / 'required', crop=value['crop'], rotation=value['rotation'])
+    artifact_directory(root / 'required')
+    scan_crop = client.source_region(original, root / 'required')
+    if value['crop'] != scan_crop:
+        raise ClientError('Requested OCR crop differs from the saved scan crop.')
+    prepared = client.prepare(cid, root / 'required', crop=scan_crop, rotation=value['rotation'])
     if prepared['sha256'] != value['source_sha256']:
         raise ClientError('Prepared OCR source does not match the Luna request.')
     return dict(capture_id=cid, ocr_sha256=prepared['ocr_sha256'], verified=True)
@@ -207,16 +226,14 @@ def drain(client, captures, root, state, *, layouts=None, attempts=3, sleep=time
                 layout = page_layout(current, layouts)
                 signature = fingerprint(current, layout)
                 prior = state['completed'].get(cid)
-                if (prior and prior['fingerprint'] == signature and
-                        any(a.get('kind') == 'ocr' and a.get('sha256') == prior['ocr_sha256']
+                if (prior and prior.get('scan_fingerprint') == signature and
+                        any(a.get('kind') == 'ocr' and a.get('sha256') == prior.get('ocr_sha256')
                             for a in current.get('artifacts', []))):
                     reused.add(cid)
                     errors.pop(cid, None)
                     consecutive_network_failures = 0
                     continue
                 options = {'rotation': layout['rotation']} if layout else {}
-                if layout and layout['crop'] is not None:
-                    options['crop'] = layout['crop']
                 if current['ocr_status'] == 'unverified':
                     try:
                         prepared = client.saved_ocr(cid, root / 'artifacts', **options)
@@ -228,7 +245,7 @@ def drain(client, captures, root, state, *, layouts=None, attempts=3, sleep=time
                 latest = client.get('/api/captures/' + cid)
                 if fingerprint(latest, layout) != signature:
                     raise ClientError('Source layout changed during OCR; retry with current metadata.')
-                state['completed'][cid] = dict(fingerprint=signature, ocr_sha256=prepared['ocr_sha256'])
+                state['completed'][cid] = dict(scan_fingerprint=signature, ocr_sha256=prepared['ocr_sha256'])
                 save_json(root / 'progress.json', state)
                 verified.add(cid)
                 consecutive_network_failures = 0
@@ -316,6 +333,8 @@ def main():
         if state['origin'] != client.origin:
             raise ClientError('OCR progress belongs to a different Site.')
         layouts = current_page_layouts(client)
+        if baseline_scan_fingerprints(captures, layouts, state):
+            save_json(state_path, state)
         candidates = [capture for capture in captures if needs_ocr(capture) or needs_layout_recheck(capture, layouts, state)]
         summary['layout_rechecks'] = len(candidates) - len(awaiting_ocr)
         selected = candidates[:args.limit] if args.limit else candidates
@@ -345,7 +364,7 @@ def main():
         if not result['jev'].get('complete'):
             result['complete'] = False
         latest_layouts = current_page_layouts(client)
-        changed_layouts = [capture['id'] for capture in captures
+        changed_layouts = [capture['id'] for capture in selected
                            if fingerprint(capture, page_layout(capture, layouts)) !=
                            fingerprint(capture, page_layout(capture, latest_layouts))]
         if changed_layouts:

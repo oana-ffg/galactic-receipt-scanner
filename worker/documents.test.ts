@@ -45,7 +45,7 @@ async function capture(quality: Partial<Quality> = {}) {
 }
 const save = (documents: unknown[]) =>
   request("/api/documents", "POST", JSON.stringify({ documents }));
-it("exposes only the current saved page crop and rotation for OCR", async () => {
+it("exposes only page rotation for OCR and discards legacy crop input", async () => {
   const source = await capture();
   const before = (await (
     await request("/api/processing/ocr-layouts")
@@ -54,7 +54,7 @@ it("exposes only the current saved page crop and rotation for OCR", async () => 
     false,
   );
   const document = newDocument(source);
-  document.pages[0].crop = [10, 20, 1000, 1800];
+  (document.pages[0] as any).crop = [10, 20, 1000, 1800];
   document.pages[0].rotation = 90;
   expect((await save([document])).status).toBe(200);
   const first = (await (
@@ -65,25 +65,33 @@ it("exposes only the current saved page crop and rotation for OCR", async () => 
   ).toEqual({
     capture_id: source.id,
     source_sha256: source.sha256,
-    crop: [10, 20, 1000, 1800],
     rotation: 90,
   });
   const saved = (
     (await (await request(`/api/documents/${source.id}`)).json()) as any
   ).document;
+  expect(saved.pages[0]).not.toHaveProperty("crop");
   saved.pages[0].crop = [20, 30, 1000, 1800];
   expect((await save([saved])).status).toBe(200);
   const latest = (await (
     await request("/api/processing/ocr-layouts")
   ).json()) as any;
   expect(
-    latest.layouts.find((row: any) => row.capture_id === source.id).crop,
-  ).toEqual([20, 30, 1000, 1800]);
+    latest.layouts.find((row: any) => row.capture_id === source.id),
+  ).toEqual({
+    capture_id: source.id,
+    source_sha256: source.sha256,
+    rotation: 90,
+  });
+  const latestSaved = (await (
+    await request(`/api/documents/${source.id}`)
+  ).json()) as any;
+  expect(latestSaved.document.pages[0]).not.toHaveProperty("crop");
 });
 it("reads saved page layout even when the page index table is stale", async () => {
   const source = await capture();
   const document = newDocument(source);
-  document.pages[0].crop = [40, 50, 900, 1700];
+  (document.pages[0] as any).crop = [40, 50, 900, 1700];
   expect((await save([document])).status).toBe(200);
   const db = await mf.getD1Database("DB");
   await db
@@ -98,7 +106,6 @@ it("reads saved page layout even when the page index table is stale", async () =
   ).toEqual({
     capture_id: source.id,
     source_sha256: source.sha256,
-    crop: [40, 50, 900, 1700],
     rotation: 0,
   });
 });
@@ -108,7 +115,7 @@ it("preserves scan times and sources through non-adjacent grouping, splitting an
     b = await capture();
   const one = newDocument(a),
     two = newDocument(b);
-  two.pages[0].crop = [20, 30, 1000, 1800];
+  (two.pages[0] as any).crop = [20, 30, 1000, 1800];
   one.vendor = two.vendor = "Synthetic shop";
   one.receiptDate = two.receiptDate = "2026-02-01";
   expect((await save([one, two])).status).toBe(200);
@@ -137,7 +144,6 @@ it("preserves scan times and sources through non-adjacent grouping, splitting an
     {
       capture_id: b.id,
       source_sha256: b.sha256,
-      crop: [20, 30, 1000, 1800],
       rotation: 0,
     },
   ]);

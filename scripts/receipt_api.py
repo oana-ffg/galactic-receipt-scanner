@@ -52,7 +52,19 @@ def matches_ocr_region(value, crop):
         if not isinstance(pixels, list) or len(pixels) != 2 or any(type(v) is not int or v <= 0 for v in pixels):
             return False
         crop = [0, 0, *pixels]
-    return source.get("region") == dict(left=crop[0], top=crop[1], width=crop[2]-crop[0], height=crop[3]-crop[1])
+    region = source.get("region")
+    pixels = source.get("pixels")
+    return (isinstance(region, dict)
+            and isinstance(pixels, list) and len(pixels) == 2
+            and all(type(v) is int and v > 0 for v in pixels)
+            and all(type(region.get(key)) is int for key in ('left', 'top', 'width', 'height'))
+            and region['left'] >= 0 and region['top'] >= 0
+            and region['width'] > 0 and region['height'] > 0
+            and region['left'] + region['width'] <= pixels[0]
+            and region['top'] + region['height'] <= pixels[1]
+            and region['left'] <= crop[0] and region['top'] <= crop[1]
+            and region['left'] + region['width'] >= crop[2]
+            and region['top'] + region['height'] >= crop[3])
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -319,19 +331,21 @@ class ScannerClient:
             if not matches_prepared_ocr(value, capture_id, sha, AUTO_CROP, self.ocr_backend, rotation):
                 continue
             geometry = dict(pixels=value["source"].get("pixels"), quad=quad)
-            if crop is not AUTO_CROP:
-                geometry["crop"] = crop
             result = subprocess.run([self.node, "scripts/receipt_layout.mjs"], input=json.dumps(geometry),
                                     text=True, encoding="utf-8", capture_output=True, timeout=30)
             if result.returncode:
                 raise ClientError("Saved OCR has invalid source dimensions or crop.")
             layout = json.loads(result.stdout)
+            if crop is not AUTO_CROP and crop != layout["crop"]:
+                raise ClientError("OCR crop must equal the saved scan crop.")
             if matches_ocr_region(value, layout["crop"]):
                 return dict(capture_id=capture_id, sha256=sha, crop=layout["crop"], pixels=layout["pixels"],
                             rotation=rotation, ocr_path=pinned["path"], ocr_sha256=digest)
         # A missing artifact needs a precise source/layout request for the OCR job.
         source = self.original(capture_id, root / "originals", metadata=meta)
-        source["crop"] = self.source_region(source, root) if crop is AUTO_CROP else crop
+        source["crop"] = self.source_region(source, root)
+        if crop is not AUTO_CROP and crop != source["crop"]:
+            raise ClientError("OCR crop must equal the saved scan crop.")
         source["rotation"] = rotation
         raise OCRRequired(self.origin, source)
 
@@ -343,13 +357,11 @@ class ScannerClient:
         original = self.original(capture_id, root / "originals")
         meta = self.get("/api/captures/" + capture_id)
         artifact_directory(root)
-        if crop is AUTO_CROP:
-            crop = self.source_region(original, root)
-        if crop is not AUTO_CROP:
-            if crop is not None and (not isinstance(crop, list) or len(crop) != 4 or
-                    any(type(v) is not int for v in crop) or not (0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3])):
-                raise ClientError("Invalid OCR crop bounds.")
-            original["crop"] = crop
+        scan_crop = self.source_region(original, root)
+        if crop is not AUTO_CROP and crop != scan_crop:
+            raise ClientError("OCR crop must equal the saved scan crop.")
+        crop = scan_crop
+        original["crop"] = crop
         if rotation not in (0, 90, 180, 270):
             raise ClientError("Invalid OCR rotation.")
         original["rotation"] = rotation
@@ -396,16 +408,18 @@ class ScannerClient:
         root = Path(directory)
         pages = []
         for page in document["pages"]:
+            original = self.original(page["captureId"], root / "originals")
+            if original["sha256"] != page["sha256"]:
+                raise ClientError("Document source hash mismatch.")
+            crop = self.source_region(original, root)
             source = (prepared or {}).get(page["captureId"])
             if source is None:
-                source = self.prepare(page["captureId"], directory, crop=page["crop"],
+                source = self.prepare(page["captureId"], directory, crop=crop,
                                       rotation=page["rotation"], allow_inference=allow_inference)
-            elif (source.get("crop") != page["crop"] or source.get("rotation") != page["rotation"]
+            elif (source.get("crop") != crop or source.get("rotation") != page["rotation"]
                   or hashlib.sha256(Path(source["ocr_path"]).read_bytes()).hexdigest() != source["ocr_sha256"]):
                 raise ClientError("Prepared OCR differs from the frozen source/layout.")
-            if source["sha256"] != page["sha256"]:
-                raise ClientError("Document source hash mismatch.")
-            pages.append({**page, "path": source["path"], "ocr_path": source["ocr_path"]})
+            pages.append({**page, "crop": crop, "path": source["path"], "ocr_path": source["ocr_path"]})
         artifact_directory(root)
         run = root / (document_id + "-" + str(document["revision"]) + "-" + os.urandom(8).hex())
         manifest, output = run.with_suffix(".pages.json"), run.with_suffix(".pdf")

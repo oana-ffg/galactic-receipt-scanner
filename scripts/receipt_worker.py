@@ -630,10 +630,11 @@ class Worker:
         require(set(retained) <= layouts.keys(), "Preview every retained page before freezing the Luna draft.")
         for document in documents:
             for page in document["pages"]:
+                page.pop("crop", None)
                 if page["captureId"] in layouts:
                     layout = layouts[page["captureId"]]
                     verify(layout["sha256"] == page["sha256"], "Preview source differs from the grouped page.")
-                    page["crop"], page["rotation"] = layout["crop"], layout["rotation"]
+                    page["rotation"] = layout["rotation"]
         validation = self.check("validate", extraction=extraction)
         require(not validation["errors"], "Grouping exceeded extraction limits; revise the extraction.")
         for cid in retained:
@@ -643,7 +644,8 @@ class Worker:
                 self.state["sources"][cid] = source
             if cid in self.state["prepared"]:
                 self.state["prepared"][cid]["path"] = self.state["sources"][cid]["path"]
-        pages = [{**p, "path": self.state["sources"][p["captureId"]]["path"]} for p in target["pages"]]
+        pages = [{**p, "path": self.state["sources"][p["captureId"]]["path"],
+                  "crop": layouts[p["captureId"]]["crop"]} for p in target["pages"]]
         pixel_pdf = self.client.image_pdf(pages, self.work / "draft")
         verify(pixel_pdf["pages"] == len(pages) and pixel_pdf["layouts"] == [layouts[cid] for cid in retained],
                "Frozen pixel layout differs from the reviewed previews.")
@@ -725,9 +727,11 @@ class Worker:
         require(not result["errors"], "Grouping exceeded extraction limits; revise the extraction.")
         target = next((d for d in body.get("documents", []) if d["id"] == claim["document"]["id"]), frozen["target"])
         require({p["captureId"] for p in target["pages"]} <= self.state["prepared"].keys(), "Prepare OCR for every retained page before submitting.")
+        crops = {layout["captureId"]: layout["crop"] for layout in frozen["layouts"]}
         for page in target["pages"]:
             prepared = self.state["prepared"][page["captureId"]]
-            require(prepared.get("crop") == page["crop"], "Prepared OCR does not use the frozen page crop.")
+            require(prepared.get("crop") == crops[page["captureId"]],
+                    "Prepared OCR does not use the scan crop.")
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         require(len(payload) <= MAX_INPUT, "Processing request exceeds 512 KiB.")
         previous_state = deepcopy(self.state)
@@ -891,7 +895,7 @@ class Worker:
             document = membership[cid]
             page = next(p for p in document["pages"] if p["captureId"] == cid)
             source = self.client.saved_ocr(cid, self.work / "ocr",
-                crop=layout["crop"] if layout else page.get("crop") if page.get("crop") is not None else AUTO_CROP,
+                crop=AUTO_CROP,
                 rotation=layout["rotation"] if layout else page.get("rotation", 0))
             verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR source differs from the claimed context.")
             layout = dict(captureId=cid, sha256=source["sha256"], pixels=source["pixels"], crop=source["crop"], rotation=source["rotation"])
@@ -1524,23 +1528,14 @@ class Worker:
                 page = self.page(cid)
                 override = overrides.get(cid)
                 if override is not None:
-                    require(isinstance(override, dict) and set(override) <= {"crop", "rotation"}, "Unknown page layout option.")
+                    require(isinstance(override, dict) and set(override) <= {"rotation"}, "Only rotation may be changed in a page preview.")
                     rotation = override.get("rotation", page.get("rotation", 0))
                     require(rotation in (0, 90, 180, 270), "Page rotation must be 0, 90, 180 or 270.")
                     layout_page = {**page, "path": source["path"], "rotation": rotation, "quad": source.get("quad")}
-                    if "crop" in override:
-                        crop = override["crop"]
-                        require(crop is None or (isinstance(crop, list) and len(crop) == 4
-                                and all(type(v) is int for v in crop) and 0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3]),
-                                "Page crop must be null or four ordered original-pixel integers.")
-                        layout_page["crop"] = crop
-                    elif page.get("crop") is None:
-                        layout_page.pop("crop", None)
                 else:
                     layout_page = {**page, "path": source["path"], "rotation": page.get("rotation", 0)}
-                    if page.get("crop") is None:
-                        layout_page.pop("crop", None)
                     layout_page["quad"] = source.get("quad")
+                layout_page.pop("crop", None)  # Historical document crop is never a preview input.
                 preview = self.client.image_pdf([layout_page], self.work / "previews")
                 layout = preview["layouts"][0]
                 verify(layout["captureId"] == cid and layout["sha256"] == source["sha256"], "Preview layout source differs.")
@@ -1551,10 +1546,7 @@ class Worker:
                 verify(detected is None or (isinstance(detected, list) and len(detected) == 4
                        and all(type(v) is int for v in detected) and 0 <= detected[0] < detected[2] <= pixels[0]
                        and 0 <= detected[1] < detected[3] <= pixels[1]), "Preview returned invalid crop bounds.")
-                require(detected is not None or (override is not None and "crop" in override and override["crop"] is None),
-                        "No reliable crop was detected; review the original and explicitly choose crop bounds or raw full-page layout.")
-                if override is not None and "crop" in override and override["crop"] is None:
-                    layout["crop"] = [0, 0, pixels[0], pixels[1]]
+                require(detected is not None, "Scan crop could not be resolved.")
                 rendered = self.render_file(preview["path"], 1, 300, "crop-preview")
                 if self.state["layouts"].get(cid) != layout:
                     self.state["prepared"].pop(cid, None)

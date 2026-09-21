@@ -2,6 +2,7 @@ import type { Env } from "./index";
 import type { ReceiptDocument } from "../web/documents";
 import { financialTypes, type Extraction } from "../web/extraction";
 import { ocrArtifactMatchesPage, type OcrArtifact } from "../web/ocr-data";
+import type { Capture } from "../web/types";
 export interface OcrComparison {
   status:
     "no-disagreement-detected" | "disagreement" | "missing" | "not-applicable";
@@ -148,6 +149,7 @@ export async function compareStoredOcr(
     strictRegion?: boolean;
     pins?: { capture_id: string; sha256: string }[];
     engine?: "ppocr" | "tesseract";
+    captures?: Capture[];
   },
 ): Promise<OcrComparison> {
   if (!financialTypes.includes(e.type) && !options?.strictRegion)
@@ -198,7 +200,8 @@ export async function compareStoredOcr(
       )
         continue;
       if (options?.strictRegion) {
-        if (!ocrArtifactMatchesPage(value, page)) continue;
+        const capture = options.captures?.find((c) => c.id === page.captureId);
+        if (!capture || !ocrArtifactMatchesPage(value, page, capture)) continue;
       }
       texts.push(value.text);
       artifacts.push({ capture_id: page.captureId, sha256: row.sha256 });

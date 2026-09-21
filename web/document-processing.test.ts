@@ -37,7 +37,11 @@ beforeEach(() => {
     vi.fn().mockResolvedValue({ width: 100, height: 200, close() {} }),
   );
   mocks.original.mockResolvedValue({
-    capture: { sha256: sourceHash },
+    capture: {
+      id,
+      sha256: sourceHash,
+      metadata: { sourcePixels: [100, 200], quality: { quad: null } },
+    },
     blob: new Blob(["synthetic pixels"], { type: "image/png" }),
   });
 });

@@ -204,6 +204,9 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await page.route("**/api/captures/*", (route) =>
     route.fulfill({
       json: {
+        ...captures.find((capture) =>
+          route.request().url().endsWith(capture.id),
+        ),
         artifacts: route.request().url().endsWith(secondPage.id)
           ? [
               {
@@ -678,7 +681,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await form.getByLabel(/Document adjustments/).fill("Malformed adjustment");
   await form.getByLabel("Currency", { exact: true }).fill("DKK");
   await form.getByLabel("Currency", { exact: true }).press("Tab");
-  await expect(page.getByRole("alert")).toContainText(
+  await expect(form.getByRole("alert")).toContainText(
     "before changing currency",
   );
   await expect(form.getByLabel("Total", { exact: true })).toHaveValue("1200");

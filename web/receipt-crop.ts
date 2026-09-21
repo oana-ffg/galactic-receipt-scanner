@@ -1,3 +1,5 @@
+import type { Capture } from "./types";
+
 export function detectedReceiptCrop(
   pixels: number[],
   quad?: number[][] | null,
@@ -47,4 +49,17 @@ export function detectedReceiptCrop(
         rectangle.top + rectangle.height,
       ]
     : null;
+}
+
+/** The capture's saved outline is the sole crop for OCR, previews and new PDFs. */
+export function scanCrop(
+  capture: Pick<Capture, "sha256" | "manual_outline" | "metadata">,
+  pixels = capture.metadata.sourcePixels,
+): [number, number, number, number] {
+  if (!pixels) throw Error("Scan has no original pixel dimensions.");
+  const manual = capture.manual_outline;
+  if (manual && manual.source_sha256 !== capture.sha256)
+    throw Error("Scan outline belongs to another original.");
+  const quad = manual?.quad ?? capture.metadata.quality?.quad;
+  return detectedReceiptCrop(pixels, quad) ?? [0, 0, pixels[0], pixels[1]];
 }

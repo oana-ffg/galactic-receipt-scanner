@@ -124,10 +124,9 @@ def post_saved(route, request_name, response_name):
 
 Use the prepared PDF layout code before any OCR, including Astra's independent reading.
 `client.image_pdf(pages, directory)` creates no searchable layer and makes no server write.
-Its page inputs contain verified `path`, `captureId`, `sha256`, `rotation`, and optional
-`crop`/`quad`. Omit `crop` to use the detected outline plus margin; explicit null means
-the complete source and requires a deliberate visual choice. Reuse a saved non-null
-crop. Save returned `layouts` and apply them to the copied database page records.
+Its page inputs contain verified `path`, `captureId`, `sha256`, `rotation`, and the
+source's saved `quad`. The preview derives the scan crop from that outline. Keep returned
+`layouts` for OCR/PDF verification; do not write a crop into document page records.
 
 ```python
 def preview_pages(pages, sources, label):
@@ -137,8 +136,7 @@ def preview_pages(pages, sources, label):
         source = by_id[page["captureId"]]
         assert source["sha256"] == page["sha256"]
         item = {**page, "path": source["path"], "quad": source.get("quad")}
-        if item.get("crop") is None:
-            item.pop("crop", None)
+        item.pop("crop", None)  # Ignore historical document crop.
         inputs.append(item)
     result = client.image_pdf(inputs, work / label)
     save(label + "-layout.json", result)
@@ -151,10 +149,10 @@ def preview_pages(pages, sources, label):
     return result
 ```
 
-Open every returned crop preview by default. Raw `source["path"]` remains available
-when a crop, grouping or completeness question requires it. For lookahead, construct
+Open every returned scan crop preview by default. Raw `source["path"]` remains available
+when a scan crop, grouping or completeness question requires it. For lookahead, construct
 provisional page objects from source IDs/hashes with rotation 0; a preview is not a
-grouping decision. Verify all retained crops before freezing the final ordered layout.
+grouping decision. Report an incorrect scan crop to the owner; do not change it here.
 
 Files are created without overwriting earlier attempts. Use a new attempt filename after
 a rejected request. Do not print credentials, the claim token, full OCR JSON (which contains
@@ -200,8 +198,8 @@ related candidates as required by the grouping rules; leave unrelated pages unco
 
 After visual grouping and saving `extraction-first-reading.json`, call `preview_pages`
 on exactly the retained ordered pages to freeze the image-only document PDF. Save its
-layouts into the copied document page records. Only then run
-`client.prepare(capture_id, work / "ocr", crop=final_page["crop"],
+layouts for verification, without changing document page records. Only then run
+`client.prepare(capture_id, work / "ocr",
 rotation=final_page["rotation"], allow_inference=False)` for every retained page and save
 the returned metadata. This reuses only source/region-matched saved PP-OCRv6 and verifies
 its readback. Read only the OCR `text`/`lines` needed for comparison, never dump
@@ -232,7 +230,7 @@ node --input-type=module -e 'import {readFileSync} from "node:fs"; import {join}
 Arithmetic output is comparison evidence, not permission to change printed digits.
 Correct malformed fields locally before a production POST. Complete the frozen-layout
 and OCR sequence above before submission. The abbreviated call below applies only when
-grouping AND saved crop/rotation are unchanged. Otherwise include copied document records
+grouping AND saved rotation are unchanged. Otherwise include copied document records
 with the exact finalized page layouts, as in the grouping recipe, even if no pages move:
 
 ```python
@@ -487,9 +485,8 @@ save("categories.json", client.get("/api/processing/categories"))
 ```
 
 Call `preview_pages(claim["document"]["pages"], sources, "astra-independent")` and
-inspect every returned crop with your own vision; use raw originals when needed.
-Do not fetch context or OCR yet. Save chosen layouts and carry them into the reconciled
-document record after the independent checkpoint.
+inspect every returned scan crop with your own vision; use raw originals when needed.
+Do not fetch context or OCR yet. Keep the scan crop outside the document record.
 After the independent visual reading, write `astra-draft-extraction.json` and validate
 it with the same local validator, changing only its input filename. Then:
 

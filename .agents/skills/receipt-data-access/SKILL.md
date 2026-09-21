@@ -115,8 +115,9 @@ Only the dedicated OCR host produces new OCR; there is no browser OCR button or 
 Read back the saved artifact using its hash. Do not print the PDF-layer base64 payload.
 
 `node scripts/receipt_pdf.mjs PRIVATE_PAGES_JSON PRIVATE_PDF` generates a searchable PDF.
-The manifest contains ordered `pages` with captureId, sha256, path, rotation, crop and
-ocr_path. Generate using the saved document pages; each original and OCR source hash is
+The manifest contains ordered `pages` with captureId, sha256, path, rotation, scan crop and
+ocr_path. Derive the crop from each capture's saved outline; document pages do not store
+another crop. Generate using the saved document pages; each original and OCR source hash is
 checked. `save-pdf DOCUMENT_ID REVISION PRIVATE_PDF` uploads for the exact revision.
 Compare the upload response hash with the local PDF and require the acknowledged revision
 to match, inspect that same local file, then post document_id, current revision, sha256 and inspection evidence to

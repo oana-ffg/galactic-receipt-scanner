@@ -214,7 +214,6 @@ export async function processingRoute(
     const rows = await env.DB.prepare(
       `SELECT json_extract(page.value, '$.captureId') AS capture_id,
               json_extract(page.value, '$.sha256') AS source_sha256,
-              json_extract(page.value, '$.crop') AS crop,
               json_extract(page.value, '$.rotation') AS rotation
        FROM document_heads h
        JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
@@ -224,14 +223,12 @@ export async function processingRoute(
     ).all<{
       capture_id: string;
       source_sha256: string;
-      crop: string | null;
       rotation: number;
     }>();
     return json({
       layouts: rows.results.map((row) => ({
         capture_id: row.capture_id,
         source_sha256: row.source_sha256,
-        crop: row.crop === null ? null : JSON.parse(row.crop),
         rotation: row.rotation,
       })),
     });
@@ -1370,7 +1367,13 @@ export async function processingRoute(
     requireThat(frozen.version === 1, 409, "Unsupported Luna draft.");
     const pp =
       input.provider === "ppocr"
-        ? await ppConfirmation(env, input, frozen, lock.document_id)
+        ? await ppConfirmation(
+            env,
+            input,
+            frozen,
+            lock.document_id,
+            await load(),
+          )
         : null;
     const checked = pp?.checked ?? checkQwen(input, frozen, lock.document_id);
     const encoded = JSON.stringify(checked);
@@ -1394,6 +1397,7 @@ export async function processingRoute(
         frozen,
         lock.document_id,
         input.extraction as Extraction,
+        await load(),
       ));
     const payload = JSON.stringify(pp?.payload ?? { qwen: checked, evidence });
     requireThat(
@@ -1672,6 +1676,7 @@ export async function processingRoute(
     const comparison = await compareStoredOcr(env, d, input.extraction, {
       engine: "ppocr",
       strictRegion: true,
+      captures,
     });
     requireThat(
       comparison.status !== "missing",

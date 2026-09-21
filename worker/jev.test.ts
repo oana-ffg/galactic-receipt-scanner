@@ -274,7 +274,7 @@ it("marks combined OCR truncated when a later receipt footer is outside Jev's in
   expect(summary.text).not.toContain("PRINTED TOTAL");
 });
 
-it("pins Jev readiness to page order, crop, rotation, and source hash", async () => {
+it("pins Jev readiness to page order, rotation, and source hash", async () => {
   const capture = {
     id: crypto.randomUUID(),
     sha256: "a".repeat(64),
@@ -287,12 +287,16 @@ it("pins Jev readiness to page order, crop, rotation, and source hash", async ()
   );
 });
 
-it("requires PP OCR to match the exact full-page or cropped layout", () => {
+it("accepts OCR covering the scan crop and rejects a smaller region", () => {
   const fullPage = {
     captureId: "capture",
     sha256: "a".repeat(64),
-    crop: null,
     rotation: 0,
+  } as any;
+  const capture = {
+    id: "capture",
+    sha256: "a".repeat(64),
+    metadata: { sourcePixels: [1000, 1600], quality: { quad: null } },
   } as any;
   const artifact = {
     source: {
@@ -303,20 +307,31 @@ it("requires PP OCR to match the exact full-page or cropped layout", () => {
       region: { left: 0, top: 0, width: 1000, height: 1600 },
     },
   } as any;
-  expect(ocrArtifactMatchesPage(artifact, fullPage)).toBe(true);
+  expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(true);
   artifact.source.region = { left: 10, top: 0, width: 990, height: 1600 };
-  expect(ocrArtifactMatchesPage(artifact, fullPage)).toBe(false);
-  const cropped = { ...fullPage, crop: [10, 20, 900, 1500] } as any;
-  artifact.source.region = { left: 10, top: 20, width: 890, height: 1480 };
-  expect(ocrArtifactMatchesPage(artifact, cropped)).toBe(true);
+  expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(false);
+  capture.metadata.quality.quad = [
+    [0.1, 0.1],
+    [0.9, 0.1],
+    [0.9, 0.9],
+    [0.1, 0.9],
+  ];
+  artifact.source.region = { left: 0, top: 0, width: 1000, height: 1600 };
+  expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(true);
+  artifact.source.region = { left: 110, top: 0, width: 890, height: 1600 };
+  expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(false);
 });
 
 it("accepts Jev text from any valid region of the same rotated source", () => {
   const fullPage = {
     captureId: "capture",
     sha256: "a".repeat(64),
-    crop: null,
     rotation: 0,
+  } as any;
+  const capture = {
+    id: "capture",
+    sha256: "a".repeat(64),
+    metadata: { sourcePixels: [1000, 1600], quality: { quad: null } },
   } as any;
   const artifact = {
     source: {
@@ -327,16 +342,10 @@ it("accepts Jev text from any valid region of the same rotated source", () => {
       region: { left: 100, top: 100, width: 800, height: 1300 },
     },
   } as any;
-  expect(ocrArtifactMatchesPage(artifact, fullPage)).toBe(false);
+  expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(false);
   expect(ocrTextArtifactHasValidGeometry(artifact, fullPage)).toBe(true);
-
-  const croppedPage = {
-    ...fullPage,
-    crop: [50, 50, 950, 1500],
-  } as any;
-  expect(ocrTextArtifactHasValidGeometry(artifact, croppedPage)).toBe(true);
   artifact.source.region = { left: 25, top: 100, width: 875, height: 1300 };
-  expect(ocrTextArtifactHasValidGeometry(artifact, croppedPage)).toBe(true);
+  expect(ocrTextArtifactHasValidGeometry(artifact, fullPage)).toBe(true);
   artifact.source.rotation = 90;
   expect(ocrTextArtifactHasValidGeometry(artifact, fullPage)).toBe(false);
   artifact.source.rotation = 0;
@@ -1718,7 +1727,85 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     countingEnv,
     Array.from({ length: 100 }, () => firstDocument),
   );
-  expect(readinessQueries).toBe(4);
+  expect(readinessQueries).toBe(5);
+
+  const classified = await db
+    .prepare(
+      "SELECT document_revision FROM jev_document_heads WHERE document_id=?",
+    )
+    .bind(first.id)
+    .first<{ document_revision: number }>();
+  expect(classified!.document_revision).toBe(0);
+  const legacy = {
+    ...firstDocument,
+    pages: firstDocument.pages.map((page: any) => ({ ...page, crop: null })),
+  };
+  const hashLegacy = async (pages: any[]) =>
+    Array.from(
+      new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(
+            JSON.stringify(
+              pages.map((page: any) => ({
+                capture_id: page.captureId,
+                source_sha256: page.sha256,
+                crop: page.crop,
+                rotation: page.rotation,
+              })),
+            ),
+          ),
+        ),
+      ),
+    )
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  await db
+    .prepare(
+      "UPDATE jev_document_heads SET page_fingerprint=? WHERE document_id=?",
+    )
+    .bind(await hashLegacy(legacy.pages), first.id)
+    .run();
+  const updated = {
+    ...legacy,
+    revision: 1,
+    pages: legacy.pages.map(({ crop: _crop, ...page }: any) => page),
+  };
+  await db
+    .prepare(
+      "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+    )
+    .bind(
+      first.id,
+      updated.revision,
+      JSON.stringify(updated),
+      new Date().toISOString(),
+    )
+    .run();
+  await db
+    .prepare("INSERT INTO document_heads(id,revision) VALUES(?,?)")
+    .bind(first.id, updated.revision)
+    .run();
+  // A revision-zero Jev head can predate the first saved document version.
+  expect((await jevReadyDocuments(env, [updated])).has(first.id)).toBe(true);
+  legacy.pages[0].crop = [0, 0, 1, 1];
+  await db
+    .prepare(
+      "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+    )
+    .bind(first.id, 0, JSON.stringify(legacy), new Date().toISOString())
+    .run();
+  await db
+    .prepare(
+      "UPDATE jev_document_heads SET page_fingerprint=? WHERE document_id=?",
+    )
+    .bind(await hashLegacy(legacy.pages), first.id)
+    .run();
+  // The same check also works when the classified revision exists historically.
+  expect((await jevReadyDocuments(env, [updated])).has(first.id)).toBe(true);
+  const rotated = structuredClone(updated);
+  rotated.pages[0].rotation = 90;
+  expect((await jevReadyDocuments(env, [rotated])).has(first.id)).toBe(false);
 
   const second = await saveCapture();
   await db

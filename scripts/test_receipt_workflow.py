@@ -291,12 +291,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(confirmation["provider"], "ppocr")
         self.assertEqual([p["capture_id"] for p in confirmation["artifacts"]], [fixtures.DID, fixtures.FOREIGN])
 
-    def test_begin_preserves_an_explicitly_corrected_crop(self):
+    def test_begin_preserves_scan_crop_and_rejects_a_luna_crop_override(self):
         self.send("begin", viewer_checked=True)
-        corrected = self.send("previews", capture_ids=[fixtures.DID], layouts={fixtures.DID: {"crop": [2, 3, 8, 17]}})[0]
+        original = self.worker.state["layouts"][fixtures.DID]
+        rejected = self.worker.handle({"op": "previews", "capture_ids": [fixtures.DID],
+                                       "layouts": {fixtures.DID: {"crop": [2, 3, 8, 17]}}})
+        self.assertIn("Only rotation may be changed", rejected["input_error"])
         repeated = self.send("begin", viewer_checked=True)
-        self.assertEqual(repeated["claimed_ocr"][0]["layout"], corrected['layout'])
-        self.assertEqual(self.worker.state["layouts"][fixtures.DID]["crop"], [2, 3, 8, 17])
+        self.assertEqual(repeated["claimed_ocr"][0]["layout"], original)
+        self.assertEqual(self.worker.state["layouts"][fixtures.DID], original)
         self.assertEqual(sum(path.endswith("/claim") for _, path in self.fake.calls), 1)
 
     def test_ocr_request_validation_is_correctable(self):
@@ -304,9 +307,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('input_error', result)
         self.assertNotIn('failed', self.worker.state)
 
-    def test_changed_crop_requires_new_ocr_before_initial_draft(self):
+    def test_changed_rotation_requires_new_ocr_before_initial_draft(self):
         begun = self.send('begin', viewer_checked=True)
-        self.send('previews', capture_ids=[fixtures.DID], layouts={fixtures.DID: {'crop': [2, 3, 8, 17]}})
+        self.send('previews', capture_ids=[fixtures.DID], layouts={fixtures.DID: {'rotation': 90}})
         review = begun['request']
         review['extraction'] = fixtures.extraction()
         self.assertIn('Read ocr', self.worker.handle(review)['input_error'])
@@ -315,7 +318,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(self.worker.handle(review)['result']['draft']['drafted'])
         pinned = self.worker.state['draft']['ocr_inputs'][0]
         self.assertEqual(pinned['ocr_sha256'], reading['ocr_sha256'])
-        self.assertEqual(pinned['layout']['crop'], [2, 3, 8, 17])
+        self.assertEqual(pinned['layout']['rotation'], 90)
 
     def test_non_string_evidence_is_correctable_before_provenance_injection(self):
         begun = self.send('begin', viewer_checked=True)

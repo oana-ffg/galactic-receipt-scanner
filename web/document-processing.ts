@@ -11,6 +11,7 @@ import type {
   ReceiptDocument,
 } from "./documents";
 import type { Capture } from "./types";
+import { scanCrop } from "./receipt-crop";
 
 export class OcrPendingError extends Error {}
 
@@ -36,16 +37,17 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
     const bitmap = await createImageBitmap(blob);
     const pixels = [bitmap.width, bitmap.height];
     bitmap.close();
-    const crop = page.crop ?? [0, 0, ...pixels];
+    const crop = scanCrop(capture, pixels);
     const matchesRegion = (value: PdfOcr) => {
       const region = value.source?.region;
       return (
         value.source?.pixels?.[0] === pixels[0] &&
         value.source.pixels[1] === pixels[1] &&
-        region?.left === crop[0] &&
-        region.top === crop[1] &&
-        region.width === crop[2] - crop[0] &&
-        region.height === crop[3] - crop[1]
+        region &&
+        region.left <= crop[0] &&
+        region.top <= crop[1] &&
+        region.left + region.width >= crop[2] &&
+        region.top + region.height >= crop[3]
       );
     };
     let ocr: PdfOcr | null = null;
@@ -96,7 +98,7 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
       new Uint8Array(await blob.arrayBuffer()),
       blob.type,
       page.rotation,
-      page.crop,
+      crop,
       ocr,
     );
   }

@@ -1,6 +1,7 @@
-import { detectedReceiptCrop } from "./receipt-crop.ts";
+import { detectedReceiptCrop, scanCrop } from "./receipt-crop.ts";
 import { PSM, type Worker, type Page, type ImageLike } from "tesseract.js";
 import type { DocumentPage } from "./documents";
+import type { Capture } from "./types";
 function linesOf(data: Page) {
   return (data.blocks ?? []).flatMap((b) =>
     b.paragraphs.flatMap((p) =>
@@ -140,20 +141,31 @@ export async function recognizeReceipt(
 }
 export type OcrArtifact = Awaited<ReturnType<typeof recognizeReceipt>>;
 
-export function ocrArtifactMatchesPage(value: OcrArtifact, page: DocumentPage) {
+export function ocrArtifactMatchesPage(
+  value: OcrArtifact,
+  page: DocumentPage,
+  capture: Capture,
+) {
   const source = value.source as OcrArtifact["source"] & {
     rotation?: number;
     region?: { left: number; top: number; width: number; height: number };
   };
   if (!source || (source.rotation ?? 0) !== page.rotation) return false;
   const region = source.region;
-  if (!region) return false;
-  const expected = page.crop ?? [0, 0, source.pixels[0], source.pixels[1]];
+  if (!region || !ocrTextArtifactHasValidGeometry(value, page)) return false;
+  if (capture.sha256 !== page.sha256 || capture.id !== page.captureId)
+    return false;
+  if (
+    capture.metadata.sourcePixels?.[0] !== source.pixels[0] ||
+    capture.metadata.sourcePixels?.[1] !== source.pixels[1]
+  )
+    return false;
+  const expected = scanCrop(capture, source.pixels);
   return (
-    region.left === expected[0] &&
-    region.top === expected[1] &&
-    region.width === expected[2] - expected[0] &&
-    region.height === expected[3] - expected[1]
+    region.left <= expected[0] &&
+    region.top <= expected[1] &&
+    region.left + region.width >= expected[2] &&
+    region.top + region.height >= expected[3]
   );
 }
 

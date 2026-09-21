@@ -32,7 +32,6 @@ it("keeps the newest source-matched transcript from each OCR engine", async () =
   const page = {
     captureId: "synthetic-capture",
     sha256: "synthetic-original",
-    crop: [10, 20, 90, 180],
     rotation: 0,
   };
   const doc = { pages: [page] } as DocumentView;
@@ -72,6 +71,9 @@ it("keeps the newest source-matched transcript from each OCR engine", async () =
   const fetch = vi.fn(async (url: string) => {
     if (url.startsWith("/api/captures/"))
       return Response.json({
+        id: page.captureId,
+        sha256: page.sha256,
+        metadata: { sourcePixels: [100, 200], quality: { quad: null } },
         artifacts: [
           ...artifacts,
           {
@@ -95,8 +97,8 @@ it("keeps the newest source-matched transcript from each OCR engine", async () =
       r.pages[0].sameRegion,
     ]),
   ).toEqual([
-    ["OCR A", "Current crop A", true],
-    ["OCR B", "Newest B", false],
+    ["OCR A", "Newest A", true],
+    ["OCR B", "Newest B", true],
   ]);
   expect(results.errors).toHaveLength(1);
   expect(fetch.mock.calls.every(([url]) => !url.includes("/artifacts/"))).toBe(

@@ -151,9 +151,55 @@ export async function pageFingerprint(document: ReceiptDocument) {
     document.pages.map((page) => ({
       capture_id: page.captureId,
       source_sha256: page.sha256,
-      crop: page.crop,
       rotation: page.rotation,
     })),
+  );
+}
+
+function pageSources(document: ReceiptDocument) {
+  return document.pages.map((page) => ({
+    captureId: page.captureId,
+    sha256: page.sha256,
+    rotation: page.rotation,
+  }));
+}
+
+async function legacyHeadMatches(
+  document: ReceiptDocument,
+  head: JevDocumentHead,
+  savedPayload: string | undefined,
+) {
+  // Revision zero is the implicit one-page document for a fresh capture; it
+  // has no document_versions row until the owner or worker first saves it.
+  const saved = savedPayload
+    ? (JSON.parse(savedPayload) as ReceiptDocument)
+    : null;
+  if (saved) {
+    if (
+      saved.id !== document.id ||
+      saved.revision !== head.document_revision ||
+      JSON.stringify(pageSources(saved)) !==
+        JSON.stringify(pageSources(document))
+    )
+      return false;
+  } else if (
+    head.document_revision !== 0 ||
+    document.pages.length !== 1 ||
+    document.pages[0].captureId !== document.id ||
+    document.pages[0].rotation !== 0
+  )
+    return false;
+  const legacyPages = saved?.pages ?? document.pages;
+  return (
+    head.page_fingerprint ===
+    (await sha256(
+      legacyPages.map((page) => ({
+        capture_id: page.captureId,
+        source_sha256: page.sha256,
+        crop: saved ? (page as { crop?: unknown }).crop : null,
+        rotation: page.rotation,
+      })),
+    ))
   );
 }
 
@@ -1336,13 +1382,9 @@ function documentHeadReadyFromEvidence(
   pages: PageHead[],
   artifactPins: Set<string>,
   assessments: Map<string, AssessmentPayload>,
-  fingerprint: string,
+  fingerprintMatches: boolean,
 ) {
-  if (
-    !head ||
-    head.page_fingerprint !== fingerprint ||
-    pages.length !== document.pages.length
-  )
+  if (!head || !fingerprintMatches || pages.length !== document.pages.length)
     return false;
   const pins = document.pages.map((page, index) => ({
     capture_id: page.captureId,
@@ -1406,6 +1448,20 @@ async function documentHeadReady(
   pages: PageHead[],
   artifacts: { capture_id: string; sha256: string }[],
 ) {
+  const fingerprint = await pageFingerprint(document);
+  const oldVersion =
+    head && head.page_fingerprint !== fingerprint
+      ? await env.DB.prepare(
+          "SELECT payload FROM document_versions WHERE document_id=? AND revision=?",
+        )
+          .bind(document.id, head.document_revision)
+          .first<{ payload: string }>()
+      : null;
+  const fingerprintMatches = Boolean(
+    head &&
+    (head.page_fingerprint === fingerprint ||
+      (await legacyHeadMatches(document, head, oldVersion?.payload))),
+  );
   const assessments = new Map<string, AssessmentPayload>();
   if (head) {
     const role = await assessmentPayload(env, head.assessment_id);
@@ -1424,7 +1480,7 @@ async function documentHeadReady(
       ),
     ),
     assessments,
-    await pageFingerprint(document),
+    fingerprintMatches,
   );
 }
 
@@ -1450,14 +1506,21 @@ export async function jevReadyDocuments(
   documents: ReceiptDocument[],
   captures: Capture[] = [],
 ) {
-  const [heads, artifactRows, pageRows, assessments] = await Promise.all([
-    jevDocumentHeads(env),
-    env.DB.prepare(
-      "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
-    ).all<{ capture_id: string; sha256: string }>(),
-    env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>(),
-    documentAssessmentPayloads(env),
-  ]);
+  const [heads, artifactRows, pageRows, assessments, priorVersions] =
+    await Promise.all([
+      jevDocumentHeads(env),
+      env.DB.prepare(
+        "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
+      ).all<{ capture_id: string; sha256: string }>(),
+      env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>(),
+      documentAssessmentPayloads(env),
+      env.DB.prepare(
+        "SELECT v.document_id,v.payload FROM jev_document_heads h JOIN document_versions v ON v.document_id=h.document_id AND v.revision=h.document_revision",
+      ).all<{ document_id: string; payload: string }>(),
+    ]);
+  const priorPayloads = new Map(
+    priorVersions.results.map((row) => [row.document_id, row.payload]),
+  );
   const pageHeadRows = pageRows.results;
   const headsByDocument = new Map(
     heads.map((head) => [head.document_id, head]),
@@ -1484,7 +1547,12 @@ export async function jevReadyDocuments(
         pages,
         artifactPins,
         assessments,
-        await pageFingerprint(document),
+        head.page_fingerprint === (await pageFingerprint(document)) ||
+          (await legacyHeadMatches(
+            document,
+            head,
+            priorPayloads.get(document.id),
+          )),
       )
     )
       ready.set(document.id, head);
@@ -1926,7 +1994,6 @@ async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
     ).all<{ capture_id: string; sha256: string }>()
   ).results;
   const alreadyCurrent =
-    head?.page_fingerprint === (await pageFingerprint(document)) &&
     assessment?.task === "document-classification" &&
     (await documentHeadReady(env, document, head, evidence.heads, artifacts));
   if (!alreadyCurrent) {

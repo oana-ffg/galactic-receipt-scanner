@@ -39,7 +39,13 @@ export async function addReceiptPage(
       ? await pdf.embedPng(imageBytes)
       : await pdf.embedJpg(imageBytes);
   if (crop === undefined)
-    crop = detectedReceiptCrop([image.width, image.height], quad);
+    crop = detectedReceiptCrop([image.width, image.height], quad) ?? [
+      0,
+      0,
+      image.width,
+      image.height,
+    ];
+  if (crop === null) crop = [0, 0, image.width, image.height];
   const [left, top, right, bottom] = crop ?? [0, 0, image.width, image.height];
   if (
     ![left, top, right, bottom].every(Number.isFinite) ||

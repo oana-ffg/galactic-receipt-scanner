@@ -26,8 +26,6 @@ export interface DocumentPage {
   captureId: string;
   sha256: string;
   rotation: 0 | 90 | 180 | 270;
-  /** Optional visually checked rectangle in original pixels. */
-  crop: [number, number, number, number] | null;
 }
 export interface InvoiceCheck {
   currency: string;
@@ -170,7 +168,6 @@ export function newDocument(capture: Capture): ReceiptDocument {
         captureId: capture.id,
         sha256: capture.sha256,
         rotation: 0,
-        crop: null,
       },
     ],
     vendor: null,

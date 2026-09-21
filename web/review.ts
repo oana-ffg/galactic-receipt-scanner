@@ -352,10 +352,7 @@ export async function mountReview(app: HTMLElement) {
       controls.append(reason, detach);
       card.append(
         controls,
-        el(
-          "p",
-          `PDF rotation: ${p.rotation}° · ${p.crop ? "reviewed crop" : "complete original"}`,
-        ),
+        el("p", `PDF rotation: ${p.rotation}° · scan crop`),
       );
       sources.append(card);
     });

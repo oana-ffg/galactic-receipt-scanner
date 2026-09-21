@@ -92,7 +92,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(self.client.node, str(node))
             self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
             self.client.get = Mock(return_value={"artifacts": []})
-            with self.assertRaises(OCRRequired):
+            with self.assertRaisesRegex(ClientError, "saved scan crop"):
                 self.client.prepare(self.id, root / "work", crop=[1, 2, 90, 180])
             for bad in ({**settings, "confirmation_provider": "qwen"},
                         {**settings, "ppocr": {"python": "must-not-be-present"}}):
@@ -342,7 +342,7 @@ class ClientTests(unittest.TestCase):
         self.client.ocr_backend.run.assert_not_called()
         self.client.ocr_backend.preflight.assert_not_called()
 
-    def test_saved_ocr_changed_outline_requests_matching_ocr(self):
+    def test_saved_ocr_reuses_a_region_covering_the_scan_crop(self):
         body = json.dumps(self.ocr_fixture()).encode()
         sha = hashlib.sha256(body).hexdigest()
         self.client.get = Mock(return_value={**self.meta, 'artifacts': [dict(kind='ocr', sha256=sha)]})
@@ -350,9 +350,9 @@ class ClientTests(unittest.TestCase):
         self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha))
         geometry = Mock(returncode=0, stdout=json.dumps(dict(pixels=[100, 200], crop=[1, 2, 90, 180])))
         with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run', return_value=geometry):
-            with self.assertRaises(OCRRequired) as error:
-                self.client.saved_ocr(self.id, directory, crop=[1, 2, 90, 180])
-            self.assertEqual(error.exception.request['crop'], [1, 2, 90, 180])
+            with self.assertRaisesRegex(ClientError, 'saved scan crop'):
+                self.client.saved_ocr(self.id, directory, crop=[2, 2, 90, 180])
+            self.assertEqual(self.client.saved_ocr(self.id, directory)['ocr_sha256'], sha)
         self.client.ocr_backend.run.assert_not_called()
 
     def test_prepare_reuses_only_source_matched_ocr_and_skips_malformed_candidates(self):
@@ -385,10 +385,11 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(Path(result["ocr_path"]).read_bytes(), data)
             self.assertEqual(self.client.request.call_count, 2)
 
-    def test_missing_saved_ocr_requests_sol_without_inference_or_upload(self):
+    def test_missing_saved_ocr_requests_the_scan_crop_without_inference_or_upload(self):
         self.client.original = Mock(return_value={'capture_id': self.id, 'path': '/synthetic/source.jpg', 'sha256': self.sha})
         self.client.get = Mock(return_value={'artifacts': []})
         self.client.request = Mock()
+        self.client.source_region.return_value = [1, 2, 90, 180]
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(OCRRequired) as raised:
                 self.client.prepare(self.id, directory, crop=[1, 2, 90, 180], rotation=90, allow_inference=False)
@@ -397,14 +398,15 @@ class ClientTests(unittest.TestCase):
         self.client.ocr_backend.run.assert_not_called()
         self.client.request.assert_not_called()
 
-    def test_prepare_does_not_reuse_ocr_from_another_crop(self):
+    def test_prepare_reruns_ocr_when_old_region_misses_part_of_scan_crop(self):
         old = self.ocr_fixture()
-        old["source"]["region"] = dict(left=0, top=0, width=100, height=200)
+        old["source"]["region"] = dict(left=20, top=20, width=60, height=150)
         new = self.ocr_fixture()
         new["source"]["region"] = dict(left=10, top=20, width=70, height=150)
         old_bytes, new_bytes = json.dumps(old).encode(), json.dumps(new).encode()
         old_sha, new_sha = hashlib.sha256(old_bytes).hexdigest(), hashlib.sha256(new_bytes).hexdigest()
         self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
+        self.client.source_region.return_value = [10, 20, 80, 170]
         self.client.get = Mock(return_value={"artifacts": [{"kind": "ocr", "sha256": old_sha}]})
         def request(path, body=None):
             return json.dumps({"sha256": new_sha}).encode() if body is not None else (old_bytes if old_sha in path else new_bytes)
@@ -442,10 +444,11 @@ class ClientTests(unittest.TestCase):
             self.client.ocr_backend.run.assert_called_once()
 
     def test_pdf_reused_sources_create_output_directory_without_preparing_again(self):
-        page = dict(captureId=self.id, sha256=self.sha, rotation=0, crop=None)
+        page = dict(captureId=self.id, sha256=self.sha, rotation=0)
         self.client.get = Mock(return_value={"document": dict(id=self.id, revision=3,
             filename="2026-01-01_synthetic.pdf", pages=[page])})
         self.client.prepare = Mock(side_effect=AssertionError("Reuse prepared sources"))
+        self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha))
         data = b"%PDF-synthetic-test-only"
         sha = hashlib.sha256(data).hexdigest()
         self.client.request = Mock(return_value=json.dumps(dict(sha256=sha, revision=3)).encode())
@@ -455,13 +458,13 @@ class ClientTests(unittest.TestCase):
             source.write_bytes(b"synthetic source")
             ocr.write_bytes(b"{}")
             prepared = {self.id: dict(path=str(source), ocr_path=str(ocr), sha256=self.sha,
-                ocr_sha256=hashlib.sha256(ocr.read_bytes()).hexdigest(), crop=None, rotation=0)}
+                ocr_sha256=hashlib.sha256(ocr.read_bytes()).hexdigest(), crop=[0,0,100,200], rotation=0)}
             def generate(args, **kwargs):
                 manifest = json.loads(Path(args[-2]).read_text())
-                self.assertEqual(manifest["pages"], [{**page, "path": str(source), "ocr_path": str(ocr)}])
+                self.assertEqual(manifest["pages"], [{**page, "crop": [0,0,100,200], "path": str(source), "ocr_path": str(ocr)}])
                 Path(args[-1]).write_bytes(data)
                 return Mock(returncode=0, stdout=json.dumps(dict(sha256=sha, pages=1,
-                    layouts=[{**page, "pixels": [10, 20]}])))
+                    layouts=[{**page, "pixels": [10, 20], "crop": [0,0,100,200]}])))
             with patch("receipt_api.subprocess.run", side_effect=generate):
                 result = self.client.pdf(self.id, root / "new" / "pdf", prepared=prepared)
             self.assertEqual(Path(result["path"]).read_bytes(), data)
@@ -469,14 +472,15 @@ class ClientTests(unittest.TestCase):
             self.client.request.assert_called_once_with(f"/api/documents/{self.id}/pdf?revision=3", data, "application/pdf")
 
     def test_pdf_verifies_upload_without_redownloading_and_preserves_errors(self):
-        self.client.get = Mock(return_value={"document": {"id": self.id, "revision": 3, "filename": "2026-01-01_synthetic.pdf", "pages": [{"captureId": self.id, "sha256": self.sha, "rotation": 0, "crop": None}]}})
+        self.client.get = Mock(return_value={"document": {"id": self.id, "revision": 3, "filename": "2026-01-01_synthetic.pdf", "pages": [{"captureId": self.id, "sha256": self.sha, "rotation": 0}]}})
+        self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha))
         self.client.prepare = Mock(return_value={"path": "/synthetic/source.jpg", "ocr_path": "/synthetic/ocr.json", "sha256": self.sha})
         data = b"%PDF-synthetic-test-only"
         sha = hashlib.sha256(data).hexdigest()
         def generate(args, **kwargs):
             Path(args[-1]).write_bytes(data)
             return Mock(returncode=0, stdout=json.dumps(dict(sha256=sha, pages=1,
-                layouts=[dict(captureId=self.id, sha256=self.sha, pixels=[10, 20], crop=None, rotation=0)])))
+                layouts=[dict(captureId=self.id, sha256=self.sha, pixels=[10, 20], crop=[0,0,100,200], rotation=0)])))
         self.client.request = Mock(side_effect=lambda path, body=None, content_type=None: json.dumps({"sha256": sha, "revision": 3, "filename": "2026-01-01_synthetic.pdf"}).encode() if body is not None else data)
         with tempfile.TemporaryDirectory() as directory, patch("receipt_api.subprocess.run", side_effect=generate):
             result = self.client.pdf(self.id, directory)

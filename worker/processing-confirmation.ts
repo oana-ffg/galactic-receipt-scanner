@@ -73,25 +73,12 @@ export function lunaDraft(
           .find((d) => d.id === document.id)
           ?.pages.find((page) => page.captureId === p.captureId);
         requireThat(
-          prior &&
-            prior.rotation === p.rotation &&
-            JSON.stringify(prior.crop) === JSON.stringify(p.crop),
+          prior && prior.rotation === p.rotation,
           400,
           "Preserve residual donor geometry.",
         );
         continue;
       }
-      requireThat(
-        Array.isArray(p.crop) &&
-          p.crop.length === 4 &&
-          p.crop.every(Number.isSafeInteger) &&
-          p.crop[0] >= 0 &&
-          p.crop[1] >= 0 &&
-          p.crop[2] > p.crop[0] &&
-          p.crop[3] > p.crop[1],
-        400,
-        "Freeze explicit source-pixel crop bounds.",
-      );
     }
   const target = docs.find((d) => d.id === id)!;
   requireThat(
@@ -204,11 +191,13 @@ export async function confirmationEvidence(
   draft: LunaDraft,
   id: string,
   qwen: Extraction,
+  captures: Capture[],
 ) {
   const doc = draft.documents.find((d) => d.id === id)!;
   const initialOcr = await compareStoredOcr(env, doc, draft.extraction, {
     strictRegion: true,
     engine: "tesseract",
+    captures,
   });
   requireThat(
     initialOcr.artifacts.length === doc.pages.length,
@@ -219,6 +208,7 @@ export async function confirmationEvidence(
     strictRegion: true,
     engine: "tesseract",
     pins: initialOcr.artifacts,
+    captures,
   });
   const ignored = new Set([
     "category_id",
@@ -249,6 +239,7 @@ export async function ppConfirmation(
   input: any,
   draft: LunaDraft,
   id: string,
+  captures: Capture[],
 ) {
   const doc = draft.documents.find((d) => d.id === id)!;
   const pins = input.artifacts;
@@ -274,6 +265,7 @@ export async function ppConfirmation(
     strictRegion: true,
     pins,
     engine: "ppocr",
+    captures,
   });
   requireThat(
     initialOcr.artifacts.length === doc.pages.length,

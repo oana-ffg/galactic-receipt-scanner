@@ -43,7 +43,22 @@ export async function storedDocuments(env: Env): Promise<ReceiptDocument[]> {
   const rows = await env.DB.prepare(
     "SELECT v.payload FROM document_heads h JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision",
   ).all<{ payload: string }>();
-  return rows.results.map((row) => JSON.parse(row.payload));
+  return rows.results.map((row) => {
+    const document = JSON.parse(row.payload) as ReceiptDocument;
+    // Older immutable revisions contain a processing crop. It is no longer state.
+    for (const page of document.pages) delete (page as { crop?: unknown }).crop;
+    return document;
+  });
+}
+function samePageSources(left: unknown, right: ReceiptDocument["pages"]) {
+  if (!Array.isArray(left)) return false;
+  const source = (page: ReceiptDocument["pages"][number]) => ({
+    captureId: page.captureId,
+    sha256: page.sha256,
+    rotation: page.rotation,
+    type: page.type ?? null,
+  });
+  return JSON.stringify(left.map(source)) === JSON.stringify(right.map(source));
 }
 async function names(env: Env) {
   return (
@@ -173,10 +188,9 @@ function validate(
       "Page must reference an existing original and its exact hash.",
     );
     requireThat(
-      [0, 90, 180, 270].includes(page.rotation) &&
-        (page.crop === null || boxValid(page.crop, source)),
+      [0, 90, 180, 270].includes(page.rotation),
       400,
-      "Invalid page rotation or original-pixel crop.",
+      "Invalid page rotation.",
     );
   }
   requireThat(
@@ -296,7 +310,7 @@ export async function documentRoute(
       (f) =>
         f.document_id === d.id &&
         f.filename === filename &&
-        JSON.stringify(JSON.parse(f.payload).pages) === JSON.stringify(d.pages),
+        samePageSources(JSON.parse(f.payload).pages, d.pages),
     );
     const state = documentReasons(d);
     const completenessAudit = completenessAudits.get(d.id) ?? null;
@@ -463,6 +477,9 @@ export async function documentRoute(
     );
     const changes = input.documents;
     changes.forEach((d) => {
+      if (Array.isArray(d?.pages))
+        for (const page of d.pages)
+          if (page && typeof page === "object") delete page.crop;
       try {
         validate(d, captures);
       } catch (error) {
@@ -538,8 +555,7 @@ export async function documentRoute(
             (f) =>
               f.document_id === d.id &&
               f.filename === filename &&
-              JSON.stringify(JSON.parse(f.payload).pages) ===
-                JSON.stringify(d.pages),
+              samePageSources(JSON.parse(f.payload).pages, d.pages),
           )?.sha256 === d.reviewedPdfSha256,
           400,
           "Generate and inspect the PDF for these exact pages and filename before confirming it.",

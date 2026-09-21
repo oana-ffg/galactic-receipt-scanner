@@ -2,7 +2,7 @@ import type { DocumentView } from "./documents";
 import { ocrOverlay, type OcrBox, type PositionedOcr } from "./ocr-overlay";
 import type { ReviewOcr, ReviewOcrSource } from "./review-ocr";
 import type { Capture } from "./types";
-import { detectedReceiptCrop } from "./receipt-crop";
+import { scanCrop } from "./receipt-crop";
 import { messageOf } from "./errors";
 import { formatOcrConfidence } from "./ocr-confidence";
 
@@ -252,14 +252,9 @@ export function documentPreview(
         try {
           const width = image.naturalWidth,
             height = image.naturalHeight;
-          const quad =
-            capture?.manual_outline?.source_sha256 === page.sha256
-              ? capture.manual_outline.quad
-              : capture?.metadata.quality?.quad;
+          if (!capture) throw Error("Original capture metadata is missing.");
           const crop =
-            source.value === "crop"
-              ? (page.crop ?? detectedReceiptCrop([width, height], quad))
-              : null;
+            source.value === "crop" ? scanCrop(capture, [width, height]) : null;
           const [left, top, right, bottom] = crop ?? [0, 0, width, height];
           if (
             left < 0 ||
@@ -270,7 +265,7 @@ export function documentPreview(
             bottom <= top
           )
             throw Error(
-              "Saved crop is outside the original. Choose Full original.",
+              "Scan crop is outside the original. Choose Full original.",
             );
           const w = right - left,
             h = bottom - top,

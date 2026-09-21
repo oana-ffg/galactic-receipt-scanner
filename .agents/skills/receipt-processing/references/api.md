@@ -24,8 +24,8 @@ browser mutations need the Site Origin and `X-Scanner-Request: 1`. Both paths sh
 - `GET /api/documents/{id}/pdf?revision=N&version=SHA`: pin an immutable stored PDF.
 
 Authoritative types: `web/documents.ts`. Copy actual listed records; never invent hashes.
-Writable fields: `id`, `revision`; ordered `pages: [{captureId,sha256,rotation,crop}]` (rotation
-0/90/180/270, crop null or original-pixel `[left,top,right,bottom]`); source-backed nullable
+Writable fields: `id`, `revision`; ordered `pages: [{captureId,sha256,rotation}]` (rotation
+0/90/180/270; crop comes from the saved scan outline); source-backed nullable
 `vendor`, `receiptDate` (YYYY-MM-DD), `reference`; `kind` unknown/receipt/invoice/credit-note;
 `text`; `handwriting` unchecked/absent/present/uncertain;
 `annotations: [{text,captureId,box,uncertain}]` (legacy optional transcription, original-pixel box);
@@ -43,7 +43,7 @@ Existing image/OCR artifacts stay separately versioned under capture artifact ro
 Inspect the exact saved PDF before checking `pdf`. Changing pages or naming fields can
 invalidate output. A later retake produces a review reason: reconcile the new source with
 the old document and preserve previous decisions/artifacts. Consult capture metadata for
-original dimensions before supplying crops or annotation boxes.
+original dimensions before supplying annotation boxes.
 
 For an existing document, save changed page membership with all checks false and invoice
 null, then re-inspect and save the new attestations. Order changes require grouping/pdf

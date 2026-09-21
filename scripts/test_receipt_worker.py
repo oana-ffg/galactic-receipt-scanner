@@ -57,7 +57,7 @@ class FakeScanner:
         self.documents = {}
         for did in (DID, OTHER):
             sha = hashlib.sha256(self.raw[did]).hexdigest()
-            self.documents[did] = dict(id=did, revision=2, pages=[dict(captureId=did, sha256=sha, rotation=0, crop=None)],
+            self.documents[did] = dict(id=did, revision=2, pages=[dict(captureId=did, sha256=sha, rotation=0)],
                 filename=None, mergedInto=None, duplicateOf=None, annotations=[], handwriting="absent",
                 checks=dict(visual=False, transcription=False, grouping=False, pdf=False), invoice=None,
                 reviewedPdfSha256=None, uncertainties=[], broken=[], evidence="", processing=None, status="unprocessed")
@@ -815,7 +815,7 @@ class WorkerTests(unittest.TestCase):
     def test_complete_one_document_protocol(self):
         self.prepared()
         self.assertEqual(self.worker.state["draft"]["layouts"][0]["crop"], [1, 2, 9, 18])
-        self.assertEqual(self.worker.state["draft"]["target"]["pages"][0]["crop"], [1, 2, 9, 18])
+        self.assertNotIn("crop", self.worker.state["draft"]["target"]["pages"][0])
         self.send("categories")
         self.send("category", name="Synthetic category", description="Synthetic category description")
         self.send("validate", extraction=extraction())
@@ -1011,9 +1011,15 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("Sol", json.dumps(result))
         self.assertTrue(self.send("release")["released"])
 
-    def test_explicit_raw_preview_freezes_full_original_pixel_bounds(self):
+    def test_no_outline_uses_full_scan_crop_without_a_document_crop(self):
         self.claimed()
-        result = self.send("previews", capture_ids=[DID], layouts={DID: {"crop": None, "rotation": 90}})
+        original_image_pdf = self.fake.image_pdf
+        def full_scan(pages, directory):
+            value = original_image_pdf(pages, directory)
+            value["layouts"][0]["crop"] = [0, 0, 10, 20]
+            return value
+        self.fake.image_pdf = full_scan
+        result = self.send("previews", capture_ids=[DID], layouts={DID: {"rotation": 90}})
         self.assertEqual(result[0]["layout"]["crop"], [0, 0, 10, 20])
         self.assertEqual(result[0]["layout"]["rotation"], 90)
         self.send("draft", extraction=extraction())
@@ -1022,7 +1028,7 @@ class WorkerTests(unittest.TestCase):
         confirmation = self.send("confirm")
         self.send("assess", confirmation_sha256=confirmation["sha256"], extraction=extraction(), rationale="Synthetic reviewed crop.")
         self.send("submit")
-        self.assertEqual(self.fake.documents[DID]["pages"][0]["crop"], [0, 0, 10, 20])
+        self.assertNotIn("crop", self.fake.documents[DID]["pages"][0])
         self.assertEqual(self.fake.documents[DID]["pages"][0]["rotation"], 90)
 
     def test_rotation_only_override_cannot_authorize_undetected_raw_layout(self):
@@ -1038,7 +1044,7 @@ class WorkerTests(unittest.TestCase):
         result = self.worker.handle({"op": "previews", "capture_ids": [DID],
                                      "layouts": {DID: {"rotation": 90}}})
         self.assertFalse(result["ok"])
-        self.assertIn("explicitly choose crop bounds or raw", result["input_error"])
+        self.assertIn("Scan crop could not be resolved", result["input_error"])
         self.assertNotIn(DID, self.worker.state["layouts"])
 
     def test_invalid_preview_override_stops_before_draft_or_remote_write(self):
@@ -1046,7 +1052,7 @@ class WorkerTests(unittest.TestCase):
         before = len(self.fake.calls)
         result = self.worker.handle({"op": "previews", "capture_ids": [DID],
                                      "layouts": {DID: {"crop": [0, 0, 11, 20], "rotation": 0}}})
-        self.assertTrue(result["blocking"])
+        self.assertIn("Only rotation may be changed", result["input_error"])
         self.assertEqual(self.worker.state["phase"], "claimed")
         self.assertFalse(self.worker.state.get("draft"))
         self.assertNotIn(("POST", "/api/processing/submit"), self.fake.calls[before:])
