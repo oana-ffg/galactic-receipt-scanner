@@ -622,9 +622,16 @@ async function compareDocuments(
   current: ReceiptDocument,
   candidate: ReceiptDocument,
   budget: JevBudget,
+  assessmentTask = "document-relationship",
+  suppliedEvidence?: {
+    current: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>;
+    candidate: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>;
+  },
 ) {
-  const currentEvidence = await documentEvidence(env, current);
-  const candidateEvidence = await documentEvidence(env, candidate);
+  const currentEvidence =
+    suppliedEvidence?.current ?? (await documentEvidence(env, current));
+  const candidateEvidence =
+    suppliedEvidence?.candidate ?? (await documentEvidence(env, candidate));
   if (!currentEvidence || !candidateEvidence) return null;
   const currentOcr = currentEvidence.ocr;
   const candidateOcr = candidateEvidence.ocr;
@@ -642,7 +649,7 @@ async function compareDocuments(
   };
   const saved = await assess(
     env,
-    "document-relationship",
+    assessmentTask,
     input,
     { id: current.id },
     { id: candidate.id },
@@ -2323,6 +2330,129 @@ export async function jevRoute(
             updated_at: pipeline.updated_at,
           }
         : null,
+    });
+  }
+  if (url.pathname === "/api/jev/group-audit" && request.method === "POST") {
+    const input = await bodyJson(request);
+    requireThat(
+      typeof input.document_id === "string" && UUID.test(input.document_id),
+      400,
+      "Provide a document ID for group audit.",
+    );
+    const documents = records(await storedDocuments(env), await loadCaptures());
+    const document = documents.find((item) => item.id === input.document_id);
+    requireThat(
+      document && !document.mergedInto && !document.duplicateOf,
+      404,
+      "Active document not found.",
+    );
+    requireThat(
+      input.revision === document.revision,
+      409,
+      "Document revision changed before group audit.",
+    );
+    const index = input.next_page_index;
+    requireThat(
+      typeof index === "number" &&
+        Number.isInteger(index) &&
+        index >= 1 &&
+        index < document.pages.length,
+      400,
+      "Choose an existing page after the first page.",
+    );
+    requireThat(
+      input.page_id === document.pages[index].captureId,
+      409,
+      "Page membership changed before group audit.",
+    );
+    const fingerprint = await pageFingerprint(document);
+    const prior = {
+      ...document,
+      pages: document.pages.slice(0, index),
+    };
+    const next = {
+      ...document,
+      id: document.pages[index].captureId,
+      pages: [document.pages[index]],
+    };
+    const [priorEvidence, nextEvidence] = await Promise.all([
+      documentEvidence(env, prior),
+      documentEvidence(env, next),
+    ]);
+    if (!priorEvidence || !nextEvidence)
+      return json({
+        document_id: document.id,
+        revision: document.revision,
+        next_page_index: index,
+        assessed: false,
+        reason: "missing_matching_ocr",
+      });
+    if (
+      priorEvidence.ocr.truncated ||
+      nextEvidence.ocr.truncated ||
+      priorEvidence.ocr.blank ||
+      nextEvidence.ocr.blank
+    )
+      return json({
+        document_id: document.id,
+        revision: document.revision,
+        next_page_index: index,
+        assessed: false,
+        reason:
+          priorEvidence.ocr.truncated || nextEvidence.ocr.truncated
+            ? "ocr_too_long"
+            : "blank_ocr",
+      });
+    const decision = await compareDocuments(
+      env,
+      next,
+      prior,
+      { remaining: 1 },
+      "document-relationship-audit",
+      { current: nextEvidence, candidate: priorEvidence },
+    );
+    requireThat(decision, 503, "Jev group audit could not be assessed.");
+    const current = records(
+      await storedDocuments(env),
+      await loadCaptures(),
+    ).find((item) => item.id === document.id);
+    requireThat(
+      current &&
+        current.revision === document.revision &&
+        (await pageFingerprint(current)) === fingerprint,
+      409,
+      "Document changed during group audit; rerun it.",
+    );
+    const [currentPrior, currentNext] = await Promise.all([
+      documentEvidence(env, {
+        ...current,
+        pages: current.pages.slice(0, index),
+      }),
+      documentEvidence(env, {
+        ...current,
+        id: current.pages[index].captureId,
+        pages: current.pages.slice(index, index + 1),
+      }),
+    ]);
+    requireThat(
+      JSON.stringify(currentPrior?.ocr.pins) ===
+        JSON.stringify(priorEvidence.ocr.pins) &&
+        JSON.stringify(currentNext?.ocr.pins) ===
+          JSON.stringify(nextEvidence.ocr.pins),
+      409,
+      "OCR evidence changed during group audit; rerun it.",
+    );
+    return json({
+      document_id: document.id,
+      revision: document.revision,
+      next_page_index: index,
+      previous_page_ids: prior.pages.map((page) => page.captureId),
+      page_id: next.pages[0].captureId,
+      relationship: decision.answer.choice,
+      probabilities: decision.answer.probabilities,
+      confidence: decision.answer.confidence,
+      assessment_id: decision.assessment_id,
+      assessed: true,
     });
   }
   if (url.pathname === "/api/jev/documents" && request.method === "GET") {

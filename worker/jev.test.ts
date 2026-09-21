@@ -1108,6 +1108,210 @@ it("backfills a historical receipt before its later matching payment slip", asyn
   ]);
 });
 
+it("audits an existing grouped page without changing its membership", async () => {
+  const processingToken = `rsc_${"a".repeat(43)}`;
+  const comparisons: Array<{ current: string; candidate: string }> = [];
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      if (body.questions.relationship)
+        comparisons.push({
+          current: body.state.current.ocr,
+          candidate: body.state.candidate.ocr,
+        });
+      return syntheticJevResponse(request);
+    },
+  });
+  const captures = [
+    await saveCapture(),
+    await saveCapture(),
+    await saveCapture(),
+  ];
+  const grouped = newDocument(captures[0]);
+  grouped.pages.push(
+    ...captures.slice(1).map((capture) => newDocument(capture).pages[0]),
+  );
+  const saved = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [grouped] }),
+  });
+  expect(saved.status, await saved.text()).toBe(200);
+  let revision = (
+    await (
+      await mf.dispatchFetch(`${origin}/api/documents/${grouped.id}`, {
+        headers: ownerHeaders,
+      })
+    ).json<any>()
+  ).document.revision;
+  const audit = () =>
+    mf.dispatchFetch(`${origin}/api/jev/group-audit`, {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: JSON.stringify({
+        document_id: grouped.id,
+        revision,
+        next_page_index: 2,
+        page_id: captures[2].id,
+      }),
+    });
+  const missing = await audit();
+  expect(await missing.json<any>()).toMatchObject({
+    assessed: false,
+    reason: "missing_matching_ocr",
+  });
+  for (const [index, capture] of captures.entries())
+    await seedHistoricalOcr(
+      capture,
+      `SHOP RECEIPT SECTION ${index + 1}\nTOTAL 12.34`,
+      `2026-01-01T00:00:0${index}.000Z`,
+    );
+  await drainBackfill(processingToken);
+  revision = (
+    await (
+      await mf.dispatchFetch(`${origin}/api/documents/${grouped.id}`, {
+        headers: ownerHeaders,
+      })
+    ).json<any>()
+  ).document.revision;
+  const firstResponse = await audit();
+  const first = await firstResponse.json<any>();
+  expect(firstResponse.status, JSON.stringify(first)).toBe(200);
+  expect(first).toMatchObject({
+    assessed: true,
+    document_id: grouped.id,
+    page_id: captures[2].id,
+    relationship: "unrelated",
+    confidence: 1,
+  });
+  expect(comparisons).toEqual([
+    {
+      current: "Page 1:\nSHOP RECEIPT SECTION 3\nTOTAL 12.34",
+      candidate:
+        "Page 1:\nSHOP RECEIPT SECTION 1\nTOTAL 12.34\n\nPage 2:\nSHOP RECEIPT SECTION 2\nTOTAL 12.34",
+    },
+  ]);
+  const secondResponse = await audit();
+  expect((await secondResponse.json<any>()).assessment_id).toBe(
+    first.assessment_id,
+  );
+  expect(comparisons).toHaveLength(1);
+  const oversized = await seedHistoricalOcr(
+    captures[0],
+    "X".repeat(24_001),
+    "2026-01-02T00:00:00.000Z",
+  );
+  await (
+    await mf.getD1Database("DB")
+  )
+    .prepare("UPDATE jev_page_heads SET ocr_sha256=? WHERE capture_id=?")
+    .bind(oversized, captures[0].id)
+    .run();
+  const tooLong = await audit();
+  expect(await tooLong.json<any>()).toMatchObject({
+    assessed: false,
+    reason: "ocr_too_long",
+  });
+  expect(comparisons).toHaveLength(1);
+  const after = await mf.dispatchFetch(
+    `${origin}/api/documents/${grouped.id}`,
+    { headers: ownerHeaders },
+  );
+  expect(
+    (await after.json<any>()).document.pages.map((page: any) => page.captureId),
+  ).toEqual(captures.map((capture) => capture.id));
+});
+
+it("rejects a group audit when its OCR head changes during Jev assessment", async () => {
+  const processingToken = `rsc_${"b".repeat(43)}`;
+  let replacementSha: string | null = null;
+  const comparisons: string[] = [];
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      if (body.questions.relationship) {
+        comparisons.push(body.state.current.ocr);
+        if (replacementSha)
+          await (
+            await mf.getD1Database("DB")
+          )
+            .prepare(
+              "UPDATE jev_page_heads SET ocr_sha256=? WHERE capture_id=?",
+            )
+            .bind(replacementSha, captures[1].id)
+            .run();
+      }
+      return syntheticJevResponse(request);
+    },
+  });
+  const captures = [await saveCapture(), await saveCapture()];
+  const grouped = newDocument(captures[0]);
+  grouped.pages.push(newDocument(captures[1]).pages[0]);
+  const saved = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [grouped] }),
+  });
+  expect(saved.status, await saved.text()).toBe(200);
+  for (const [index, capture] of captures.entries())
+    await seedHistoricalOcr(
+      capture,
+      `ORIGINAL RECEIPT SECTION ${index + 1}`,
+      `2026-01-01T00:00:0${index}.000Z`,
+    );
+  await drainBackfill(processingToken);
+  replacementSha = await seedHistoricalOcr(
+    captures[1],
+    "REVISED RECEIPT SECTION 2",
+    "2026-01-02T00:00:00.000Z",
+  );
+  const before = await mf.dispatchFetch(
+    `${origin}/api/documents/${grouped.id}`,
+    { headers: ownerHeaders },
+  );
+  const revision = (await before.json<any>()).document.revision;
+  const response = await mf.dispatchFetch(`${origin}/api/jev/group-audit`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${processingToken}`,
+    },
+    body: JSON.stringify({
+      document_id: grouped.id,
+      revision,
+      next_page_index: 1,
+      page_id: captures[1].id,
+    }),
+  });
+  expect(response.status).toBe(409);
+  expect(comparisons).toEqual(["Page 1:\nORIGINAL RECEIPT SECTION 2"]);
+});
+
 it("replays a saved low-score continuation when upgrading the pipeline", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   await mf.dispose();

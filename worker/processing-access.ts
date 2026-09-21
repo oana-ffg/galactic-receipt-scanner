@@ -37,6 +37,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/processing/reparse",
       "/api/jev/backfill",
       "/api/jev/completeness",
+      "/api/jev/group-audit",
     ].includes(path) ||
       new RegExp(`^/api/documents/${id}/pdf$`).test(path) ||
       new RegExp(`^/api/captures/${id}/artifacts/ocr$`).test(path))
