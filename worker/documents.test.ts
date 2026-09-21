@@ -45,6 +45,41 @@ async function capture(quality: Partial<Quality> = {}) {
 }
 const save = (documents: unknown[]) =>
   request("/api/documents", "POST", JSON.stringify({ documents }));
+it("exposes only the current saved page crop and rotation for OCR", async () => {
+  const source = await capture();
+  const before = (await (
+    await request("/api/processing/ocr-layouts")
+  ).json()) as any;
+  expect(before.layouts.some((row: any) => row.capture_id === source.id)).toBe(
+    false,
+  );
+  const document = newDocument(source);
+  document.pages[0].crop = [10, 20, 1000, 1800];
+  document.pages[0].rotation = 90;
+  expect((await save([document])).status).toBe(200);
+  const first = (await (
+    await request("/api/processing/ocr-layouts")
+  ).json()) as any;
+  expect(
+    first.layouts.find((row: any) => row.capture_id === source.id),
+  ).toEqual({
+    capture_id: source.id,
+    source_sha256: source.sha256,
+    crop: [10, 20, 1000, 1800],
+    rotation: 90,
+  });
+  const saved = (
+    (await (await request(`/api/documents/${source.id}`)).json()) as any
+  ).document;
+  saved.pages[0].crop = [20, 30, 1000, 1800];
+  expect((await save([saved])).status).toBe(200);
+  const latest = (await (
+    await request("/api/processing/ocr-layouts")
+  ).json()) as any;
+  expect(
+    latest.layouts.find((row: any) => row.capture_id === source.id).crop,
+  ).toEqual([20, 30, 1000, 1800]);
+});
 it("preserves scan times and sources through non-adjacent grouping, splitting and optimistic revisions", async () => {
   const a = await capture(),
     middle = await capture(),

@@ -1,23 +1,22 @@
 ---
 name: receipt-ocr-nightly
-description: Run unattended PP-OCRv6 over every current scan still missing OCR, installing the CPU runtime when needed and uploading verified OCR. Use for nightly OCR or OCR backlog recovery, independently of Luna grouping and extraction.
+description: Run unattended PP-OCRv6 for current scans missing OCR or whose OCR no longer matches the saved page crop. Use for nightly OCR or OCR backlog recovery, independently of Luna grouping and extraction.
 ---
 
 # Nightly receipt OCR
 
 A bare `/receipt-ocr-nightly` means execute now, not explain or make a plan. Process every
-current accepted/manual-review scan **without an OCR artifact** saved before the invocation,
+current accepted/manual-review scan **without matching OCR for its current page crop** saved before the invocation,
 including today's scans and every older unfinished scan. Normal runs have no calendar-day
 cutoff. An explicit date is a diagnostic/historical scope override only; an explicit timezone
-controls calendar reporting. Already-OCRed captures are inventory counts, not work: do not
-fetch or revalidate each one. Outline corrections discovered by Jev or Luna use the exact
-request recovery path below instead of a nightly rescan. There is no ten-document limit and
+controls calendar reporting. Recheck OCR when a saved document crop or rotation changes.
+There is no ten-document limit and
 no Luna/model pass. Superseded retakes and rejected captures remain untouched. Saved PP is
 unverified evidence, not a human-approved reading.
 
 Use the repository scripts; they live outside this skill so you can inspect, repair and
-test them when needed. The runner verifies original hashes, uses the saved document outline
-(manual correction takes precedence), reuses matching PP artifacts, performs inference
+test them when needed. The runner verifies original hashes, uses the saved document page crop
+when present (otherwise the capture's manual or detected outline), reuses matching PP artifacts, performs inference
 locally, uploads immutable OCR including positions/confidences/search text, and verifies
 the uploaded artifact. After all OCR attempts, the deterministic runner drains the hosted,
 serialized Jev pipeline to two stable zero-work responses. Jev owns page grouping and

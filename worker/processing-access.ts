@@ -10,6 +10,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
         "/api/processing/access",
         "/api/processing/categories",
         "/api/processing/context",
+        "/api/processing/ocr-layouts",
         "/api/processing/readings",
         "/api/jev/status",
         "/api/jev/documents",

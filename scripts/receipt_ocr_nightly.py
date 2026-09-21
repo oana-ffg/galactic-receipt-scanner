@@ -12,7 +12,7 @@ import time
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from receipt_api import (ClientError, ScannerClient, SHA, UUID, artifact_directory,
+from receipt_api import (ClientError, OCRRequired, ScannerClient, SHA, UUID, artifact_directory,
                          credentials, matches_prepared_ocr, run_jev_backfill, write_new_file)
 from receipt_locks import acquire_lock, LockBusy
 from receipt_ppocr_setup import REPO, discover, ensure_profile
@@ -24,10 +24,46 @@ def save_json(path, value):
     os.replace(temporary, path)
 
 
-def fingerprint(capture):
+def fingerprint(capture, layout=None):
     value = {key: capture.get(key) for key in ('id', 'sha256', 'manual_outline')}
     value['quad'] = ((capture.get('metadata') or {}).get('quality') or {}).get('quad')
+    if layout and (layout['crop'] is not None or layout['rotation'] != 0):
+        value['page_layout'] = {key: layout[key] for key in ('source_sha256', 'crop', 'rotation')}
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def current_page_layouts(client):
+    """Read saved document-page layouts without loading financial document contents."""
+    response = client.get('/api/processing/ocr-layouts')
+    rows = response.get('layouts') if isinstance(response, dict) else None
+    if not isinstance(rows, list):
+        raise ClientError('Invalid document-page OCR layout inventory.')
+    layouts = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {'capture_id', 'source_sha256', 'crop', 'rotation'}:
+            raise ClientError('Invalid document-page OCR layout.')
+        cid, sha, crop, rotation = (row[key] for key in ('capture_id', 'source_sha256', 'crop', 'rotation'))
+        if (not isinstance(cid, str) or not UUID.fullmatch(cid) or cid in layouts or
+                not isinstance(sha, str) or not SHA.fullmatch(sha) or type(rotation) is not int or
+                rotation not in (0, 90, 180, 270) or
+                (crop is not None and (not isinstance(crop, list) or len(crop) != 4 or
+                 any(type(v) is not int for v in crop) or not (0 <= crop[0] < crop[2] and 0 <= crop[1] < crop[3])))):
+            raise ClientError('Invalid document-page OCR layout.')
+        layouts[cid] = row
+    return layouts
+
+
+def page_layout(capture, layouts):
+    layout = layouts.get(capture['id'])
+    if layout and layout['source_sha256'] != capture['sha256']:
+        raise ClientError('Document-page crop belongs to a different source image.')
+    return layout
+
+
+def needs_layout_recheck(capture, layouts, state):
+    layout = page_layout(capture, layouts)
+    prior = state['completed'].get(capture['id'])
+    return not prior or prior['fingerprint'] != fingerprint(capture, layout)
 
 
 def utc(value):
@@ -150,9 +186,10 @@ def finish_jev(client):
     return {key: result[key] for key in fields if key in result}
 
 
-def drain(client, captures, root, state, *, attempts=3, sleep=time.sleep, emit=print):
+def drain(client, captures, root, state, *, layouts=None, attempts=3, sleep=time.sleep, emit=print):
     """Try every scan before retrying individual failures; an access loss blocks further writes."""
     pending = captures
+    layouts = layouts or {}
     errors = {}
     verified, reused, retired = set(), set(), set()
     consecutive_network_failures = 0
@@ -167,7 +204,8 @@ def drain(client, captures, root, state, *, attempts=3, sleep=time.sleep, emit=p
                     errors.pop(cid, None)
                     consecutive_network_failures = 0
                     continue
-                signature = fingerprint(current)
+                layout = page_layout(current, layouts)
+                signature = fingerprint(current, layout)
                 prior = state['completed'].get(cid)
                 if (prior and prior['fingerprint'] == signature and
                         any(a.get('kind') == 'ocr' and a.get('sha256') == prior['ocr_sha256']
@@ -176,10 +214,19 @@ def drain(client, captures, root, state, *, attempts=3, sleep=time.sleep, emit=p
                     errors.pop(cid, None)
                     consecutive_network_failures = 0
                     continue
-                prepared = client.prepare(cid, root / 'artifacts')
+                options = {'rotation': layout['rotation']} if layout else {}
+                if layout and layout['crop'] is not None:
+                    options['crop'] = layout['crop']
+                if current['ocr_status'] == 'unverified':
+                    try:
+                        prepared = client.saved_ocr(cid, root / 'artifacts', **options)
+                    except OCRRequired:
+                        prepared = client.prepare(cid, root / 'artifacts', **options)
+                else:
+                    prepared = client.prepare(cid, root / 'artifacts', **options)
                 # If an outline changed while OCR was running, keep the artifact but retry the new layout.
                 latest = client.get('/api/captures/' + cid)
-                if fingerprint(latest) != signature:
+                if fingerprint(latest, layout) != signature:
                     raise ClientError('Source layout changed during OCR; retry with current metadata.')
                 state['completed'][cid] = dict(fingerprint=signature, ocr_sha256=prepared['ocr_sha256'])
                 save_json(root / 'progress.json', state)
@@ -268,10 +315,13 @@ def main():
         state = json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else dict(origin=client.origin, completed={})
         if state['origin'] != client.origin:
             raise ClientError('OCR progress belongs to a different Site.')
-        selected = awaiting_ocr[:args.limit] if args.limit else awaiting_ocr
+        layouts = current_page_layouts(client)
+        candidates = [capture for capture in captures if needs_ocr(capture) or needs_layout_recheck(capture, layouts, state)]
+        summary['layout_rechecks'] = len(candidates) - len(awaiting_ocr)
+        selected = candidates[:args.limit] if args.limit else candidates
         # Save the immutable snapshot before starting; an interrupted run remains diagnosable.
         write_new_file(root / ('inventory-' + os.urandom(6).hex() + '.json'), json.dumps(captures).encode())
-        result = drain(client, selected, root, state)
+        result = drain(client, selected, root, state, layouts=layouts)
         if requirement:
             result['required_ocr'] = dict(verified=False, capture_id=requirement['capture_id'])
             if not result.get('blocked'):
@@ -282,7 +332,7 @@ def main():
             if not result['required_ocr']['verified']:
                 result['complete'] = False
         result.update(summary)
-        result['limited'] = args.limit is not None and len(selected) < len(awaiting_ocr)
+        result['limited'] = args.limit is not None and len(selected) < len(candidates)
         if result['limited']:
             result['complete'] = False
         if result.get('blocked'):
@@ -294,6 +344,13 @@ def main():
                 result['jev'] = dict(complete=False, error=str(error))
         if not result['jev'].get('complete'):
             result['complete'] = False
+        latest_layouts = current_page_layouts(client)
+        changed_layouts = [capture['id'] for capture in captures
+                           if fingerprint(capture, page_layout(capture, layouts)) !=
+                           fingerprint(capture, page_layout(capture, latest_layouts))]
+        if changed_layouts:
+            result['complete'] = False
+            result['layout_changed'] = changed_layouts
         print(json.dumps(dict(event='jev_finished', **result['jev'])), flush=True)
         save_json(root / 'last-run.json', result)
         print(json.dumps(dict(event='finished', **result)), flush=True)

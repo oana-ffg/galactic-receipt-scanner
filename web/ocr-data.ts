@@ -157,13 +157,8 @@ export function ocrArtifactMatchesPage(value: OcrArtifact, page: DocumentPage) {
   );
 }
 
-/**
- * Jev consumes transcription only, not the OCR PDF layer. A detector-selected OCR
- * subregion is valid text evidence for an uncropped page. For an explicitly cropped
- * page, keep the OCR region inside that reviewed crop so unrelated source content
- * cannot leak into classification.
- */
-export function ocrTextArtifactMatchesPage(
+/** Validate OCR geometry and rotation before Jev reads source-verified text. */
+export function ocrTextArtifactHasValidGeometry(
   value: OcrArtifact,
   page: DocumentPage,
 ) {
@@ -196,11 +191,5 @@ export function ocrTextArtifactMatchesPage(
     region.top + region.height > pixelHeight
   )
     return false;
-  if (page.crop === null) return true;
-  return (
-    region.left >= page.crop[0] &&
-    region.top >= page.crop[1] &&
-    region.left + region.width <= page.crop[2] &&
-    region.top + region.height <= page.crop[3]
-  );
+  return true;
 }

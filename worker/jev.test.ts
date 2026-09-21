@@ -16,7 +16,7 @@ import {
 } from "./jev";
 import {
   ocrArtifactMatchesPage,
-  ocrTextArtifactMatchesPage,
+  ocrTextArtifactHasValidGeometry,
 } from "../web/ocr-data";
 
 let mf: Awaited<ReturnType<typeof runtime>>;
@@ -311,7 +311,7 @@ it("requires PP OCR to match the exact full-page or cropped layout", () => {
   expect(ocrArtifactMatchesPage(artifact, cropped)).toBe(true);
 });
 
-it("accepts safe detector subregions as Jev text evidence without weakening exact PDF layout checks", () => {
+it("accepts Jev text from any valid region of the same rotated source", () => {
   const fullPage = {
     captureId: "capture",
     sha256: "a".repeat(64),
@@ -328,20 +328,20 @@ it("accepts safe detector subregions as Jev text evidence without weakening exac
     },
   } as any;
   expect(ocrArtifactMatchesPage(artifact, fullPage)).toBe(false);
-  expect(ocrTextArtifactMatchesPage(artifact, fullPage)).toBe(true);
+  expect(ocrTextArtifactHasValidGeometry(artifact, fullPage)).toBe(true);
 
-  const containingCrop = {
+  const croppedPage = {
     ...fullPage,
     crop: [50, 50, 950, 1500],
   } as any;
-  expect(ocrTextArtifactMatchesPage(artifact, containingCrop)).toBe(true);
+  expect(ocrTextArtifactHasValidGeometry(artifact, croppedPage)).toBe(true);
   artifact.source.region = { left: 25, top: 100, width: 875, height: 1300 };
-  expect(ocrTextArtifactMatchesPage(artifact, containingCrop)).toBe(false);
+  expect(ocrTextArtifactHasValidGeometry(artifact, croppedPage)).toBe(true);
   artifact.source.rotation = 90;
-  expect(ocrTextArtifactMatchesPage(artifact, fullPage)).toBe(false);
+  expect(ocrTextArtifactHasValidGeometry(artifact, fullPage)).toBe(false);
   artifact.source.rotation = 0;
   artifact.source.pixels = {};
-  expect(ocrTextArtifactMatchesPage(artifact, fullPage)).toBe(false);
+  expect(ocrTextArtifactHasValidGeometry(artifact, fullPage)).toBe(false);
 });
 
 it("keeps existing page groups intact and carries annotations and review reasons when merging payment evidence", () => {
@@ -882,7 +882,7 @@ it("re-evaluates legacy ineligible jobs and classifies safe auto-cropped PP text
       .first(),
   ).toEqual({
     status: "complete",
-    eligibility_version: 2,
+    eligibility_version: 3,
     ineligible_reason: null,
   });
   expect(
@@ -975,7 +975,7 @@ it("keeps completed Jev evidence pinned when a newer legacy artifact is rejected
   ).toEqual(
     [
       { ocr_sha256: rejected, status: "ineligible", eligibility_version: 1 },
-      { ocr_sha256: completed, status: "complete", eligibility_version: 2 },
+      { ocr_sha256: completed, status: "complete", eligibility_version: 3 },
     ].sort((a, b) => a.ocr_sha256.localeCompare(b.ocr_sha256)),
   );
   const stored = await mf.dispatchFetch(
@@ -1044,7 +1044,7 @@ it("retries only the newest legacy artifact and leaves its older sibling untouch
   ).toEqual(
     [
       { ocr_sha256: older, status: "ineligible", eligibility_version: 1 },
-      { ocr_sha256: newer, status: "complete", eligibility_version: 2 },
+      { ocr_sha256: newer, status: "complete", eligibility_version: 3 },
     ].sort((a, b) => a.ocr_sha256.localeCompare(b.ocr_sha256)),
   );
   expect(

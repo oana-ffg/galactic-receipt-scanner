@@ -210,6 +210,31 @@ export async function processingRoute(
     path = url.pathname,
     method = request.method;
   if (!path.startsWith("/api/processing/")) return null;
+  if (path === "/api/processing/ocr-layouts" && method === "GET") {
+    const rows = await env.DB.prepare(
+      `SELECT p.capture_id,
+              json_extract(v.payload, '$.pages[' || p.page_index || '].sha256') AS source_sha256,
+              json_extract(v.payload, '$.pages[' || p.page_index || '].crop') AS crop,
+              json_extract(v.payload, '$.pages[' || p.page_index || '].rotation') AS rotation
+       FROM document_pages p
+       JOIN document_heads h ON h.id=p.document_id
+       JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+       ORDER BY p.capture_id`,
+    ).all<{
+      capture_id: string;
+      source_sha256: string;
+      crop: string | null;
+      rotation: number;
+    }>();
+    return json({
+      layouts: rows.results.map((row) => ({
+        capture_id: row.capture_id,
+        source_sha256: row.source_sha256,
+        crop: row.crop === null ? null : JSON.parse(row.crop),
+        rotation: row.rotation,
+      })),
+    });
+  }
   if (path === "/api/processing/reparse" && method === "POST") {
     requireThat(
       request.headers.has("authorization"),

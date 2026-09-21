@@ -7,7 +7,10 @@ import {
   retargetAbsorbedAliases,
   type ReceiptDocument,
 } from "../web/documents";
-import { ocrTextArtifactMatchesPage, type OcrArtifact } from "../web/ocr-data";
+import {
+  ocrTextArtifactHasValidGeometry,
+  type OcrArtifact,
+} from "../web/ocr-data";
 import { documentRoute, storedDocuments } from "./documents";
 import {
   COMPLETENESS_TASK,
@@ -31,7 +34,7 @@ const COMPLETENESS_DECISIONS = {
     "The document was classified as a purchase document in error and contains no purchase receipt, invoice, or credit note.",
 } as const;
 const MAX_JEV_TEXT = 24_000;
-const JEV_ELIGIBILITY_VERSION = 2;
+const JEV_ELIGIBILITY_VERSION = 3;
 const JEV_PIPELINE_VERSION = 6;
 
 export const pageRoles = [
@@ -380,7 +383,7 @@ async function pinnedPpOcr(
   return value?.provenance?.engine === "PP-OCRv6" &&
     value.source?.captureId === page.captureId &&
     value.source?.sha256 === page.sha256 &&
-    ocrTextArtifactMatchesPage(value, page) &&
+    ocrTextArtifactHasValidGeometry(value, page) &&
     typeof value.text === "string"
     ? { sha256: row.sha256, value }
     : null;
@@ -995,8 +998,11 @@ async function processJob(
     (item) => item.captureId === capture.id,
   );
   if (!page) return { eligible: false, ineligible_reason: "page_missing" };
-  if (!ocrTextArtifactMatchesPage(value, page))
-    return { eligible: false, ineligible_reason: "ocr_region_mismatch" };
+  if (!ocrTextArtifactHasValidGeometry(value, page))
+    return {
+      eligible: false,
+      ineligible_reason: "ocr_source_geometry_invalid",
+    };
   await classifyPage(env, capture, job.ocr_sha256, value, { remaining: 1 });
   return { eligible: true };
 }

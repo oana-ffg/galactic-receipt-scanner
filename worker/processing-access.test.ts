@@ -36,6 +36,7 @@ it("allows verified originals and immutable OCR but denies unclaimed document wr
   const capture = (await saved.json()) as any;
   const read = (path: string) =>
     mf.dispatchFetch(origin + path, { headers: auth });
+  expect((await read("/api/processing/ocr-layouts")).status).toBe(200);
   const raw = await read(`/api/files/${id}/raw`);
   expect(raw.status).toBe(200);
   expect(raw.headers.get("cache-control")).toContain("no-store");
