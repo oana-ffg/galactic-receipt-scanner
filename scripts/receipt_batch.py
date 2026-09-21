@@ -36,6 +36,12 @@ def batch_lease_failure(stage, error):
     )
 
 
+def controller_response(result):
+    """Keep the protocol acknowledgement separate from a worker's semantic result."""
+    return {"ok": True, **{key: value for key, value in result.items()
+                         if key not in {"verified_runs", "ok"}}}
+
+
 class BatchLeaseStartError(Exception):
     """A lease request failed before this controller persisted a new batch."""
 
@@ -193,6 +199,42 @@ class BatchGuard:
                                   requested_count=count, workflow=workflow, verified_runs={}, completed_count=0))
         except Exception:
             self.finish_lease()
+            raise
+
+    def resume(self, batch_id, run_id):
+        """Reattach only the unfinished Luna run of an interrupted active guard."""
+        require(self.state and self.state.get("phase") == "active"
+                and self.state.get("batch_id") == batch_id
+                and self.state.get("owner") == self.owner
+                and self.state.get("workflow") == "luna"
+                and self.state.get("active_run_id") == run_id,
+                "Recovery must name this owner's exact active Luna batch and run.")
+        require(isinstance(run_id, str) and len(run_id) == 32
+                and all(char in "0123456789abcdef" for char in run_id),
+                "Recovery requires a valid exact run ID.")
+        pointer = regular_path(self.base / "active-run.json")
+        require(json.loads(pointer.read_text(encoding="utf-8")).get("run_id") == run_id,
+                "The active worker pointer differs from the requested recovery run.")
+        prior = json.loads(regular_path(self.base / run_id / "state.json").read_text(encoding="utf-8"))
+        require(prior.get("run_id") == run_id and prior.get("batch_id") == batch_id
+                and prior.get("phase") in {"claimed", "draft-uncertain", "confirmation-uncertain",
+                                           "drafted", "submit-uncertain", "submit-readback",
+                                           "submitted", "pdf-preparing", "pdf-uncertain", "pdf", "complete"}
+                and not prior.get("failed"),
+                "The exact worker is failed or not safely resumable through completion.")
+        require(self.lease is not None, "Exact-batch recovery requires a backend lease.")
+        self.lease.start(batch_id, self.owner)
+        try:
+            worker = Worker(self.lease.profile, resume=run_id, profile_path=self.lease.profile_path)
+            self.worker = worker
+            require(worker.confirmation_provider == "ppocr"
+                    and worker.state.get("batch_id") == batch_id,
+                    "Recovered worker differs from the prepared Luna batch.")
+            self.start_worker_heartbeat()
+            return {**self.state, "resumed": True, "next": "complete-active-run"}
+        except Exception:
+            self.close_worker(release=False)
+            self.finish_lease(False)
             raise
 
     def handle(self, request):
@@ -464,13 +506,16 @@ def main():
     parser.add_argument("--resolve", action=Once)
     parser.add_argument("--reason", action=Once)
     parser.add_argument("--verify", action=Once)
+    parser.add_argument("--resume-batch", action=Once)
+    parser.add_argument("--resume-run", action=Once)
     parser.add_argument("--count", type=int, action=Once)
     parser.add_argument("--workflow", choices=("luna", "astra"), action=Once)
     parser.add_argument("--client-config", required=True, action=Once)
     args = parser.parse_args()
     # The scheduled owner's standing approval covers processing, never recovery.
-    require(not args.resolve or args.owner != "receipt-processing-scheduled",
-            "Scheduled processing cannot resolve an unfinished batch; use owner-directed recovery.")
+    require(args.owner != "receipt-processing-scheduled"
+            or (args.resolve is None and args.resume_batch is None and args.resume_run is None),
+            "Scheduled processing cannot recover an unfinished batch; use owner-directed recovery.")
     repo = Path(__file__).resolve().parent.parent
     base = repo / ".local" / "receipt-worker"
     try:
@@ -479,7 +524,9 @@ def main():
         print(json.dumps(batch_lease_failure("batch-lease-setup", error)), flush=True)
         raise SystemExit(1) from None
     if args.verify is not None:
-        require(args.resolve is None and args.reason is None, "Verification cannot request recovery.")
+        require(args.resolve is None and args.reason is None
+                and args.resume_batch is None and args.resume_run is None,
+                "Verification cannot request recovery.")
         print(json.dumps(verify_run(repo, args.verify, args.owner, client=lease.client)), flush=True)
         return
     try:
@@ -488,12 +535,19 @@ def main():
         print(json.dumps(dict(busy=True)), flush=True)
         return
     try:
+        require(args.resolve is None or (args.resume_batch is None and args.resume_run is None),
+                "Resolution cannot also request exact-run recovery.")
         if args.resolve:
             print(json.dumps(dict(resolved=True, **guard.resolve(args.resolve, args.reason))), flush=True)
             return
+        require((args.resume_batch is None) == (args.resume_run is None),
+                "Exact recovery requires both --resume-batch and --resume-run.")
+        require(args.resume_batch is None or (args.count is None and args.workflow is None),
+                "Recovery cannot change the batch target or workflow.")
         require(args.reason is None, "--reason requires --resolve.")
         try:
-            result = guard.start(args.count if args.count is not None else 10, args.workflow or "luna")
+            result = (guard.resume(args.resume_batch, args.resume_run) if args.resume_batch is not None
+                      else guard.start(args.count if args.count is not None else 10, args.workflow or "luna"))
         except BatchBusy:
             print(json.dumps(dict(busy=True)), flush=True)
             return
@@ -507,7 +561,7 @@ def main():
         for line in sys.stdin:
             try:
                 result = guard.handle(json.loads(line))
-                print(json.dumps(dict(ok=True, **{k: v for k, v in result.items() if k != "verified_runs"})), flush=True)
+                print(json.dumps(controller_response(result)), flush=True)
                 if result["phase"] not in {"active", "finishing"}:
                     return
             except (InputError, ValueError) as error:

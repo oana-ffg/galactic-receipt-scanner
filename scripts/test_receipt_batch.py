@@ -33,6 +33,83 @@ class FakeLease:
 
 
 class BatchGuardTests(unittest.TestCase):
+    def test_correctable_worker_result_keeps_controller_acknowledgement(self):
+        response = module.controller_response({
+            "ok": False,
+            "correction_required": True,
+            "errors": ["Synthetic validation error."],
+            "next": "correct-luna-result",
+            "verified_runs": {"private": "proof"},
+        })
+        self.assertEqual(response, {
+            "ok": True,
+            "correction_required": True,
+            "errors": ["Synthetic validation error."],
+            "next": "correct-luna-result",
+        })
+        self.assertTrue(json.loads(json.dumps(response))["ok"])
+
+    def test_completed_request_can_emit_a_luna_validation_correction(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        guard.start(1)
+        worker = Mock()
+        worker.state = {"run_id": "a" * 32, "phase": "claimed"}
+        worker.mutex = threading.RLock()
+        worker.complete_luna_task.return_value = {
+            "ok": False, "correction_required": True,
+            "errors": ["Synthetic validation error."],
+        }
+        guard.worker = worker
+        response = json.loads(json.dumps(module.controller_response(
+            guard.handle({"op": "complete", "run_id": "a" * 32}))))
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["next"], "correct-luna-result")
+        self.assertEqual(response["errors"], ["Synthetic validation error."])
+        self.assertIs(guard.worker, worker)
+
+    def test_resume_reopens_only_exact_active_run_without_claiming(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        state = guard.start(1)
+        run_id = 'a' * 32
+        self.worker_state(phase='claimed', run_id=run_id, batch_id=state['batch_id'])
+        guard.save({**guard.state, 'active_run_id': run_id, 'active_task_path': '/private/task.json'})
+        lease.finish(False)  # The former controller has exited.
+        worker = Mock()
+        worker.confirmation_provider = 'ppocr'
+        worker.state = {'run_id': run_id, 'batch_id': state['batch_id'], 'phase': 'claimed'}
+        worker.stop_heartbeat = threading.Event()
+        worker.heartbeat.side_effect = lambda: worker.stop_heartbeat.wait()
+        worker.lock = Mock()
+        with patch.object(module, 'Worker', return_value=worker) as worker_class:
+            result = guard.resume(state['batch_id'], run_id)
+            self.assertEqual(result['next'], 'complete-active-run')
+            self.assertTrue(result['resumed'])
+            worker_class.assert_called_once_with(lease.profile, resume=run_id, profile_path=lease.profile_path)
+            with self.assertRaisesRegex(module.InputError, 'Complete the prepared Luna task'):
+                guard.handle({'op': 'next'})
+        worker.prepare_luna_task.assert_not_called()
+
+    def test_resume_rejects_wrong_run_and_failed_checkpoint_before_lease(self):
+        lease = FakeLease()
+        guard = module.BatchGuard(self.base, 'synthetic-task', lease)
+        self.addCleanup(guard.close)
+        state = guard.start(1)
+        run_id = 'a' * 32
+        self.worker_state(phase='claimed', run_id=run_id, batch_id=state['batch_id'])
+        guard.save({**guard.state, 'active_run_id': run_id})
+        lease.events.clear()
+        with self.assertRaises(module.InputError):
+            guard.resume(state['batch_id'], 'b' * 32)
+        self.worker_state(phase='submit-uncertain', run_id=run_id,
+                          batch_id=state['batch_id'], failed={'operation': 'submit'})
+        with self.assertRaisesRegex(module.InputError, 'not safely resumable'):
+            guard.resume(state['batch_id'], run_id)
+        self.assertEqual(lease.events, [])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -475,9 +552,42 @@ class BatchGuardTests(unittest.TestCase):
             '--client-config', str(self.client_config),
             '--resolve', 'a' * 32, '--reason', 'Automatic retry',
         ]), patch.object(module, 'BatchGuard') as guard:
-            with self.assertRaisesRegex(module.InputError, 'Scheduled processing cannot resolve'):
+            with self.assertRaisesRegex(module.InputError, 'Scheduled processing cannot recover'):
                 module.main()
             guard.assert_not_called()
+
+    def test_scheduled_owner_cannot_resume_before_lease_setup(self):
+        for recovery_args in [
+            ['--resume-batch', 'a' * 32],
+            ['--resume-run', 'b' * 32],
+            ['--resume-batch', 'a' * 32, '--resume-run', 'b' * 32],
+        ]:
+            with self.subTest(recovery_args=recovery_args), patch.object(module.sys, 'argv', [
+                'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+                '--client-config', str(self.client_config), *recovery_args,
+            ]), patch.object(module, 'ProcessingBatchLease') as lease, \
+                 patch.object(module, 'BatchGuard') as guard:
+                with self.assertRaisesRegex(module.InputError, 'Scheduled processing cannot recover'):
+                    module.main()
+                lease.assert_not_called()
+                guard.assert_not_called()
+
+    def test_verify_rejects_recovery_flags_before_opening_guard(self):
+        for recovery_args in [
+            ['--resume-batch', 'a' * 32],
+            ['--resume-run', 'b' * 32],
+            ['--resume-batch', 'a' * 32, '--resume-run', 'b' * 32],
+        ]:
+            with self.subTest(recovery_args=recovery_args), patch.object(module.sys, 'argv', [
+                'receipt_batch.py', '--owner', 'manual-recovery', '--verify', 'c' * 32,
+                '--client-config', str(self.client_config), *recovery_args,
+            ]), patch.object(module, 'ProcessingBatchLease', return_value=FakeLease()), \
+                 patch.object(module, 'BatchGuard') as guard, \
+                 patch.object(module, 'verify_run') as verify:
+                with self.assertRaisesRegex(module.InputError, 'Verification cannot request recovery'):
+                    module.main()
+                guard.assert_not_called()
+                verify.assert_not_called()
 
     def test_repeated_guard_arguments_are_rejected_before_opening_guard(self):
         for extra in [
