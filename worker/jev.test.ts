@@ -7,6 +7,7 @@ import {
   jevReadyDocuments,
   jevSummary,
   mergeDocuments,
+  normalizeCompletenessDecision,
   pageFingerprint,
   prepareJevMerge,
   queueJevJob,
@@ -25,6 +26,42 @@ beforeEach(async () => {
 }, 30_000);
 
 afterEach(async () => mf?.dispose());
+
+it("derives one consistent completeness result from Jev's single decision", () => {
+  const probabilities = {
+    yes: 0.05,
+    missing_total: 0.7,
+    missing_lines_or_page: 0.1,
+    page_or_slip_mismatch: 0.05,
+    unreadable_or_uncertain: 0.05,
+    not_receipt: 0.05,
+  };
+  expect(
+    normalizeCompletenessDecision({
+      type: "choice",
+      choice: "missing_total",
+      probabilities,
+      confidence: 0.7,
+    }),
+  ).toMatchObject({
+    completeness: {
+      choice: "no",
+      probabilities: { no: 0.9 },
+    },
+    issue: { choice: "missing_total" },
+  });
+  expect(
+    normalizeCompletenessDecision({
+      type: "choice",
+      choice: "not_receipt",
+      probabilities: { ...probabilities, not_receipt: 0.7 },
+      confidence: 0.7,
+    }),
+  ).toMatchObject({
+    completeness: { choice: "not_receipt" },
+    issue: { choice: "not_receipt" },
+  });
+});
 
 async function saveCapture(retakeOf?: string) {
   const id = crypto.randomUUID();
@@ -186,15 +223,11 @@ async function syntheticJevResponse(request: Request) {
             ? "purchase_document"
             : name === "purchase_category"
               ? "unresolved"
-              : name === "completeness"
+              : name === "decision"
                 ? text.includes("TOTAL")
                   ? "yes"
-                  : "no"
-                : name === "issue"
-                  ? text.includes("TOTAL")
-                    ? "none"
-                    : "missing_total"
-                  : "unrelated";
+                  : "missing_total"
+                : "unrelated";
       return [
         name,
         {

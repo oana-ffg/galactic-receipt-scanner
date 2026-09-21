@@ -16,6 +16,19 @@ import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const JEV_MODEL = "jev-1.13.0";
+const COMPLETENESS_DECISIONS = {
+  yes: "The purchase paper appears to contain every section, continuous line entries, and its own printed total. A separate card slip alone cannot establish the purchase total.",
+  missing_total:
+    "The purchase paper has no visible printed total or footer; a payment slip does not fill this gap.",
+  missing_lines_or_page:
+    "Line items, a continuation page, or a section of the purchase paper appears absent or cut off.",
+  page_or_slip_mismatch:
+    "Included pages or payment evidence may belong to different transactions.",
+  unreadable_or_uncertain:
+    "The scan or OCR is too unclear to establish that all pages, line entries, and the total are present. Choose this when completeness cannot be established from the evidence.",
+  not_receipt:
+    "The document was classified as a purchase document in error and contains no purchase receipt, invoice, or credit note.",
+} as const;
 const MAX_JEV_TEXT = 24_000;
 const AUTO_MATCH_PROBABILITY = 0.9;
 const AUTO_MATCH_CONFIDENCE = 0.75;
@@ -153,6 +166,7 @@ export function shouldAutoMerge(answer: ChoiceAnswer) {
 function validateChoice(
   answer: unknown,
   choices: readonly string[],
+  label = "choice",
 ): asserts answer is ChoiceAnswer {
   const value = answer as ChoiceAnswer;
   requireThat(
@@ -170,8 +184,56 @@ function validateChoice(
       value.confidence >= 0 &&
       value.confidence <= 1,
     503,
-    "Jev returned an invalid choice response.",
+    `Jev returned an invalid ${label} response.`,
   );
+}
+
+export function normalizeCompletenessDecision(answer: ChoiceAnswer) {
+  validateChoice(
+    answer,
+    Object.keys(COMPLETENESS_DECISIONS),
+    "completeness decision",
+  );
+  const probabilities = answer.probabilities;
+  const result =
+    answer.choice === "yes"
+      ? "yes"
+      : answer.choice === "not_receipt"
+        ? "not_receipt"
+        : "no";
+  const issue = answer.choice === "yes" ? "none" : answer.choice;
+  return {
+    completeness: {
+      type: "choice" as const,
+      choice: result,
+      probabilities: {
+        yes: probabilities.yes,
+        no: Math.min(
+          1,
+          probabilities.missing_total +
+            probabilities.missing_lines_or_page +
+            probabilities.page_or_slip_mismatch +
+            probabilities.unreadable_or_uncertain,
+        ),
+        not_receipt: probabilities.not_receipt,
+      },
+      confidence: answer.confidence,
+    },
+    issue: {
+      type: "choice" as const,
+      choice: issue,
+      probabilities: {
+        none: probabilities.yes,
+        missing_total: probabilities.missing_total,
+        missing_lines_or_page: probabilities.missing_lines_or_page,
+        page_or_slip_mismatch: probabilities.page_or_slip_mismatch,
+        unreadable_or_uncertain: probabilities.unreadable_or_uncertain,
+        evidence_too_long: 0,
+        not_receipt: probabilities.not_receipt,
+      },
+      confidence: answer.confidence,
+    },
+  };
 }
 
 async function callJev(
@@ -2296,26 +2358,15 @@ export async function jevRoute(
     const evidence = await documentEvidence(env, document);
     requireThat(evidence, 409, "Current PP OCR evidence is incomplete.");
     const fingerprint = await pageFingerprint(document);
-    const completenessCriteria = {
-      yes: "This purchase document appears to include all receipt or invoice sections, continuous line entries, and its own printed total. A separate card slip alone cannot establish the purchase total. Choose yes only when the available pages themselves support completeness.",
-      no: "A receipt page or line section appears missing, the purchase total/footer is absent, a section is cut off or unreadable, page continuity is doubtful, or a payment slip is being used to fill a gap. Also choose no when completeness cannot be established from the available evidence; a human must inspect the paper.",
-      not_receipt:
-        "The document was classified as a purchase document in error and contains no purchase receipt, invoice, or credit note.",
-    };
-    const issueCriteria = {
-      none: "No source completeness concern is visible.",
-      missing_total:
-        "The purchase document has no visible printed purchase total or footer; a payment slip does not fill this gap.",
-      missing_lines_or_page:
-        "Line items, a continuation page, or a section of the purchase paper appears absent or cut off.",
-      page_or_slip_mismatch:
-        "Included pages or payment evidence may belong to different transactions.",
-      unreadable_or_uncertain:
-        "The scan or OCR is too unclear to establish completeness.",
-      evidence_too_long:
-        "The combined OCR exceeds the model input limit, so all pages and the footer could not be assessed together.",
-      not_receipt: "There is no purchase document here.",
-    };
+    const issueChoices = [
+      "none",
+      "missing_total",
+      "missing_lines_or_page",
+      "page_or_slip_mismatch",
+      "unreadable_or_uncertain",
+      "evidence_too_long",
+      "not_receipt",
+    ];
     const saved = await assess(
       env,
       COMPLETENESS_TASK,
@@ -2324,8 +2375,7 @@ export async function jevRoute(
         truncated: evidence.ocr.truncated,
         pins: evidence.ocr.pins,
         page_fingerprint: fingerprint,
-        completeness_criteria: completenessCriteria,
-        issue_criteria: issueCriteria,
+        decision_criteria: COMPLETENESS_DECISIONS,
       },
       { id: document.id, revision: document.revision },
       null,
@@ -2344,7 +2394,7 @@ export async function jevRoute(
                   type: "choice" as const,
                   choice: "evidence_too_long",
                   probabilities: Object.fromEntries(
-                    Object.keys(issueCriteria).map((key) => [
+                    issueChoices.map((key) => [
                       key,
                       key === "evidence_too_long" ? 1 : 0,
                     ]),
@@ -2357,26 +2407,37 @@ export async function jevRoute(
               env,
               { ocr_text: evidence.ocr.text },
               {
-                completeness: {
+                decision: {
                   type: "choice",
                   instructions:
-                    "Check the purchase paper as a whole. Decide whether every page, line section, and the printed purchase total appear present. Do not infer a missing receipt total from a card slip.",
-                  criteria: completenessCriteria,
-                },
-                issue: {
-                  type: "choice",
-                  instructions:
-                    "Name the main source issue. Choose none only when completeness is yes.",
-                  criteria: issueCriteria,
+                    "Choose one outcome for this purchase paper as a whole. Check all pages, line sections, and its own printed total. Do not use a card slip to supply a missing receipt total. If completeness is uncertain, choose unreadable_or_uncertain.",
+                  criteria: COMPLETENESS_DECISIONS,
                 },
               },
-            ),
+            ).then((response) => {
+              requireThat(
+                response.answers.decision,
+                503,
+                "Jev omitted the completeness decision.",
+              );
+              return {
+                ...response,
+                answers: normalizeCompletenessDecision(
+                  response.answers.decision,
+                ),
+              };
+            }),
       (result) => {
         validateChoice(
           result.answers.completeness,
-          Object.keys(completenessCriteria),
+          ["yes", "no", "not_receipt"],
+          "completeness outcome",
         );
-        validateChoice(result.answers.issue, Object.keys(issueCriteria));
+        validateChoice(
+          result.answers.issue,
+          issueChoices,
+          "completeness issue",
+        );
         requireThat(
           (result.answers.completeness.choice === "yes") ===
             (result.answers.issue.choice === "none") &&
