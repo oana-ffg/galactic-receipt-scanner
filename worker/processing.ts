@@ -212,14 +212,15 @@ export async function processingRoute(
   if (!path.startsWith("/api/processing/")) return null;
   if (path === "/api/processing/ocr-layouts" && method === "GET") {
     const rows = await env.DB.prepare(
-      `SELECT p.capture_id,
-              json_extract(v.payload, '$.pages[' || p.page_index || '].sha256') AS source_sha256,
-              json_extract(v.payload, '$.pages[' || p.page_index || '].crop') AS crop,
-              json_extract(v.payload, '$.pages[' || p.page_index || '].rotation') AS rotation
-       FROM document_pages p
-       JOIN document_heads h ON h.id=p.document_id
+      `SELECT json_extract(page.value, '$.captureId') AS capture_id,
+              json_extract(page.value, '$.sha256') AS source_sha256,
+              json_extract(page.value, '$.crop') AS crop,
+              json_extract(page.value, '$.rotation') AS rotation
+       FROM document_heads h
        JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
-       ORDER BY p.capture_id`,
+       JOIN json_each(v.payload, '$.pages') page
+       WHERE json_extract(v.payload, '$.mergedInto') IS NULL
+       ORDER BY capture_id`,
     ).all<{
       capture_id: string;
       source_sha256: string;

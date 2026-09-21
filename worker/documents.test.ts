@@ -80,12 +80,35 @@ it("exposes only the current saved page crop and rotation for OCR", async () => 
     latest.layouts.find((row: any) => row.capture_id === source.id).crop,
   ).toEqual([20, 30, 1000, 1800]);
 });
+it("reads saved page layout even when the page index table is stale", async () => {
+  const source = await capture();
+  const document = newDocument(source);
+  document.pages[0].crop = [40, 50, 900, 1700];
+  expect((await save([document])).status).toBe(200);
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE document_pages SET page_index=7 WHERE capture_id=?")
+    .bind(source.id)
+    .run();
+  const layouts = (await (
+    await request("/api/processing/ocr-layouts")
+  ).json()) as any;
+  expect(
+    layouts.layouts.find((row: any) => row.capture_id === source.id),
+  ).toEqual({
+    capture_id: source.id,
+    source_sha256: source.sha256,
+    crop: [40, 50, 900, 1700],
+    rotation: 0,
+  });
+});
 it("preserves scan times and sources through non-adjacent grouping, splitting and optimistic revisions", async () => {
   const a = await capture(),
     middle = await capture(),
     b = await capture();
   const one = newDocument(a),
     two = newDocument(b);
+  two.pages[0].crop = [20, 30, 1000, 1800];
   one.vendor = two.vendor = "Synthetic shop";
   one.receiptDate = two.receiptDate = "2026-02-01";
   expect((await save([one, two])).status).toBe(200);
@@ -105,6 +128,19 @@ it("preserves scan times and sources through non-adjacent grouping, splitting an
   const second = await (await request("/api/documents")).json();
   const grouped = second.documents.find((d: any) => d.id === a.id);
   expect(grouped.pages.map((p: any) => p.captureId)).toEqual([a.id, b.id]);
+  const mergedLayouts = (await (
+    await request("/api/processing/ocr-layouts")
+  ).json()) as any;
+  expect(
+    mergedLayouts.layouts.filter((row: any) => row.capture_id === b.id),
+  ).toEqual([
+    {
+      capture_id: b.id,
+      source_sha256: b.sha256,
+      crop: [20, 30, 1000, 1800],
+      rotation: 0,
+    },
+  ]);
   expect(second.documents.some((d: any) => d.id === middle.id)).toBe(true);
   expect((await request(`/api/files/${b.id}/raw`)).status).toBe(200);
   const drop = { ...grouped, pages: [grouped.pages[0]] };
