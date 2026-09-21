@@ -524,7 +524,8 @@ def run_jev_completeness(client, *, sleep=time.sleep):
                 largest_ocr_chars = max(largest_ocr_chars, chars)
             if document.get("ocr_truncated"):
                 counts["oversized_ocr"] += 1
-            if document["jev"]["role"] != "purchase_document":
+            if (document["jev"]["role"] != "purchase_document"
+                    or document["kind"] not in {"unknown", "receipt", "invoice", "credit-note"}):
                 counts["not_purchase"] += 1
                 continue
             if not document["ready"]:

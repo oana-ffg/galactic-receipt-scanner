@@ -92,13 +92,31 @@ export interface DocumentView extends ReceiptDocument {
   pdf: { sha256: string; revision: number } | null;
 }
 
+export function canAssessReceiptCompleteness(kind: DocumentType): boolean {
+  return ["unknown", "receipt", "invoice", "credit-note"].includes(kind);
+}
+
 export function needsSourceIntervention(
   doc: Pick<DocumentView, "completenessAudit">,
 ): boolean {
   const audit = doc.completenessAudit;
   return (
-    audit?.result === "no" ||
-    (audit?.result === "yes" && audit.confidence < 0.75)
+    audit?.result === "no" &&
+    [
+      "missing_total",
+      "missing_lines_or_page",
+      "page_or_slip_mismatch",
+    ].includes(audit.issue)
+  );
+}
+
+export function completenessUncertain(
+  doc: Pick<DocumentView, "completenessAudit">,
+): boolean {
+  const audit = doc.completenessAudit;
+  return (
+    (audit?.result === "yes" && audit.confidence < 0.75) ||
+    (audit?.result === "no" && !needsSourceIntervention(doc))
   );
 }
 

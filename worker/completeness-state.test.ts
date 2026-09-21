@@ -63,4 +63,9 @@ it("does not reuse a completeness verdict after PP OCR changes on the same pages
   expect(
     (await loadCompletenessAudits(env, [document])).audits.has(document.id),
   ).toBe(false);
+  pageHead.ocr_sha256 = "old-ocr";
+  document.kind = "other";
+  expect(
+    (await loadCompletenessAudits(env, [document])).audits.has(document.id),
+  ).toBe(false);
 });

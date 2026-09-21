@@ -1,5 +1,9 @@
 import type { Env } from "./index";
-import type { ReceiptDocument, DocumentView } from "../web/documents";
+import {
+  canAssessReceiptCompleteness,
+  type ReceiptDocument,
+  type DocumentView,
+} from "../web/documents";
 
 export const COMPLETENESS_TASK = "receipt-completeness-v1";
 
@@ -66,6 +70,7 @@ export async function loadCompletenessAudits(
     if (
       !document ||
       !head ||
+      !canAssessReceiptCompleteness(document.kind) ||
       document.mergedInto ||
       document.duplicateOf ||
       document.revision !== row.subject_revision ||

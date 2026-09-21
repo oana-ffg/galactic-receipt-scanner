@@ -1,6 +1,7 @@
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
 import {
+  canAssessReceiptCompleteness,
   newDocument,
   requiredMergeReviewReasons,
   retargetAbsorbedAliases,
@@ -2299,6 +2300,7 @@ export async function jevRoute(
         continue;
       results.push({
         document_id: document.id,
+        kind: document.kind,
         revision: document.revision,
         ready: summary.ready,
         ocr_characters: evidence?.ocr.characters ?? null,
@@ -2347,7 +2349,10 @@ export async function jevRoute(
         assessed: false,
         reason: "Jev or PP evidence is pending",
       });
-    if (summary.document?.role !== "purchase_document")
+    if (
+      summary.document?.role !== "purchase_document" ||
+      !canAssessReceiptCompleteness(document.kind)
+    )
       return json({
         document_id: document.id,
         revision: document.revision,

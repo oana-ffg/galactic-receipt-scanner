@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   appendProcessingEvidence,
+  canAssessReceiptCompleteness,
+  completenessUncertain,
   DOCUMENT_EVIDENCE_LIMIT,
   documentReasons,
   filenameBase,
@@ -15,19 +17,45 @@ const source = {
   id: "00000000-0000-4000-8000-000000000001",
   sha256: "a".repeat(64),
 } as Capture;
-it("flags missing-source findings and low-confidence completeness", () => {
-  const audit = (result: "yes" | "no" | "not_receipt", confidence: number) => ({
+it("screens purchase kinds and unknown documents without treating explicit non-receipts as receipts", () => {
+  for (const kind of ["unknown", "receipt", "invoice", "credit-note"] as const)
+    expect(canAssessReceiptCompleteness(kind)).toBe(true);
+  for (const kind of [
+    "payment-slip",
+    "atm",
+    "note",
+    "other",
+    "not-receipt",
+  ] as const)
+    expect(canAssessReceiptCompleteness(kind)).toBe(false);
+});
+it("separates missing-source findings from uncertain completeness", () => {
+  const audit = (
+    result: "yes" | "no" | "not_receipt",
+    confidence: number,
+    issue = result === "no" ? "missing_total" : "none",
+  ) => ({
     completenessAudit: {
       result,
-      issue: result === "no" ? "missing_total" : "none",
+      issue,
       confidence,
       assessedAt: "2026-09-21T00:00:00Z",
     },
   });
   expect(needsSourceIntervention(audit("no", 1))).toBe(true);
-  expect(needsSourceIntervention(audit("yes", 0.6))).toBe(true);
+  expect(needsSourceIntervention(audit("yes", 0.6))).toBe(false);
   expect(needsSourceIntervention(audit("yes", 0.9))).toBe(false);
   expect(needsSourceIntervention(audit("not_receipt", 1))).toBe(false);
+  expect(
+    needsSourceIntervention(audit("no", 1, "unreadable_or_uncertain")),
+  ).toBe(false);
+  expect(needsSourceIntervention(audit("no", 1, "evidence_too_long"))).toBe(
+    false,
+  );
+  expect(completenessUncertain(audit("yes", 0.6))).toBe(true);
+  expect(completenessUncertain(audit("yes", 0.9))).toBe(false);
+  expect(completenessUncertain(audit("no", 0.6))).toBe(false);
+  expect(completenessUncertain(audit("no", 1, "evidence_too_long"))).toBe(true);
 });
 describe("source-backed processing", () => {
   it("retains bounded processing evidence without changing existing notes", () => {

@@ -13,6 +13,7 @@ import {
   filenameBase,
   newDocument,
   needsSourceIntervention,
+  completenessUncertain,
   validDate,
   type ReceiptDocument,
   type DocumentView,
@@ -301,7 +302,14 @@ export async function documentRoute(
     const completenessAudit = completenessAudits.get(d.id) ?? null;
     if (needsSourceIntervention({ completenessAudit })) {
       state.reasons.unshift(
-        `Needs source intervention: ${completenessAudit!.result === "no" ? completenessAudit!.issue.replaceAll("_", " ") : "Jev could not confirm completeness confidently"}. Check the original paper and page grouping.`,
+        `Needs source intervention: ${completenessAudit!.result === "no" ? completenessAudit!.issue.replaceAll("_", " ") : "Jev could not confirm completeness confidently"}. Inspect the saved scans and page grouping; look for the original paper if a page or printed total is absent.`,
+      );
+      if (state.status === "ready") state.status = "review";
+    } else if (completenessUncertain({ completenessAudit })) {
+      state.reasons.unshift(
+        completenessAudit?.issue === "evidence_too_long"
+          ? "Combined OCR exceeds Jev's assessment limit. Review the saved pages in sections before treating this document as complete."
+          : "Completeness could not be established confidently from OCR. Inspect the saved scans before treating this document as complete.",
       );
       if (state.status === "ready") state.status = "review";
     }
