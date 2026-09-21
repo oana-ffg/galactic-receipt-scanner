@@ -435,7 +435,12 @@ it("retargets persisted merged and duplicate aliases when Jev absorbs their targ
       .prepare(
         "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
       )
-      .bind(mergedAlias.id, 2, JSON.stringify(priorAlias), new Date().toISOString()),
+      .bind(
+        mergedAlias.id,
+        2,
+        JSON.stringify(priorAlias),
+        new Date().toISOString(),
+      ),
     db
       .prepare("UPDATE document_heads SET revision=? WHERE id=?")
       .bind(2, mergedAlias.id),
@@ -468,7 +473,9 @@ it("retargets persisted merged and duplicate aliases when Jev absorbs their targ
     { headers: ownerHeaders },
   );
   const destination = (await destinationResponse.json<any>()).document;
-  expect(destination.uncertainties).toContain("Synthetic unresolved OCR review.");
+  expect(destination.uncertainties).toContain(
+    "Synthetic unresolved OCR review.",
+  );
   expect(destination.broken).toContain("Synthetic unresolved source error.");
   for (const [id, relationship] of [
     [mergedAlias.id, "mergedInto"],
@@ -1627,7 +1634,11 @@ it("leaves the open tail unclassified until the following raw capture has PP OCR
     headers: { ...ownerHeaders, Authorization: `Bearer ${processingToken}` },
   });
   expect(statusResponse.status).toBe(200);
-  expect((await statusResponse.json<any>()).waiting_current_captures).toBe(1);
+  expect(await statusResponse.json<any>()).toMatchObject({
+    current_captures_with_waiting_jobs: 1,
+    current_captures_missing_page_head: 1,
+    missing_page_head_capture_ids: [captures[2].id],
+  });
 
   expect(await runBackfill(processingToken)).toMatchObject({
     result: null,
@@ -1755,7 +1766,11 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     },
   });
   expect(statusResponse.status).toBe(200);
-  expect((await statusResponse.json<any>()).waiting_current_captures).toBe(1);
+  expect(await statusResponse.json<any>()).toMatchObject({
+    current_captures_with_waiting_jobs: 1,
+    current_captures_missing_page_head: 1,
+    missing_page_head_capture_ids: [second.id],
+  });
 });
 
 it("marks an open tail larger than the D1 parameter limit as waiting", async () => {

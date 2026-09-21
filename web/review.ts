@@ -359,6 +359,16 @@ export async function mountReview(app: HTMLElement) {
       );
       sources.append(card);
     });
+    if (!doc.processing && doc.pages.length) {
+      const ocrSource = reviewOcrSource(doc);
+      const preview = documentPreview(doc, catalog.captures, ocrSource);
+      preview.element.classList.add("receipt-source-preview");
+      disposeDetail = () => {
+        preview.destroy();
+        ocrSource.destroy();
+      };
+      detail.append(preview.element);
+    }
     detail.append(sources);
     const form = el("form");
     form.className = "review-form";

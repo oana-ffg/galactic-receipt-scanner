@@ -39,29 +39,58 @@ export function documentPreview(
   overlayEngine.hidden = true;
   const overlayMessage = document.createElement("p");
   overlayMessage.setAttribute("role", "status");
+  const transcript = document.createElement("details");
+  transcript.className = "document-preview-transcript";
+  transcript.append(document.createElement("summary"));
+  transcript.firstElementChild!.textContent = "Saved OCR text";
+  const transcriptContent = document.createElement("div");
+  transcriptContent.textContent = "Open to load saved OCR text.";
+  transcript.append(transcriptContent);
   const retryOcr = document.createElement("button");
-  retryOcr.textContent = "Retry OCR overlay";
+  retryOcr.textContent = "Retry saved OCR";
   retryOcr.hidden = true;
   controls.append(source, overlayLabel, overlayEngine, retryOcr);
   const content = document.createElement("div");
   content.className = "document-preview-content";
-  element.append(controls, overlayMessage, content);
+  element.append(controls, overlayMessage, transcript, content);
   let ocr: ReviewOcr[] | undefined;
   let ocrErrors = 0;
   let loadingOcr = false;
   let closed = false;
   let activePage = 0;
   let updateOverlay = () => {};
+  const updateRetry = () => {
+    retryOcr.hidden =
+      loadingOcr || !ocrErrors || !(overlayToggle.checked || transcript.open);
+  };
   const loadOverlay = async () => {
     if (loadingOcr) return;
     loadingOcr = true;
-    retryOcr.hidden = true;
+    updateRetry();
     overlayMessage.textContent = "Loading saved OCR positions…";
+    transcriptContent.textContent = "Loading saved OCR text…";
     try {
       const result = await ocrSource.load();
       if (closed) return;
       ocr = result.engines;
       ocrErrors = result.errors.length;
+      transcriptContent.replaceChildren();
+      for (const engine of ocr) {
+        for (const page of engine.pages) {
+          const heading = document.createElement("h4");
+          heading.textContent = `${engine.engine} · Page ${page.number}`;
+          const text = document.createElement("pre");
+          text.textContent = page.text || "No recognized text.";
+          transcriptContent.append(heading, text);
+        }
+      }
+      if (!ocr.length)
+        transcriptContent.textContent = "No saved OCR for these source pages.";
+      if (ocrErrors) {
+        const warning = document.createElement("p");
+        warning.textContent = `${ocrErrors} saved OCR artifact/page loads failed. Retry above.`;
+        transcriptContent.append(warning);
+      }
       const selected = overlayEngine.value;
       overlayEngine.replaceChildren();
       for (const engine of ocr) {
@@ -72,18 +101,23 @@ export function documentPreview(
       if (ocr.some((o) => o.engine === selected))
         overlayEngine.value = selected;
       overlayEngine.hidden = source.value === "pdf" || ocr.length < 2;
-      retryOcr.hidden = !overlayToggle.checked || !ocrErrors;
       updateOverlay();
     } catch (error) {
-      if (!closed && overlayToggle.checked) {
+      if (!closed) {
+        ocrErrors = 1;
+        transcriptContent.textContent = `Could not load saved OCR: ${messageOf(error)}`;
         overlayMessage.textContent = messageOf(error);
-        retryOcr.hidden = false;
       }
     } finally {
       loadingOcr = false;
+      if (!closed) updateRetry();
     }
   };
   retryOcr.onclick = () => void loadOverlay();
+  transcript.ontoggle = () => {
+    updateRetry();
+    if (transcript.open && !ocr) void loadOverlay();
+  };
   overlayEngine.onchange = () => updateOverlay();
   let dispose = () => {};
   let generation = 0;
@@ -162,7 +196,7 @@ export function documentPreview(
         renderedOverlay = undefined;
       }
       if (!positioned?.items.length) {
-        overlayMessage.textContent = `${engine?.engine ?? "OCR"}: no saved word/line positions for this page. View the OCR text in Compare readings.${ocrErrors ? " Some OCR loads failed; retry above." : ""}`;
+        overlayMessage.textContent = `${engine?.engine ?? "OCR"}: no saved word/line positions for this page. View the saved OCR text above.${ocrErrors ? " Some OCR loads failed; retry above." : ""}`;
         return;
       }
       if (!displayed) return;
@@ -295,7 +329,7 @@ export function documentPreview(
   overlayToggle.onchange = () => {
     overlayEngine.hidden = (ocr?.length ?? 0) < 2;
     overlayMessage.style.visibility = overlayToggle.checked ? "" : "hidden";
-    retryOcr.hidden = !overlayToggle.checked || !ocrErrors;
+    updateRetry();
     if (overlayToggle.checked) {
       if (source.value === "pdf") {
         source.value = "crop";
@@ -307,9 +341,10 @@ export function documentPreview(
   source.onchange = () => {
     if (source.value === "pdf") {
       overlayToggle.checked = false;
-      overlayEngine.hidden = retryOcr.hidden = true;
+      overlayEngine.hidden = true;
       overlayMessage.textContent = "";
     }
+    updateRetry();
     void show();
   };
   void show();

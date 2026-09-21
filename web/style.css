@@ -760,6 +760,19 @@ header {
   padding: 0 0.6rem;
   overscroll-behavior: contain;
 }
+.receipt-source-preview {
+  height: min(75dvh, 900px);
+  min-height: 360px;
+  margin: 1rem 0;
+}
+.document-preview-transcript[open] {
+  max-height: 35%;
+  overflow: auto;
+}
+.document-preview-transcript pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .document-preview,
 .document-preview-content,
 .pdf-preview {

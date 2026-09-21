@@ -2214,15 +2214,33 @@ export async function jevRoute(
       "SELECT COALESCE(ineligible_reason,'unspecified') AS reason,COUNT(*) AS count FROM jev_jobs WHERE status='ineligible' GROUP BY COALESCE(ineligible_reason,'unspecified') ORDER BY reason",
     ).all<{ reason: string; count: number }>();
     const pipeline = await latestPipelineRun(env);
+    const captures = (await loadCaptures()).filter(
+      (capture) => capture.is_current,
+    );
     const waitingCurrentCaptures = await currentWaitingCaptureCount(
       env,
-      await loadCaptures(),
+      captures,
+    );
+    const pageHeads = (
+      await env.DB.prepare(
+        "SELECT capture_id,source_sha256 FROM jev_page_heads",
+      ).all<Pick<PageHead, "capture_id" | "source_sha256">>()
+    ).results;
+    const headSources = new Map(
+      pageHeads.map((head) => [head.capture_id, head.source_sha256]),
+    );
+    const missingPageHeads = captures.filter(
+      (capture) => headSources.get(capture.id) !== capture.sha256,
     );
     return json({
       configured: Boolean(env.TYPESAFE_API_KEY),
       jobs: counts.results,
-      ineligible_reasons: ineligibleReasons.results,
-      waiting_current_captures: waitingCurrentCaptures,
+      historical_ineligible_job_reasons: ineligibleReasons.results,
+      current_captures_with_waiting_jobs: waitingCurrentCaptures,
+      current_captures_missing_page_head: missingPageHeads.length,
+      missing_page_head_capture_ids: missingPageHeads
+        .slice(0, 25)
+        .map((capture) => capture.id),
       pipeline: pipeline
         ? {
             version: pipeline.version,
