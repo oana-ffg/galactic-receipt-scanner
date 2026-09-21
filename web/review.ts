@@ -117,10 +117,19 @@ export async function mountReview(app: HTMLElement) {
     const interventionCount = catalog.documents.filter(
       (d) => needsSourceIntervention(d) && !d.mergedInto,
     ).length;
-    app.querySelector("#review-intervention-alert")!.textContent =
-      interventionCount > 0
-        ? `${interventionCount} document${interventionCount === 1 ? "" : "s"} need source intervention. Check the paper before trusting their totals.`
-        : "";
+    const interventionAlert = app.querySelector("#review-intervention-alert")!;
+    interventionAlert.replaceChildren();
+    if (interventionCount > 0) {
+      const link = el(
+        "a",
+        `View ${interventionCount} document${interventionCount === 1 ? "" : "s"} needing source review`,
+      );
+      link.href = "/review?view=source-intervention";
+      interventionAlert.append(
+        link,
+        ". Inspect the saved scans and page grouping before looking for paper.",
+      );
+    }
     const counts = catalog.documents.reduce<Record<string, number>>(
       (a, d) => ((a[d.status] = (a[d.status] ?? 0) + 1), a),
       {},
