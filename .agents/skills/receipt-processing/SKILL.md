@@ -60,7 +60,7 @@ cannot be confirmed, preserve the private directory so the owner can identify/re
 connection; do not delete the evidence or start another batch.
 
 Do not create a recurring schedule from a bare invocation. Respect actual permission
-failures and the repair-before-block procedure.
+failures and the failure check below.
 
 Use the owner's subscription-backed managed agents. Do not call the OpenAI API or paid
 inference services. The deterministic controller uses
@@ -175,8 +175,8 @@ claim while the controller has an active run.
 
 Use collaboration messages for parent/subagent progress, not the app's
 `send_message_to_thread`. A Luna narrative is not completion: require its result file,
-then the controller's persisted verification. On failure, stop dispatching and attempt the
-repair procedure below before issuing a guard block. Require confirmed blocked state from
+then the controller's persisted verification. On failure, stop dispatching and check the
+failure as described below before issuing a guard block. Require confirmed blocked state from
 the same controller before reporting a stopped batch; a rejected transition is not
 permission to close its stdin or start replacement work.
 
@@ -196,46 +196,46 @@ do not call legacy `verify` separately or reconstruct those checks. Count saved 
 broken dispositions as completed work. Return only content-free completion metadata and
 concrete failures to the user.
 
-### Repair before blocking
+### Check the failure before blocking
 
 **Suspend new document dispatch on a real failure; do not immediately block the batch.**
 Keep the guard and private checkpoint while investigating. Correct ordinary request
-errors in their existing session. If the coordinator cannot resolve the trouble,
-**call a fresh Sol subagent (`gpt-5.6-sol`, `fork_turns: none`) to resolve the problem**
-before creating a block. This includes worker, verification, runtime and setup failures.
-Give Sol only the problem and relevant evidence: the exact error, expected versus observed
-behavior, run/batch IDs, relevant private journal paths and known claim/save state.
-**Do not tell Sol what caused it or how to fix it.** Let Sol investigate and resolve it.
-Never send credentials or a full conversation dump. Follow repository review/deployment
-requirements for code changes.
-Do not start another receipt while repair is in progress.
+errors in their existing session. Before a non-obvious recovery or a guard block,
+**call a fresh Sol subagent (`gpt-5.6-sol`, `fork_turns: none`) to check your reasoning**.
+Give Sol the observed problem, exact error, expected versus observed behavior, run/batch
+IDs, relevant private journal paths and known claim/save state. If you have a proposed
+next action, state it as something to challenge, not as an instruction. Ask Sol to identify
+mistaken assumptions, overlooked evidence and unsafe actions. Do not tell Sol the cause
+or how to fix it; do not ask Sol to implement a repair. Never send credentials or a full
+conversation dump.
 
-Sol must preserve originals, saved readings and immutable requests. It must not clear
-batch holds, take over live sessions, claim replacement work, replay uncertain writes,
-or bypass permissions. The coordinator remains responsible for the exact-run recovery
-using the documented protocol, after confirming the previous process's state. This
-repair policy authorizes supported recovery of the current run after the cause is fixed;
-it does not authorize clearing an unrelated or previously blocked batch. Respect any
-actual missing permission or ambiguous saved state. A rejected operation needs new
-evidence or a permitted alternative, not the same request routed through Sol.
+Sol's task is read-only. It must not edit code, operate live sessions, clear batch holds,
+claim replacement work or replay uncertain writes. The coordinator checks Sol's findings
+against live evidence and owns any correction, code change or exact-run recovery. Follow
+repository review/deployment requirements for code changes. Do not start another receipt
+while the failure is under review.
 
-After repair, resume the same controller operation and follow its next action. If Sol
-cannot fix the issue safely, or a required approval/access remains
-unavailable, only then send `block`, pause the recurring automation and report the
-concrete remaining problem plus what Sol tried. If Sol cannot be launched, report that
-actual tool failure as the failed repair attempt. Do not cycle through replacement Sol
-agents for an unchanged failure. Never use elapsed time alone as the block reason.
+After correcting the cause, resume the same controller operation and follow its next
+action. This permits supported recovery of the current run; it does not authorize clearing
+an unrelated or previously blocked batch. Respect missing permission and ambiguous saved
+state. A rejected operation needs new evidence or a permitted alternative, not the same
+request routed through Sol. If the failure remains unresolved, send `block`, pause the
+recurring automation and report the concrete problem and Sol's assessment. If Sol cannot
+be launched, treat the failure as unresolved and use the same block/pause/report path,
+stating that the review was unavailable. Do not cycle
+through replacement Sol agents for an unchanged failure or use elapsed time alone as the
+block reason.
 
 While a request is still running, a journal phase such as `submit-uncertain` or
 `pdf-uncertain` is the Python script's pre-request recovery marker, not a failure
 response. Await the actual result in that same worker session; do not interrupt,
 retry or stop the batch based on a transient phase alone. A completed response with
-`blocking: true`, a tool rejection, a process crash, or a failed worker triggers this repair procedure.
+`blocking: true`, a tool rejection, a process crash, or a failed worker triggers this failure check.
 Do not spawn a replacement/next worker or reclaim the released document. Preserve private
 artifacts and report the failed stage, non-sensitive reason and known claim/save state
 to the owner. Release a known active, unsubmitted claim when safely possible; retain
 uncertain submission state for reconciliation instead of assuming it was not saved.
-If repair fails and the guard is blocked, wait for explicit owner direction before
+If the guard is blocked, wait for explicit owner direction before
 resuming that blocked batch. A successfully saved
 model-review/awaiting-page/broken disposition is a document outcome, not by itself a
 worker execution failure. **Continue with the next pending Luna document after such

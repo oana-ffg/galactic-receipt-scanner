@@ -34,7 +34,7 @@ validated `--resume RUN_ID`; duplicate profile overrides and option abbreviation
 
 Request the exact prepared launch through the normal managed approval boundary. Do not
 create a standing prefix that omits or generalizes the fresh config path. An approval
-rejection still stops the denied operation and enters repair-before-block; changing the
+rejection still stops the denied operation and enters the failure check; changing the
 proposed command does not authorize retrying a denied launch.
 
 Connection setup establishes source/destination ownership once. The coordinator matches the
@@ -48,7 +48,7 @@ the same per-run lifecycle as a normal batch. It then launches the prepared Pyth
 Luna never does. Once that connection is prepared, do not repeat ownership setup, query
 Sites metadata or provision another key inside the recovery. The Python script loads the explicitly supplied fresh credentials and enforces the
 configured origin, checkout and runtime checks; stdin cannot change destinations, runtimes
-or paths. Actual permission failures enter repair-before-block without bypassing the denied
+or paths. Actual permission failures enter the failure check without bypassing the denied
 operation.
 
 The recovery coordinator owns one helper session and every request sent to it. A terminal
@@ -78,7 +78,7 @@ The exact managed approval does not select the execution context when
 `profile_access_denied` startup response
 means this process could not read the prepared profile and made no claim; report the
 launch configuration failure to the coordinator without weakening profile permissions.
-This does not override the repair-before-block procedure or permission boundaries.
+This does not override the failure check or permission boundaries.
 The resulting authorized session stays running. Keep its
 session ID and use `write_stdin` for subsequent operations: `chars` is `JSON.stringify`
 of ONE request object followed by a newline. Do not wrap the launch in a changing script,
@@ -145,9 +145,9 @@ The controller finishes automatically after the verified count or a confirmed em
 Luna may take several minutes; neither a tool timeout nor the schedule interval is a
 deadline. Follow only the controller's returned next action.
 On a real failure, suspend dispatch and follow
-[repair before blocking](../SKILL.md#repair-before-blocking): if the coordinator cannot
-resolve it, call Sol before sending `{"op":"block","reason":"non-sensitive failure summary"}`.
-Only send that block if the repair fails or cannot safely proceed,
+[the failure check](../SKILL.md#check-the-failure-before-blocking): ask Sol to challenge
+the coordinator's reasoning before a non-obvious recovery or a block. Send
+`{"op":"block","reason":"non-sensitive failure summary"}` only if the failure remains unresolved,
 and require `ok: true, phase: blocked` before treating the guard as stopped. If the
 response says a claim is in flight, await that same worker's response/terminal state,
 then retry `block` through the SAME guard session. Do not close its stdin or end the
@@ -159,7 +159,7 @@ worker requiring reconciliation; never report "no claim" from an earlier snapsho
 Unexpected process exit leaves an active/blocked record that prevents automatic restart.
 Never declare an incomplete batch complete merely to release the guard.
 
-For an authorized recurring task, an unresolved failure after the repair attempt also pauses that task's
+For an authorized recurring task, an unresolved failure after the failure check also pauses that task's
 automation using the app's automation tool and reports the affected run/stage. Review
 flags on successfully saved receipts do not pause processing. Do not autonomously
 clear the hold or repeatedly retry a failed batch every scheduled interval.
@@ -426,12 +426,12 @@ Luna cannot detach pages or grant human approval; Astra handles detach after its
 ## Failures and recovery
 
 A failed worker remains a hold even after its known claim was safely released; a new
-process cannot silently start another document. Under the current-run repair policy,
+process cannot silently start another document. Under the current-run recovery policy,
 or after explicit owner direction for an already blocked batch, the coordinator may
 resume that exact run after fixing the cause and send `reconcile` with a nonempty `rationale` for a
 released failure. Python records the resolution alongside the original failure, then
 clears the hold. This never clears uncertain writes or edits historical requests.
-Sol does not clear failures or batch holds. The coordinator must verify recovery;
+Sol only reviews the failure. The coordinator must verify recovery;
 scheduled runs must not clear a blocked batch or simply acknowledge an unfixed failure.
 
 `input_error` means the requested operation was rejected locally; correct the stated
@@ -443,7 +443,7 @@ A `validate`/`draft` response with validation
 errors and `drafted: false` likewise requires a corrected extraction before freezing.
 
 `blocking: true`, a tool rejection or a process crash suspends new dispatch and triggers
-the coordinator's repair-before-block procedure. Report the stage and safe failure
+the coordinator's failure-check procedure. Report the stage and safe failure
 metadata; do not start another document or use a replacement worker.
 Send `release` only for a known unsubmitted active claim, then `quit`. Preserve the run ID
 and journal. EOF also attempts safe release. Claims renew during normal model inspection;
@@ -485,8 +485,8 @@ until a fresh managed Luna completes this entire path under the loaded approval 
 
 Checkpoint recovery: a lost initial-draft or confirmation acknowledgement leaves
 `draft-uncertain` or `confirmation-uncertain`. Suspend dispatch, retain the journal and
-follow repair-before-block. After fixing the cause, the coordinator may resume that
-exact run under the current-run repair policy; an already blocked batch still requires
+follow the failure check. After fixing the cause, the coordinator may resume that
+exact run under the current-run recovery policy; an already blocked batch still requires
 explicit owner direction. On `--resume RUN_ID`, `{"op":"retry-checkpoint"}` replays
 the exact persisted request. It never regenerates the initial answer or reruns OCR/inference.
 Do not release uncertain checkpoints or start a replacement worker.
