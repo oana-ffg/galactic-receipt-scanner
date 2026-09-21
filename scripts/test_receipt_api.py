@@ -26,6 +26,21 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["counts"]["not_receipt"], 0)
         self.assertEqual(result["needs_human_document_ids"], [])
 
+    def test_completeness_retries_a_temporary_server_failure(self):
+        document = {"document_id": self.id, "ready": True,
+                    "jev": {"role": "purchase_document"},
+                    "completeness_audit": None, "ocr_characters": 1000,
+                    "ocr_truncated": False}
+        self.client.get = Mock(return_value={"documents": [document], "next": None})
+        self.client.request = Mock(side_effect=[ClientError("Scanner returned HTTP 503"),
+                                                json.dumps({"assessed": True, "result": "yes",
+                                                            "confidence": 0.9}).encode()])
+        sleep = Mock()
+        result = run_jev_completeness(self.client, sleep=sleep)
+        self.assertEqual(result["counts"]["yes"], 1)
+        self.assertEqual(self.client.request.call_count, 2)
+        sleep.assert_called_once_with(1)
+
     def test_pp_profile_binds_matching_destination_and_runtimes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

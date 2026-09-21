@@ -505,7 +505,7 @@ def run_jev_backfill(client, *, sleep=time.sleep):
     }
 
 
-def run_jev_completeness(client):
+def run_jev_completeness(client, *, sleep=time.sleep):
     """Screen current Jev purchase documents without changing their grouping or Luna claims."""
     after = None
     counts = {"yes": 0, "no": 0, "not_receipt": 0, "already_assessed": 0,
@@ -537,7 +537,14 @@ def run_jev_completeness(client):
                     needs_human.append(document["document_id"])
                 continue
             payload = json.dumps({"document_id": document["document_id"]}).encode()
-            result = json.loads(client.request("/api/jev/completeness", payload))
+            for attempt in range(3):
+                try:
+                    result = json.loads(client.request("/api/jev/completeness", payload))
+                    break
+                except ClientError as error:
+                    if "HTTP 503" not in str(error) or attempt == 2:
+                        raise
+                    sleep(2 ** attempt)
             if not result.get("assessed"):
                 if result.get("result") == "not_ready":
                     counts["not_ready"] += 1
