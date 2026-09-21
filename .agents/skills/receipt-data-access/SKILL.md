@@ -41,7 +41,7 @@ A 401/403 is an access failure, not a missing original. Do not spoof identity he
 2. As the coordinator, open the normal `/agent-access` page in the owner's signed-in browser.
    Invoke its `create_processing_connection` WebMCP tool with the returned `request`
    object unchanged. The normal owner UI also accepts `request.json` when site tools
-   are unavailable. Authorization is a write operation and retains normal tool approvals.
+   are unavailable.
 3. Pipe the tool's encrypted JSON result to
    `node scripts/receipt_connection.mjs complete-stdin PRIVATE_DIRECTORY`.
    Only this helper decrypts it. It prints the client config path, connection ID and expiry,

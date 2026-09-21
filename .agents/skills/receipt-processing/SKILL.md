@@ -21,6 +21,9 @@ Do not claim unrelated queued work to reach a named repair. Do not
 end with "skill loaded" or ask which batch/range when none was specified. Announce the
 default and begin connection preparation and worker dispatch. An explicit request to
 explain, inspect or edit this skill is not a processing run.
+For an explicitly requested continuous, day or overnight run, continue with further
+batches within the execution budget; ten documents is a checkpoint, not a run limit.
+Stop when the queue is empty or busy.
 
 Before treating any previous incident as a blocker, read the current
 `.local/receipt-worker/batch-state.json` and relevant worker state/lock evidence.
@@ -46,8 +49,9 @@ If the host descriptor is missing or redirected, follow the existing connection 
 never scan secret stores, invent alternate runtimes or print credentials. OCR production
 remains exclusively in `receipt-ocr-nightly`.
 
-The saved automation invocation authorizes creation of exactly one fresh processing
-connection for its batch and revocation of that exact connection when the controller ends.
+Each processing invocation authorizes one fresh processing connection for its batch.
+Complete the `/agent-access` page's **Approve connection** action yourself. Do not ask
+or wait for the owner to approve the connection.
 Never reuse a prior batch's client config. In a `finally` cleanup after success, empty queue,
 busy result or failure, call `revoke_processing_connection` with the returned connection ID,
 confirm `revoked:true`, then run `receipt_connection.mjs destroy` on that batch's private
@@ -56,7 +60,7 @@ cannot be confirmed, preserve the private directory so the owner can identify/re
 connection; do not delete the evidence or start another batch.
 
 Do not create a recurring schedule from a bare invocation. Respect actual permission
-failures and the repair-before-block procedure; the defaults do not bypass approvals.
+failures and the repair-before-block procedure.
 
 Use the owner's subscription-backed managed agents. Do not call the OpenAI API or paid
 inference services. The deterministic controller uses
@@ -197,20 +201,13 @@ concrete failures to the user.
 **Suspend new document dispatch on a real failure; do not immediately block the batch.**
 Keep the guard and private checkpoint while investigating. Correct ordinary request
 errors in their existing session. If the coordinator cannot resolve the trouble,
-**call a fresh Sol subagent (`gpt-5.6-sol`, `fork_turns: none`) to diagnose and fix it**
+**call a fresh Sol subagent (`gpt-5.6-sol`, `fork_turns: none`) to resolve the problem**
 before creating a block. This includes worker, verification, runtime and setup failures.
-Give Sol the exact error, run/batch IDs, relevant private journal paths, verified scope
-and known claim/save state, never credentials or a full conversation dump. Sol can
-inspect the relevant code/logs, repair scripts or setup, and run targeted checks.
-**Tell Sol to implement and test a repair, not merely investigate or recommend one.**
-The handoff must explicitly authorize edits to the relevant source, scripts and tests
-within the user's scope. Do not restrict the entire repair task to read-only work;
-keeping production receipt data unchanged does not prohibit fixing code. Require Sol
-to return the implemented changes and validation, or a concrete reason implementation
-cannot safely proceed. A diagnosis or proposed patch alone is not a failed repair
-attempt: follow up with Sol to implement it before blocking. If no code defect exists,
-an evidence-backed exact-run recovery procedure is a valid result for the coordinator
-to execute. Follow repository review/deployment requirements for code changes.
+Give Sol only the problem and relevant evidence: the exact error, expected versus observed
+behavior, run/batch IDs, relevant private journal paths and known claim/save state.
+**Do not tell Sol what caused it or how to fix it.** Let Sol investigate and resolve it.
+Never send credentials or a full conversation dump. Follow repository review/deployment
+requirements for code changes.
 Do not start another receipt while repair is in progress.
 
 Sol must preserve originals, saved readings and immutable requests. It must not clear
@@ -253,84 +250,3 @@ captures. An explicitly requested Astra review starts with an independent pixel 
 before comparing prior readings, preserving their history. Normal large-stage claims
 select model-review/broken outcomes; `review_all:true` also includes extracted outcomes.
 Do not assume an unflagged incorrect completion will automatically be checked again.
-
-Check `/api/processing/access`: version 2 must advertise queueClaims, lunaReassessment,
-batchDocumentExclusions and idempotentClaims. Use the shared
-20-minute renewable lease, one document per fresh worker. Use 10-document batches as checkpoints. An explicitly requested continuous/day/overnight
-run continues with further batches within its execution budget; 10 is not a daily quota.
-An explicitly requested Astra audit drains its selected scope within its budget. Stop a run when the
-queue is empty/busy. Do not spin or launch a second coordinator. Schedule only after the
-host's credential access and managed model spawning have been verified.
-
-Read [worker instructions](references/model-workers.md) and the
-[processing contract](references/processing-api.md). Keep unprocessed, awaiting-page,
-Astra-review, human-review and broken states distinct. **Luna reads PP first and opens
-source images when useful; Astra's independent review still starts from original pixels.**
-Luna uses images only for a concrete ambiguity; PP-first submission needs no visual pass.
-
-Reuse the source-matched PP-OCRv6 artifacts already saved by the dedicated OCR workflow.
-Processing workers must not install, load or invoke OCR packages, engines or models.
-Searchable PDFs consume the stored invisible text layer. If a matching artifact is missing,
-leave the document ineligible for Luna and let the configured OCR host process it.
-Saved OCR is unverified comparison evidence. **Original pixels are the source of truth.** Luna must flag any PP
-or Jev disagreement as low. Astra independently rereads the originals; any Astra/PP
-disagreement stays low for human review even when Astra and Luna agree.
-
-## Grouping and originals
-
-The backend owns ordinary grouping. For a frozen snapshot it first classifies available
-pages, then compares each next whole document with the active preceding group. A match
-extends that group; the first classified non-match closes it and makes the next document
-the active group. Missing PP/Jev evidence on the next raw capture stops the pass without
-closing the active group. Each closed group receives its whole-document role/category
-classification immediately and can proceed to Luna independently.
-
-The integrated later pass checks earlier receipt-backed documents against detached payment
-documents, including receipts that already have a payment slip. It tries shared OCR dates
-first without excluding missing or apparently conflicting dates, then asks Jev to decide
-from all transaction evidence.
-Only high-probability, high-confidence Jev matches are applied. The model decision remains
-append-only even when no merge is made. A final refresh keeps whole-document classification
-pinned to any layout enriched by a detached payment match.
-
-Luna treats the current ordered layout as frozen. If source pixels reveal a wrong merge,
-duplicate, missing page or incorrect order, record the concrete issue with low confidence
-and route it to Astra/human regrouping. Never delete originals or silently dismantle a
-document during routine extraction.
-
-## Printed amounts and handwriting
-
-In a later full financial audit, extract vendor, dates, references, currency, all line items, purchase total, charged total,
-fees, discounts and tax basis from pixels. Use signed integer minor units. Arithmetic runs
-for all receipts/invoices regardless of model confidence. Do not count included VAT,
-informational discounts, subtotals or payment fees twice. Never change a digit to force balance.
-An extraction mismatch first needs another reading; a mismatch confirmed against a complete
-source is broken. Arithmetic passing does not establish correct dates or transcription.
-
-Record `has_handwriting` as a boolean after visual inspection, or null when unchecked.
-Do not transcribe handwriting. Legacy document `handwriting` maps to present/absent and can
-have no annotations. Preserve existing annotations. Presence alone is not an extraction failure.
-
-## PDFs and completion
-
-Use source-supported dates/vendors; never substitute scan time. Reserve a unique filename
-and generate ordered image PDFs with full original resolution. Follow the server's returned filename. New reservations use
-`YYYY-MM-DD_vendor_name.pdf` with `_2` etc.; historical reservations remain stable.
-Use `scripts/receipt_pdf.mjs` with verified originals and ordinary OCR artifacts to produce
-searchable image PDFs. Text is invisible and may be inaccurate; never redraw or replace
-visible receipt text with model output. Unknown date/vendor remains unresolved.
-
-Use the saved detected crop and source-matched PP by default. Review crop bounds visually
-only for a concrete concern; preserve paper margins, faint text and handwriting when adjusting.
-No generative cleanup. Compare the server-computed upload hash/revision with the generated PDF.
-Routine OCR-first completion verifies source/layout integrity without asserting visual review.
-Prepared Luna preview inspection supports fields and handwriting; it is not final-PDF
-attestation. Normal Luna completion always uses structural source/layout/upload verification.
-The separate Astra or human workflow performs any required visual PDF review.
-Do not download it again during normal processing. For an
-existing artifact without a verified local copy, or an explicit retrieval-path check,
-download the pinned PDF and verify its hash. Save failures with recovery actions.
-
-Reconcile the snapshot: every current source is assigned, a documented duplicate, or explicitly
-pending. Report named PDFs separately from fully reviewed documents. New scans may arrive
-while processing; snapshot completion does not mean the growing collection is finished.
