@@ -1193,6 +1193,124 @@ it("backfills a historical receipt before its later matching payment slip", asyn
   ]);
 });
 
+it("skips an excluded duplicate when matching the next receipt page", async () => {
+  const processingToken = `rsc_${"d".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: (request: Request) =>
+      paymentJevResponse(request, "continuation"),
+  });
+  const captures = [
+    await saveCapture(),
+    await saveCapture(),
+    await saveCapture(),
+  ];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries()) {
+    const at = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(at, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT SECTION ${index}`, at);
+  }
+  const retained = newDocument(captures[0]);
+  const duplicate = newDocument(captures[1]);
+  duplicate.duplicateOf = retained.id;
+  duplicate.evidence = "Synthetic duplicate of the first section.";
+  const saved = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [retained, duplicate] }),
+  });
+  expect(saved.status).toBe(200);
+  await drainBackfill(processingToken);
+  const catalog = await (
+    await mf.dispatchFetch(`${origin}/api/documents`, { headers: ownerHeaders })
+  ).json<any>();
+  expect(
+    catalog.documents
+      .find((item: any) => item.id === retained.id)
+      .pages.map((page: any) => page.captureId),
+  ).toEqual([captures[0].id, captures[2].id]);
+  expect(
+    catalog.documents.find((item: any) => item.id === duplicate.id),
+  ).toMatchObject({
+    duplicateOf: retained.id,
+    pages: [{ captureId: captures[1].id }],
+  });
+});
+
+it("rechecks a changed page and its successor without replaying the later tail", async () => {
+  const processingToken = `rsc_${"e".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: unrelatedPaymentJevResponse,
+  });
+  const captures = [
+    await saveCapture(),
+    await saveCapture(),
+    await saveCapture(),
+    await saveCapture(),
+  ];
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of captures.entries()) {
+    const at = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(at, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT SECTION ${index}`, at);
+  }
+  await drainBackfill(processingToken);
+  const assessments = async () =>
+    (await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-scan-v1'",
+      )
+      .first<{ count: number }>())!.count;
+  expect(await assessments()).toBe(3);
+  await db.prepare("DELETE FROM jev_continuity_edges").run();
+  expect((await runBackfill(processingToken)).remaining).toBe(0);
+  expect(
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_continuity_edges WHERE relationship='verified-history'",
+      )
+      .first(),
+  ).toEqual({ count: 4 });
+  await db
+    .prepare(
+      "UPDATE jev_continuity_edges SET processed_at=? WHERE capture_id=?",
+    )
+    .bind("2000-01-01T00:00:00.000Z", captures[3].id)
+    .run();
+  await seedHistoricalOcr(
+    captures[1],
+    "SHOP RECEIPT SECTION 1 WITH CORRECTED OCR",
+    "2026-02-01T00:00:00.000Z",
+  );
+  await drainBackfill(processingToken);
+  expect(await assessments()).toBe(5);
+  expect(
+    await db
+      .prepare(
+        "SELECT processed_at FROM jev_continuity_edges WHERE capture_id=?",
+      )
+      .bind(captures[3].id)
+      .first(),
+  ).toEqual({ processed_at: "2000-01-01T00:00:00.000Z" });
+});
+
 it("reports Jev's proposed join without changing Luna's saved group", async () => {
   const processingToken = `rsc_${"l".repeat(43)}`;
   await mf.dispose();
@@ -1712,7 +1830,7 @@ it("rejects a group audit when its OCR head changes during Jev assessment", asyn
   expect(comparisons).toEqual(["Page 1:\nORIGINAL RECEIPT SECTION 2"]);
 });
 
-it("waits for an active old step but reclaims an expired one during replay upgrade", async () => {
+it("waits for an active old step but reclaims an expired one without replaying", async () => {
   const processingToken = `rsc_${"z".repeat(43)}`;
   await mf.dispose();
   mf = await runtime({
@@ -1743,10 +1861,10 @@ it("waits for an active old step but reclaims an expired one during replay upgra
         "SELECT version,step_token FROM jev_pipeline_runs WHERE id='old-run'",
       )
       .first(),
-  ).toEqual({ version: 8, step_token: null });
+  ).toEqual({ version: 7, step_token: null });
 });
 
-it("replays a saved low-score continuation when upgrading the pipeline", async () => {
+it("does not replay saved continuity just because the pipeline version changed", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   await mf.dispose();
   mf = await runtime({
@@ -1798,11 +1916,10 @@ it("replays a saved low-score continuation when upgrading the pipeline", async (
   const active = catalog.documents.filter(
     (document: any) => !document.mergedInto && !document.duplicateOf,
   );
-  expect(active).toHaveLength(1);
-  expect(active[0].pages.map((page: any) => page.captureId)).toEqual([
-    first.id,
-    second.id,
-  ]);
+  expect(active).toHaveLength(2);
+  expect(active.map((document: any) => document.id).sort()).toEqual(
+    [first.id, second.id].sort(),
+  );
   expect(
     await db
       .prepare(
@@ -2207,44 +2324,114 @@ it("persists the forward grouping cursor between requests", async () => {
   expect(step.phase).toBe("group");
   expect(relationshipPairs).toEqual([]);
 
-  await runBackfill(processingToken);
-  expect(relationshipPairs).toEqual([`${captures[1].id}|${captures[0].id}`]);
-  const cursor = await db
+  expect(await runBackfill(processingToken)).toMatchObject({
+    result: { status: "boundary", current_document_id: captures[0].id },
+    phase: "group",
+  });
+  expect(relationshipPairs).toEqual([]);
+  const firstCursor = await db
     .prepare(
       "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
     )
     .first<{ cursor: string }>();
-  expect(JSON.parse(cursor!.cursor)).toEqual({
-    finalize_id: captures[0].id,
-    next_id: captures[1].id,
+  expect(JSON.parse(firstCursor!.cursor)).toEqual({
+    last_created_at: "2026-01-01T00:00:00.000Z",
+    last_capture_id: captures[0].id,
   });
 
   await runBackfill(processingToken);
+  expect(relationshipPairs).toEqual([`${captures[1].id}|${captures[0].id}`]);
   const finalized = await db
     .prepare(
       "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
     )
     .first<{ cursor: string }>();
   expect(JSON.parse(finalized!.cursor)).toEqual({
-    active_id: captures[1].id,
+    last_created_at: "2026-01-01T00:00:01.000Z",
+    last_capture_id: captures[1].id,
   });
-
-  await saveCapture(captures[1].id);
-  expect(await runBackfill(processingToken)).toMatchObject({
-    result: { status: "cursor-reset" },
-    phase: "group",
-  });
-  const reset = await db
-    .prepare(
-      "SELECT cursor FROM jev_pipeline_runs WHERE phase='group' ORDER BY created_at DESC LIMIT 1",
-    )
-    .first<{ cursor: string }>();
-  expect(JSON.parse(reset!.cursor)).toEqual({ active_id: captures[0].id });
   await runBackfill(processingToken);
   expect(relationshipPairs).toEqual([
     `${captures[1].id}|${captures[0].id}`,
-    `${captures[2].id}|${captures[0].id}`,
+    `${captures[2].id}|${captures[1].id}`,
   ]);
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT capture_id,previous_capture_id FROM jev_continuity_edges ORDER BY scan_created_at,capture_id",
+        )
+        .all()
+    ).results,
+  ).toEqual([
+    { capture_id: captures[0].id, previous_capture_id: null },
+    { capture_id: captures[1].id, previous_capture_id: captures[0].id },
+    { capture_id: captures[2].id, previous_capture_id: captures[1].id },
+  ]);
+});
+
+it("seeds verified continuity once and checks only a newly scanned page", async () => {
+  const processingToken = `rsc_${"v".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: (request: Request) =>
+      paymentJevResponse(request, "unrelated"),
+  });
+  const db = await mf.getD1Database("DB");
+  const captures = [];
+  for (let index = 0; index < 2; index += 1) {
+    const capture = await saveCapture();
+    captures.push(capture);
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT ${index}`, createdAt);
+  }
+  expect((await drainBackfill(processingToken)).result.phase).toBe("complete");
+  const scanCount = async () =>
+    (await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-scan-v1'",
+      )
+      .first<{ count: number }>())!.count;
+  expect(await scanCount()).toBe(1);
+
+  // Simulate adopting the new marker after an already completed Jev replay.
+  await db.prepare("DELETE FROM jev_continuity_edges").run();
+  expect(await runBackfill(processingToken)).toMatchObject({
+    phase: "complete",
+    remaining: 0,
+  });
+  expect(
+    (await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_continuity_edges")
+      .first<{ count: number }>())!.count,
+  ).toBe(2);
+  expect(await scanCount()).toBe(1);
+
+  const capture = await saveCapture();
+  const createdAt = "2026-01-01T00:00:02.000Z";
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(createdAt, capture.id)
+    .run();
+  await seedHistoricalOcr(capture, "SHOP RECEIPT 2", createdAt);
+  expect((await drainBackfill(processingToken)).result.phase).toBe("complete");
+  expect(await scanCount()).toBe(2);
+  const newEdge = await db
+    .prepare(
+      "SELECT previous_capture_id,relationship FROM jev_continuity_edges WHERE capture_id=?",
+    )
+    .bind(capture.id)
+    .first<{ previous_capture_id: string; relationship: string }>();
+  expect(newEdge).toMatchObject({
+    previous_capture_id: captures[1].id,
+    relationship: "unrelated",
+  });
 });
 
 it("leaves the open tail unclassified until the following raw capture has PP OCR", async () => {
@@ -3040,6 +3227,7 @@ it("retries a saved grouping decision after the merge write fails", async () => 
     if (step.phase === "group") break;
   }
   expect(step.phase).toBe("group");
+  await runBackfill(processingToken);
   await db
     .prepare(
       "CREATE TRIGGER synthetic_fail_merge BEFORE INSERT ON document_versions BEGIN SELECT RAISE(ABORT, 'synthetic merge failure'); END",
@@ -3063,7 +3251,7 @@ it("retries a saved grouping decision after the merge write fails", async () => 
         "SELECT cursor,step_token FROM jev_pipeline_runs WHERE phase='group'",
       )
       .first(),
-  ).toEqual({ cursor: null, step_token: null });
+  ).toMatchObject({ step_token: null });
   expect(
     await db
       .prepare(
@@ -3124,6 +3312,7 @@ it("serializes forward grouping with the pipeline step lease", async () => {
     step = await runBackfill(processingToken);
     if (step.phase === "group") break;
   }
+  await runBackfill(processingToken);
   const first = runBackfill(processingToken);
   await relationshipStarted;
   const concurrent = await runBackfill(processingToken);
@@ -3194,6 +3383,7 @@ it("retries a merge when a document revision changes during Jev comparison", asy
     step = await runBackfill(processingToken);
     if (step.phase === "group") break;
   }
+  await runBackfill(processingToken);
   const grouping = runBackfill(processingToken);
   await relationshipStarted;
   const current = await (
@@ -3253,14 +3443,12 @@ it("creates only one active pipeline when initial backfill requests overlap", as
     runBackfill(processingToken),
     runBackfill(processingToken),
   ]);
-  expect(results.every((result) => result.remaining === 1)).toBe(true);
+  expect(
+    results.every((result) => result.remaining === 0 || result.remaining === 1),
+  ).toBe(true);
   const db = await mf.getD1Database("DB");
   expect(
-    await db
-      .prepare(
-        "SELECT COUNT(*) AS count FROM jev_pipeline_runs WHERE phase!='complete'",
-      )
-      .first(),
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_pipeline_runs").first(),
   ).toEqual({ count: 1 });
 });
 
@@ -3286,21 +3474,22 @@ it("checkpoints final document classification one document per request", async (
     if (step.phase === "documents") break;
   }
   expect(step.phase).toBe("documents");
+  await db
+    .prepare("UPDATE jev_jobs SET status='classified' WHERE status='complete'")
+    .run();
   await runBackfill(processingToken);
-  const first = await db
-    .prepare(
-      "SELECT cursor FROM jev_pipeline_runs WHERE phase='documents' LIMIT 1",
-    )
-    .first<{ cursor: string }>();
-  expect(JSON.parse(first!.cursor).after_id).toBe(captures[0].id);
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_jobs WHERE status='complete'")
+      .first(),
+  ).toEqual({ count: 1 });
   await saveCapture(captures[0].id);
   await runBackfill(processingToken);
-  const second = await db
-    .prepare(
-      "SELECT cursor FROM jev_pipeline_runs WHERE phase='documents' LIMIT 1",
-    )
-    .first<{ cursor: string }>();
-  expect(JSON.parse(second!.cursor).after_id).toBe(captures[1].id);
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_jobs WHERE status='complete'")
+      .first(),
+  ).toEqual({ count: 2 });
 });
 
 it("atomically owns a Jev job while upload and backfill overlap", async () => {

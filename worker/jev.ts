@@ -11,12 +11,17 @@ import {
   ocrTextArtifactHasValidGeometry,
   type OcrArtifact,
 } from "../web/ocr-data";
-import { documentRoute, storedDocuments } from "./documents";
+import {
+  documentRoute,
+  storedDocumentById,
+  storedDocuments,
+} from "./documents";
 import {
   COMPLETENESS_TASK,
   loadCompletenessAudits,
 } from "./completeness-state";
 import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
+import { currentTake } from "./capture-selection";
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const JEV_MODEL = "jev-1.13.0";
@@ -35,7 +40,7 @@ const COMPLETENESS_DECISIONS = {
 } as const;
 const MAX_JEV_TEXT = 24_000;
 const JEV_ELIGIBILITY_VERSION = 3;
-const JEV_PIPELINE_VERSION = 8;
+const JEV_PIPELINE_VERSION = 9;
 const DETACHED_PAYMENT_TASK = "payment-match-detached-v2";
 
 const detachedPaymentQuestion = {
@@ -871,6 +876,7 @@ async function saveDocuments(
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
   documents: ReceiptDocument[],
+  statements: D1PreparedStatement[] = [],
 ) {
   let response: Response | null;
   try {
@@ -882,7 +888,7 @@ async function saveDocuments(
       }),
       env,
       loadCaptures,
-      { statements: [], trustedProcessing: true },
+      { statements, trustedProcessing: true },
     );
   } catch (error) {
     if (error instanceof HttpError && error.status === 409)
@@ -1013,7 +1019,24 @@ export async function mergeDocuments(
     409,
     "Jev grouping would exceed the bounded relationship update; leave it for explicit review.",
   );
-  const result = await saveDocuments(request, env, loadCaptures, changed);
+  const updateJobs: D1PreparedStatement[] = [];
+  const ids = target.pages.map((page) => page.captureId);
+  for (let index = 0; index < ids.length; index += 99) {
+    const chunk = ids.slice(index, index + 99);
+    updateJobs.push(
+      env.DB.prepare(
+        `UPDATE jev_jobs SET status='classified',updated_at=?
+         WHERE status='complete' AND capture_id IN (${chunk.map(() => "?").join(",")})`,
+      ).bind(new Date().toISOString(), ...chunk),
+    );
+  }
+  const result = await saveDocuments(
+    request,
+    env,
+    loadCaptures,
+    changed,
+    updateJobs,
+  );
   target.revision = result.saved.find(
     (saved) => saved.id === target.id,
   )!.revision;
@@ -1023,7 +1046,13 @@ export async function mergeDocuments(
 async function documentsAreUnlocked(env: Env, documents: ReceiptDocument[]) {
   if (!documents.length) return true;
   const current = new Map(
-    (await storedDocuments(env)).map((document) => [document.id, document]),
+    (
+      await Promise.all(
+        documents.map((document) => storedDocumentById(env, document.id)),
+      )
+    )
+      .filter((document): document is ReceiptDocument => document !== null)
+      .map((document) => [document.id, document]),
   );
   if (
     documents.some((document) => {
@@ -1174,17 +1203,6 @@ async function classifyDocument(
   };
 }
 
-async function currentDocument(
-  env: Env,
-  captures: Capture[],
-  captureId: string,
-) {
-  const docs = records(await storedDocuments(env), captures);
-  return docs.find((document) =>
-    document.pages.some((page) => page.captureId === captureId),
-  );
-}
-
 export async function queueJevJob(
   env: Env,
   captureId: string,
@@ -1202,15 +1220,14 @@ export async function queueJevJob(
 
 async function processJob(
   env: Env,
-  loadCaptures: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
   job: {
     id: string;
     capture_id: string;
     ocr_sha256: string;
   },
 ) {
-  const captures = await loadCaptures();
-  const capture = captures.find((item) => item.id === job.capture_id);
+  const capture = await loadCapture(job.capture_id);
   if (!capture?.is_current)
     return { eligible: false, ineligible_reason: "capture_not_current" };
   const artifact = await env.DB.prepare(
@@ -1230,7 +1247,7 @@ async function processJob(
     value.source?.sha256 !== capture.sha256
   )
     return { eligible: false, ineligible_reason: "source_mismatch" };
-  const initialDocument = await currentDocument(env, captures, capture.id);
+  const initialDocument = await documentForCapture(env, capture);
   const page = initialDocument?.pages.find(
     (item) => item.captureId === capture.id,
   );
@@ -1247,7 +1264,7 @@ async function processJob(
 export async function runJevJob(
   _request: Request,
   env: Env,
-  loadCaptures: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
   id: string,
   pipelineOwned = false,
 ) {
@@ -1276,7 +1293,7 @@ export async function runJevJob(
     return { id, status: current.status };
   }
   try {
-    const result = await processJob(env, loadCaptures, job);
+    const result = await processJob(env, loadCapture, job);
     const status = result.eligible ? "classified" : "ineligible";
     const saved = await env.DB.prepare(
       "UPDATE jev_jobs SET status=?,ineligible_reason=?,association_progress=NULL,run_token=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running' AND run_token=? RETURNING status",
@@ -1376,21 +1393,32 @@ async function currentWaitingCaptureCount(env: Env, captures: Capture[]) {
   return waiting.filter((job) => current.has(job.capture_id)).length;
 }
 
+async function currentBoundary(env: Env): Promise<OrderedCapture | null> {
+  return env.DB.prepare(
+    `SELECT captures.id,captures.created_at,captures.sha256 FROM captures
+     WHERE (${currentTake}) ORDER BY captures.created_at DESC,captures.id DESC LIMIT 1`,
+  ).first<OrderedCapture>();
+}
+
+async function hasCurrentWaitingCapture(env: Env) {
+  return !!(await env.DB.prepare(
+    `SELECT 1 AS found FROM jev_jobs job JOIN captures ON captures.id=job.capture_id
+     WHERE job.status='waiting' AND (${currentTake}) LIMIT 1`,
+  ).first<{ found: number }>());
+}
+
 async function pipelineNeedsRun(
   env: Env,
-  current: Capture[],
+  boundary: OrderedCapture | null,
   latest: JevPipelineRun | null,
 ) {
-  if (!latest) return current.length > 0;
-  if (latest.version !== JEV_PIPELINE_VERSION) return current.length > 0;
-  const currentIds = new Set(current.map((capture) => capture.id));
-  const unfinished = (
-    await env.DB.prepare(
-      "SELECT capture_id FROM jev_jobs WHERE status IN ('pending','running','failed','classified')",
-    ).all<{ capture_id: string }>()
-  ).results.some((job) => currentIds.has(job.capture_id));
+  if (!latest) return boundary !== null;
+  const unfinished = await env.DB.prepare(
+    `SELECT 1 AS found FROM jev_jobs job JOIN captures ON captures.id=job.capture_id
+     WHERE job.status IN ('pending','running','failed','classified')
+       AND (${currentTake}) LIMIT 1`,
+  ).first<{ found: number }>();
   if (unfinished) return true;
-  const boundary = current.at(-1);
   if (!boundary) return false;
   if (
     captureOrder(boundary) >
@@ -1403,13 +1431,12 @@ async function pipelineNeedsRun(
     snapshot_capture_id: boundary.id,
   };
   return (
-    (await unqueuedArtifacts(env, current, probe)).length > 0 ||
-    (await legacyPageCandidates(env, current, probe)).length > 0
+    (await firstUnqueuedArtifact(env, probe)) !== null ||
+    (await firstLegacyPageCandidate(env, probe)) !== null
   );
 }
 
-async function startPipelineRun(env: Env, current: Capture[]) {
-  const boundary = current.at(-1);
+async function startPipelineRun(env: Env, boundary: OrderedCapture | null) {
   if (!boundary) return null;
   const now = new Date().toISOString();
   const run: JevPipelineRun = {
@@ -1790,6 +1817,21 @@ export async function jevReadyDocuments(
   return ready;
 }
 
+async function documentOcrArtifactPins(env: Env, document: ReceiptDocument) {
+  const artifacts: { capture_id: string; sha256: string }[] = [];
+  const captureIds = document.pages.map((page) => page.captureId);
+  for (let index = 0; index < captureIds.length; index += 99) {
+    const chunk = captureIds.slice(index, index + 99);
+    const rows = await env.DB.prepare(
+      `SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr' AND capture_id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(...chunk)
+      .all<{ capture_id: string; sha256: string }>();
+    artifacts.push(...rows.results);
+  }
+  return artifacts;
+}
+
 export async function jevSummary(env: Env, document: ReceiptDocument) {
   const head =
     (await env.DB.prepare(
@@ -1798,11 +1840,7 @@ export async function jevSummary(env: Env, document: ReceiptDocument) {
       .bind(document.id)
       .first<JevDocumentHead>()) ?? null;
   const pages = await pageHeads(env, document);
-  const artifacts = (
-    await env.DB.prepare(
-      "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
-    ).all<{ capture_id: string; sha256: string }>()
-  ).results;
+  const artifacts = await documentOcrArtifactPins(env, document);
   const ready = await documentHeadReady(env, document, head, pages, artifacts);
   return {
     ready,
@@ -1830,57 +1868,63 @@ export async function jevSummary(env: Env, document: ReceiptDocument) {
   };
 }
 
-async function unqueuedArtifacts(
-  env: Env,
-  current: Capture[],
-  run: JevPipelineRun,
-) {
-  const captureIds = new Set(
-    current
-      .filter((capture) => withinPipelineSnapshot(capture, run))
-      .map((capture) => capture.id),
-  );
-  if (!captureIds.size) return [];
-  const artifacts = (
-    await env.DB.prepare(
-      "SELECT artifact.capture_id,artifact.sha256 FROM artifacts artifact WHERE artifact.kind='ocr' AND NOT EXISTS (SELECT 1 FROM artifacts newer WHERE newer.capture_id=artifact.capture_id AND newer.kind='ocr' AND (newer.created_at>artifact.created_at OR (newer.created_at=artifact.created_at AND newer.key>artifact.key))) AND NOT EXISTS (SELECT 1 FROM jev_jobs job WHERE job.capture_id=artifact.capture_id AND job.ocr_sha256=artifact.sha256) ORDER BY artifact.created_at,artifact.key",
-    ).all<{ capture_id: string; sha256: string }>()
-  ).results;
-  return artifacts.filter((artifact) => captureIds.has(artifact.capture_id));
+async function firstUnqueuedArtifact(env: Env, run: JevPipelineRun) {
+  return env.DB.prepare(
+    `SELECT artifact.capture_id,artifact.sha256
+     FROM artifacts artifact JOIN captures ON captures.id=artifact.capture_id
+     WHERE artifact.kind='ocr' AND (${currentTake})
+       AND (captures.created_at,captures.id)<=(?,?)
+       AND NOT EXISTS (
+         SELECT 1 FROM artifacts newer WHERE newer.capture_id=artifact.capture_id
+           AND newer.kind='ocr' AND (newer.created_at>artifact.created_at
+             OR (newer.created_at=artifact.created_at AND newer.key>artifact.key)))
+       AND NOT EXISTS (
+         SELECT 1 FROM jev_jobs job WHERE job.capture_id=artifact.capture_id
+           AND job.ocr_sha256=artifact.sha256)
+     ORDER BY artifact.created_at,artifact.key LIMIT 1`,
+  )
+    .bind(run.snapshot_created_at, run.snapshot_capture_id)
+    .first<{ capture_id: string; sha256: string }>();
 }
 
-async function legacyPageCandidates(
-  env: Env,
-  current: Capture[],
-  run: JevPipelineRun,
-) {
-  const allowed = new Set(
-    current
-      .filter((capture) => withinPipelineSnapshot(capture, run))
-      .map((capture) => capture.id),
-  );
-  const rows = (
-    await env.DB.prepare(
-      "SELECT candidate.id,candidate.capture_id FROM jev_jobs candidate JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256 JOIN captures capture ON capture.id=candidate.capture_id WHERE candidate.status='ineligible' AND candidate.eligibility_version<? AND NOT EXISTS (SELECT 1 FROM jev_jobs completed WHERE completed.capture_id=candidate.capture_id AND completed.status IN ('classified','complete')) AND NOT EXISTS (SELECT 1 FROM jev_jobs sibling JOIN artifacts sibling_artifact ON sibling_artifact.capture_id=sibling.capture_id AND sibling_artifact.kind='ocr' AND sibling_artifact.sha256=sibling.ocr_sha256 WHERE sibling.capture_id=candidate.capture_id AND sibling.status='ineligible' AND sibling.eligibility_version<? AND (sibling_artifact.created_at>artifact.created_at OR (sibling_artifact.created_at=artifact.created_at AND sibling_artifact.key>artifact.key))) ORDER BY capture.created_at,capture.id",
+async function firstLegacyPageCandidate(env: Env, run: JevPipelineRun) {
+  return env.DB.prepare(
+    `SELECT candidate.id,candidate.capture_id
+     FROM jev_jobs candidate
+     JOIN artifacts artifact ON artifact.capture_id=candidate.capture_id
+       AND artifact.kind='ocr' AND artifact.sha256=candidate.ocr_sha256
+     JOIN captures ON captures.id=candidate.capture_id
+     WHERE candidate.status='ineligible' AND candidate.eligibility_version<?
+       AND (${currentTake}) AND (captures.created_at,captures.id)<=(?,?)
+       AND NOT EXISTS (SELECT 1 FROM jev_jobs completed
+         WHERE completed.capture_id=candidate.capture_id
+           AND completed.status IN ('classified','complete'))
+       AND NOT EXISTS (
+         SELECT 1 FROM jev_jobs sibling
+         JOIN artifacts sibling_artifact ON sibling_artifact.capture_id=sibling.capture_id
+           AND sibling_artifact.kind='ocr' AND sibling_artifact.sha256=sibling.ocr_sha256
+         WHERE sibling.capture_id=candidate.capture_id AND sibling.status='ineligible'
+           AND sibling.eligibility_version<?
+           AND (sibling_artifact.created_at>artifact.created_at
+             OR (sibling_artifact.created_at=artifact.created_at
+               AND sibling_artifact.key>artifact.key)))
+     ORDER BY captures.created_at,captures.id LIMIT 1`,
+  )
+    .bind(
+      JEV_ELIGIBILITY_VERSION,
+      run.snapshot_created_at,
+      run.snapshot_capture_id,
+      JEV_ELIGIBILITY_VERSION,
     )
-      .bind(JEV_ELIGIBILITY_VERSION, JEV_ELIGIBILITY_VERSION)
-      .all<{ id: string; capture_id: string }>()
-  ).results;
-  return rows.filter((row) => allowed.has(row.capture_id));
+    .first<{ id: string; capture_id: string }>();
 }
 
 async function pagePipelineStep(
   request: Request,
   env: Env,
-  loadCaptures: () => Promise<Capture[]>,
-  current: Capture[],
+  loadCapture: (id: string) => Promise<Capture | null>,
   run: JevPipelineRun,
 ) {
-  const allowed = new Set(
-    current
-      .filter((capture) => withinPipelineSnapshot(capture, run))
-      .map((capture) => capture.id),
-  );
   await env.DB.prepare(
     "UPDATE jev_jobs SET status='failed',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,run_token=NULL,last_error='Interrupted Jev run; safe to retry.',updated_at=? WHERE status='running' AND unixepoch(updated_at)<unixepoch()-300",
   )
@@ -1894,20 +1938,27 @@ async function pagePipelineStep(
   await env.DB.prepare(
     "UPDATE jev_jobs SET status='blocked',run_token=NULL WHERE status='failed' AND attempts>=3",
   ).run();
-  const retryable = (
-    await env.DB.prepare(
-      "SELECT id,capture_id FROM jev_jobs WHERE status='pending' OR (status='failed' AND attempts<3) ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,attempts,updated_at,created_at,id",
-    ).all<{ id: string; capture_id: string }>()
-  ).results.find((job) => allowed.has(job.capture_id));
-  const running = (
-    await env.DB.prepare(
-      "SELECT capture_id FROM jev_jobs WHERE status='running'",
-    ).all<{ capture_id: string }>()
-  ).results.some((job) => allowed.has(job.capture_id));
+  const retryable = await env.DB.prepare(
+    `SELECT job.id,job.capture_id FROM jev_jobs job
+     JOIN captures ON captures.id=job.capture_id
+     WHERE (job.status='pending' OR (job.status='failed' AND job.attempts<3))
+       AND (${currentTake}) AND (captures.created_at,captures.id)<=(?,?)
+     ORDER BY CASE job.status WHEN 'pending' THEN 0 ELSE 1 END,
+       job.attempts,job.updated_at,job.created_at,job.id LIMIT 1`,
+  )
+    .bind(run.snapshot_created_at, run.snapshot_capture_id)
+    .first<{ id: string; capture_id: string }>();
+  const running = await env.DB.prepare(
+    `SELECT 1 AS active FROM jev_jobs job JOIN captures ON captures.id=job.capture_id
+     WHERE job.status='running' AND (${currentTake})
+       AND (captures.created_at,captures.id)<=(?,?) LIMIT 1`,
+  )
+    .bind(run.snapshot_created_at, run.snapshot_capture_id)
+    .first<{ active: number }>();
   if (running) return { remaining: 1, busy: true, result: null };
   let jobId = retryable?.id ?? null;
   if (!jobId) {
-    const legacy = (await legacyPageCandidates(env, current, run))[0];
+    const legacy = await firstLegacyPageCandidate(env, run);
     if (legacy) {
       const activated = await env.DB.prepare(
         "UPDATE jev_jobs SET status='pending',attempts=0,eligibility_version=?,ineligible_reason=NULL,run_token=NULL,last_error=NULL,association_progress=NULL,updated_at=? WHERE id=? AND status='ineligible' AND eligibility_version<? RETURNING id",
@@ -1923,16 +1974,16 @@ async function pagePipelineStep(
     }
   }
   if (!jobId) {
-    const candidate = (await unqueuedArtifacts(env, current, run))[0];
+    const candidate = await firstUnqueuedArtifact(env, run);
     if (candidate)
       jobId = await queueJevJob(env, candidate.capture_id, candidate.sha256);
   }
   if (!jobId) return { remaining: 0, busy: false, result: null };
-  const result = await runJevJob(request, env, loadCaptures, jobId, true);
+  const result = await runJevJob(request, env, loadCapture, jobId, true);
   return { remaining: 1, busy: false, result };
 }
 
-async function groupPipelineStep(
+async function legacyGroupPipelineStep(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
@@ -2166,6 +2217,550 @@ async function groupPipelineStep(
   };
 }
 
+type OrderedCapture = { id: string; created_at: string; sha256: string };
+type ContinuityCursor = { last_created_at: string; last_capture_id: string };
+
+async function orderedCapture(
+  env: Env,
+  comparison: "<" | ">",
+  createdAt: string,
+  id: string,
+  run?: JevPipelineRun,
+): Promise<OrderedCapture | null> {
+  const snapshot = run ? "AND (captures.created_at,captures.id)<=(?,?)" : "";
+  const order = comparison === "<" ? "DESC" : "ASC";
+  return env.DB.prepare(
+    `SELECT captures.id,captures.created_at,captures.sha256 FROM captures
+     WHERE (${currentTake}) AND (captures.created_at,captures.id)${comparison}(?,?)
+       ${snapshot}
+     ORDER BY captures.created_at ${order},captures.id ${order} LIMIT 1`,
+  )
+    .bind(
+      createdAt,
+      id,
+      ...(run ? [run.snapshot_created_at, run.snapshot_capture_id] : []),
+    )
+    .first<OrderedCapture>();
+}
+
+async function seedCompletedContinuity(
+  env: Env,
+  completed: JevPipelineRun | null,
+) {
+  if (!completed || completed.phase !== "complete") return;
+  const existing = await env.DB.prepare(
+    "SELECT 1 AS found FROM jev_continuity_edges LIMIT 1",
+  ).first<{ found: number }>();
+  if (existing) return;
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO jev_continuity_edges(
+       capture_id,scan_created_at,source_sha256,ocr_sha256,
+       previous_capture_id,previous_source_sha256,previous_ocr_sha256,
+       relationship,assessment_id,processed_at)
+     SELECT id,created_at,sha256,ocr_sha256,previous_id,previous_sha256,
+       previous_ocr_sha256,'verified-history',NULL,?
+     FROM (
+       SELECT captures.id,captures.created_at,captures.sha256,head.ocr_sha256,
+         LAG(captures.id) OVER scan_order AS previous_id,
+         LAG(captures.sha256) OVER scan_order AS previous_sha256,
+         LAG(head.ocr_sha256) OVER scan_order AS previous_ocr_sha256
+       FROM captures LEFT JOIN jev_page_heads head
+         ON head.capture_id=captures.id AND head.source_sha256=captures.sha256
+       WHERE (${currentTake}) AND (captures.created_at,captures.id)<=(?,?)
+       WINDOW scan_order AS (ORDER BY captures.created_at,captures.id)
+     ) ordered
+     WHERE ocr_sha256 IS NOT NULL AND EXISTS (
+       SELECT 1 FROM jev_jobs job WHERE job.capture_id=ordered.id
+         AND job.ocr_sha256=ordered.ocr_sha256 AND job.status='complete'
+     )`,
+  )
+    .bind(
+      new Date().toISOString(),
+      completed.snapshot_created_at,
+      completed.snapshot_capture_id,
+    )
+    .run();
+}
+
+async function nextContinuityCapture(
+  env: Env,
+  run: JevPipelineRun,
+): Promise<OrderedCapture | null> {
+  const cursor = parsePipelineCursor<ContinuityCursor>(run);
+  return env.DB.prepare(
+    `SELECT captures.id,captures.created_at,captures.sha256
+     FROM captures
+     LEFT JOIN jev_page_heads head ON head.capture_id=captures.id
+     LEFT JOIN jev_continuity_edges edge ON edge.capture_id=captures.id
+     WHERE (${currentTake}) AND (captures.created_at,captures.id)<=(?,?)
+       AND (captures.created_at,captures.id)>(?,?)
+       AND (edge.capture_id IS NULL OR head.capture_id IS NULL
+         OR edge.source_sha256!=captures.sha256
+         OR edge.ocr_sha256!=head.ocr_sha256
+         OR (edge.previous_capture_id IS NOT NULL
+           AND edge.previous_source_sha256 IS NULL))
+     ORDER BY captures.created_at,captures.id LIMIT 1`,
+  )
+    .bind(
+      run.snapshot_created_at,
+      run.snapshot_capture_id,
+      cursor?.last_created_at ?? "",
+      cursor?.last_capture_id ?? "",
+    )
+    .first<OrderedCapture>();
+}
+
+async function documentForCapture(
+  env: Env,
+  capture: Capture,
+): Promise<ReceiptDocument> {
+  const page = await env.DB.prepare(
+    "SELECT document_id FROM document_pages WHERE capture_id=?",
+  )
+    .bind(capture.id)
+    .first<{ document_id: string }>();
+  if (page) {
+    const saved = await storedDocumentById(env, page.document_id);
+    if (saved) return saved;
+  }
+  const singleton = await storedDocumentById(env, capture.id);
+  return singleton?.pages.some((item) => item.captureId === capture.id)
+    ? singleton
+    : newDocument(capture);
+}
+
+async function activeDocumentForCapture(
+  env: Env,
+  capture: Capture,
+  run: JevPipelineRun,
+  loadCapture: (id: string) => Promise<Capture | null>,
+): Promise<ReceiptDocument | null> {
+  const document = await documentForCapture(env, capture);
+  if (document.mergedInto || document.duplicateOf || !document.pages.length)
+    return null;
+  for (const page of document.pages) {
+    const source = await loadCapture(page.captureId);
+    if (
+      !source?.is_current ||
+      !withinPipelineSnapshot(source, run) ||
+      source.sha256 !== page.sha256
+    )
+      return null;
+  }
+  return document;
+}
+
+async function precedingActivePage(
+  env: Env,
+  before: Capture,
+  run: JevPipelineRun,
+  loadCapture: (id: string) => Promise<Capture | null>,
+  receiptOnly = false,
+) {
+  let cursor = before;
+  while (true) {
+    const row = await orderedCapture(env, "<", cursor.created_at, cursor.id);
+    if (!row) return null;
+    const capture = await loadCapture(row.id);
+    requireThat(capture?.is_current, 503, "Previous Jev scan changed.");
+    cursor = capture;
+    const document = await activeDocumentForCapture(
+      env,
+      capture,
+      run,
+      loadCapture,
+    );
+    if (!document) continue;
+    const head = await env.DB.prepare(
+      "SELECT * FROM jev_page_heads WHERE capture_id=?",
+    )
+      .bind(capture.id)
+      .first<PageHead>();
+    if (receiptOnly && head?.role !== "receipt") continue;
+    return { capture, document, head };
+  }
+}
+
+async function recordContinuityEdge(
+  env: Env,
+  capture: Capture,
+  head: PageHead,
+  previous: Capture | null,
+  previousHead: PageHead | null,
+  relationship: string,
+  assessmentId: string | null,
+  membershipChanged = false,
+) {
+  const prior = await env.DB.prepare(
+    "SELECT source_sha256,ocr_sha256,previous_capture_id FROM jev_continuity_edges WHERE capture_id=?",
+  )
+    .bind(capture.id)
+    .first<{
+      source_sha256: string;
+      ocr_sha256: string;
+      previous_capture_id: string | null;
+    }>();
+  await env.DB.prepare(
+    `INSERT INTO jev_continuity_edges(capture_id,scan_created_at,source_sha256,ocr_sha256,previous_capture_id,previous_source_sha256,previous_ocr_sha256,relationship,assessment_id,processed_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(capture_id) DO UPDATE SET
+       scan_created_at=excluded.scan_created_at,source_sha256=excluded.source_sha256,
+       ocr_sha256=excluded.ocr_sha256,previous_capture_id=excluded.previous_capture_id,
+       previous_source_sha256=excluded.previous_source_sha256,
+       previous_ocr_sha256=excluded.previous_ocr_sha256,relationship=excluded.relationship,
+       assessment_id=excluded.assessment_id,processed_at=excluded.processed_at`,
+  )
+    .bind(
+      capture.id,
+      capture.created_at,
+      capture.sha256,
+      head.ocr_sha256,
+      previous?.id ?? null,
+      previous?.sha256 ?? null,
+      previousHead?.ocr_sha256 ?? null,
+      relationship,
+      assessmentId,
+      new Date().toISOString(),
+    )
+    .run();
+  if (
+    !prior ||
+    membershipChanged ||
+    prior.source_sha256 !== capture.sha256 ||
+    prior.ocr_sha256 !== head.ocr_sha256 ||
+    prior.previous_capture_id !== (previous?.id ?? null)
+  )
+    await env.DB.prepare(
+      "UPDATE jev_continuity_edges SET previous_source_sha256=NULL,previous_ocr_sha256=NULL WHERE previous_capture_id=?",
+    )
+      .bind(capture.id)
+      .run();
+}
+
+async function pageGroupPipelineStep(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
+  run: JevPipelineRun,
+) {
+  const next = await nextContinuityCapture(env, run);
+  if (!next) {
+    const last = await env.DB.prepare(
+      `SELECT captures.id,captures.created_at,captures.sha256 FROM captures
+       WHERE (${currentTake}) AND (captures.created_at,captures.id)<=(?,?)
+       ORDER BY captures.created_at DESC,captures.id DESC LIMIT 1`,
+    )
+      .bind(run.snapshot_created_at, run.snapshot_capture_id)
+      .first<OrderedCapture>();
+    if (!last) return { phase: "dates" as const, cursor: null, result: null };
+    const lastCapture = await loadCapture(last.id);
+    requireThat(lastCapture?.is_current, 503, "Final Jev scan changed.");
+    const document =
+      (await activeDocumentForCapture(env, lastCapture, run, loadCapture)) ??
+      (await precedingActivePage(env, lastCapture, run, loadCapture))?.document;
+    if (!document)
+      return { phase: "dates" as const, cursor: null, result: null };
+    const later = await orderedCapture(env, ">", last.created_at, last.id);
+    if (later) {
+      if (!(await markDocumentsWaitingForOcr(env, [document])))
+        return {
+          phase: "group" as const,
+          cursor: run.cursor,
+          result: { status: "busy" },
+          busy: true,
+        };
+      return {
+        phase: "complete" as const,
+        cursor: null,
+        result: { status: "waiting-for-ocr" },
+        waiting: true,
+      };
+    }
+    if (!(await documentsAreUnlocked(env, [document])))
+      return {
+        phase: "group" as const,
+        cursor: run.cursor,
+        result: { status: "busy" },
+        busy: true,
+      };
+    return {
+      phase: "dates" as const,
+      cursor: null,
+      result: await finalizePipelineDocument(env, document),
+    };
+  }
+  const capture = await loadCapture(next.id);
+  requireThat(capture?.is_current, 503, "Jev scan changed during grouping.");
+  const currentDocument = await activeDocumentForCapture(
+    env,
+    capture,
+    run,
+    loadCapture,
+  );
+  const previous = await precedingActivePage(env, capture, run, loadCapture);
+  const previousCapture = previous?.capture ?? null;
+  const [head, previousHead] = await Promise.all([
+    env.DB.prepare("SELECT * FROM jev_page_heads WHERE capture_id=?")
+      .bind(capture.id)
+      .first<PageHead>(),
+    Promise.resolve(previous?.head ?? null),
+  ]);
+  if (
+    !head ||
+    head.source_sha256 !== capture.sha256 ||
+    (previousCapture &&
+      (!previousHead || previousHead.source_sha256 !== previousCapture.sha256))
+  ) {
+    if (previousCapture) {
+      const document = await documentForCapture(env, previousCapture);
+      if (!(await markDocumentsWaitingForOcr(env, [document])))
+        return {
+          phase: "group" as const,
+          cursor: run.cursor,
+          result: { status: "busy" },
+          busy: true,
+        };
+    }
+    return {
+      phase: "complete" as const,
+      cursor: null,
+      result: { status: "waiting-for-ocr" },
+      waiting: true,
+    };
+  }
+  const cursor = JSON.stringify({
+    last_created_at: capture.created_at,
+    last_capture_id: capture.id,
+  });
+  let relationship = previousCapture ? "unrelated" : "first-page";
+  let assessmentId: string | null = null;
+  let result: Record<string, unknown> = {
+    status: "boundary",
+    current_document_id: capture.id,
+  };
+  if (!currentDocument) {
+    await recordContinuityEdge(
+      env,
+      capture,
+      head,
+      previousCapture,
+      previousHead,
+      "excluded",
+      null,
+    );
+    return { phase: "group" as const, cursor, result: { status: "excluded" } };
+  }
+  if (previousCapture) {
+    const immediateDocument = previous!.document;
+    let precedingDocument = immediateDocument;
+    if (head.role === "receipt" && previousHead!.role === "payment_evidence") {
+      const earlier = await precedingActivePage(
+        env,
+        previousCapture,
+        run,
+        loadCapture,
+        true,
+      );
+      if (earlier) {
+        const receiptDocument = earlier.document;
+        if (receiptDocument.id !== immediateDocument.id) {
+          if (!(await documentsAreUnlocked(env, [immediateDocument])))
+            return {
+              phase: "group" as const,
+              cursor: run.cursor,
+              result: { status: "busy" },
+              busy: true,
+            };
+          await finalizePipelineDocument(env, immediateDocument);
+          precedingDocument = receiptDocument;
+        }
+      }
+    }
+    if (currentDocument.id === precedingDocument.id) {
+      relationship = "already-grouped";
+      result = { status: "verified", document_id: currentDocument.id };
+    } else {
+      let decision: Awaited<ReturnType<typeof compareDocuments>> = null;
+      if (
+        ["receipt", "payment_evidence"].includes(head.role) &&
+        ["receipt", "payment_evidence"].includes(previousHead!.role)
+      ) {
+        const [currentEvidence, precedingEvidence] = await Promise.all([
+          documentEvidence(env, currentDocument),
+          documentEvidence(env, precedingDocument),
+        ]);
+        if (!currentEvidence || !precedingEvidence) {
+          if (
+            !(await markDocumentsWaitingForOcr(env, [
+              currentDocument,
+              precedingDocument,
+            ]))
+          )
+            return {
+              phase: "group" as const,
+              cursor: run.cursor,
+              result: { status: "busy" },
+              busy: true,
+            };
+          return {
+            phase: "complete" as const,
+            cursor: null,
+            result: { status: "waiting-for-ocr" },
+            waiting: true,
+          };
+        }
+        if (currentEvidence.ocr.truncated || precedingEvidence.ocr.truncated) {
+          relationship = "unresolved-ocr-too-long";
+          result = {
+            status: "ocr-too-long",
+            current_document_id: precedingDocument.id,
+            next_document_id: currentDocument.id,
+          };
+        } else
+          decision = await compareDocuments(
+            env,
+            currentDocument,
+            precedingDocument,
+            { remaining: 1 },
+            "document-relationship-scan-v1",
+            { current: currentEvidence, candidate: precedingEvidence },
+          );
+      }
+      relationship = decision?.answer.choice ?? relationship;
+      assessmentId = decision?.assessment_id ?? null;
+      if (decision && shouldAutoMerge(decision.answer)) {
+        if (currentDocument.processing || precedingDocument.processing)
+          result = {
+            status: "luna-disagreement",
+            current_document_id: precedingDocument.id,
+            next_document_id: currentDocument.id,
+            relationship,
+            assessment_id: assessmentId,
+          };
+        else if (
+          !(await documentsAreUnlocked(env, [
+            currentDocument,
+            precedingDocument,
+          ]))
+        )
+          return {
+            phase: "group" as const,
+            cursor: run.cursor,
+            result: { status: "busy" },
+            busy: true,
+          };
+        else {
+          const captures = await loadCaptures();
+          const allDocuments = records(await storedDocuments(env), captures);
+          const relevantIds = [
+            ...new Set(
+              [...currentDocument.pages, ...precedingDocument.pages].map(
+                (page) => page.captureId,
+              ),
+            ),
+          ];
+          const roles = new Map(
+            (
+              await env.DB.prepare(
+                `SELECT capture_id,role FROM jev_page_heads WHERE capture_id IN (${relevantIds.map(() => "?").join(",")})`,
+              )
+                .bind(...relevantIds)
+                .all<Pick<PageHead, "capture_id" | "role">>()
+            ).results.map((page) => [page.capture_id, page.role]),
+          );
+          let merged: ReceiptDocument | null;
+          try {
+            merged = await mergeDocuments(
+              request,
+              env,
+              loadCaptures,
+              captures,
+              currentDocument,
+              precedingDocument,
+              decision.answer.choice as "continuation" | "payment_match",
+              roles,
+              allDocuments,
+            );
+          } catch (error) {
+            if (error instanceof JevMutationBusy)
+              return {
+                phase: "group" as const,
+                cursor: run.cursor,
+                result: { status: "busy" },
+                busy: true,
+              };
+            throw error;
+          }
+          if (merged)
+            result = {
+              status: "merged",
+              document_id: merged.id,
+              previous_document_id: precedingDocument.id,
+              next_document_id: currentDocument.id,
+              relationship,
+              assessment_id: assessmentId,
+            };
+        }
+      } else if (decision)
+        result = {
+          status:
+            decision.answer.choice === "duplicate"
+              ? "duplicate-suggested"
+              : "boundary",
+          current_document_id: precedingDocument.id,
+          next_document_id: currentDocument.id,
+          relationship,
+          probability: decision.answer.probabilities[decision.answer.choice],
+          confidence: decision.answer.confidence,
+          assessment_id: assessmentId,
+        };
+      if (result.status !== "merged") {
+        if (!(await documentsAreUnlocked(env, [precedingDocument])))
+          return {
+            phase: "group" as const,
+            cursor: run.cursor,
+            result: { status: "busy" },
+            busy: true,
+          };
+        await finalizePipelineDocument(env, precedingDocument);
+      }
+    }
+  }
+  await recordContinuityEdge(
+    env,
+    capture,
+    head,
+    previousCapture,
+    previousHead,
+    relationship,
+    assessmentId,
+    result.status === "merged",
+  );
+  return { phase: "group" as const, cursor, result };
+}
+
+async function groupPipelineStep(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
+  run: JevPipelineRun,
+) {
+  const cursor = parsePipelineCursor<{
+    active_id?: string;
+    finalize_id?: string;
+  }>(run);
+  if (cursor?.active_id || cursor?.finalize_id)
+    return legacyGroupPipelineStep(
+      request,
+      env,
+      loadCaptures,
+      await loadCaptures(),
+      run,
+    );
+  return pageGroupPipelineStep(request, env, loadCaptures, loadCapture, run);
+}
+
 async function markDocumentsWaitingForOcr(
   env: Env,
   documents: ReceiptDocument[],
@@ -2235,11 +2830,7 @@ async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
         .bind(head.assessment_id)
         .first<{ task: string }>()
     : null;
-  const artifacts = (
-    await env.DB.prepare(
-      "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
-    ).all<{ capture_id: string; sha256: string }>()
-  ).results;
+  const artifacts = await documentOcrArtifactPins(env, document);
   const alreadyCurrent =
     assessment?.task === "document-classification" &&
     (await documentHeadReady(env, document, head, evidence.heads, artifacts));
@@ -2267,65 +2858,49 @@ async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
 
 async function documentPipelineStep(
   env: Env,
-  captures: Capture[],
+  loadCapture: (id: string) => Promise<Capture | null>,
   run: JevPipelineRun,
 ) {
-  const { active } = await pipelineDocuments(env, captures, run);
-  const activeCaptureIds = new Set(
-    active.flatMap((document) => document.pages.map((page) => page.captureId)),
-  );
-  const currentCaptures = new Map(
-    captures
-      .filter((capture) => capture.is_current)
-      .map((capture) => [capture.id, capture]),
-  );
-  const stranded = (
-    await env.DB.prepare(
-      "SELECT capture_id FROM jev_jobs WHERE status='classified' ORDER BY updated_at,created_at,id",
-    ).all<{ capture_id: string }>()
-  ).results.find((job) => {
-    const capture = currentCaptures.get(job.capture_id);
-    return (
-      !capture ||
-      (withinPipelineSnapshot(capture, run) &&
-        !activeCaptureIds.has(job.capture_id))
-    );
-  });
-  if (stranded) {
-    const reason = currentCaptures.has(stranded.capture_id)
+  const next = await env.DB.prepare(
+    `SELECT job.capture_id FROM jev_jobs job
+     LEFT JOIN captures ON captures.id=job.capture_id
+     WHERE job.status='classified' AND
+       (captures.id IS NULL OR (captures.created_at,captures.id)<=(?,?))
+     ORDER BY job.created_at,job.id LIMIT 1`,
+  )
+    .bind(run.snapshot_created_at, run.snapshot_capture_id)
+    .first<{ capture_id: string }>();
+  if (!next) return { remaining: 0, cursor: null, result: null };
+  const capture = await loadCapture(next.capture_id);
+  const document = capture?.is_current
+    ? await activeDocumentForCapture(env, capture, run, loadCapture)
+    : null;
+  if (!document) {
+    const reason = capture?.is_current
       ? "document_not_active"
       : "capture_not_current";
     await env.DB.prepare(
       "UPDATE jev_jobs SET status='ineligible',ineligible_reason=?,updated_at=? WHERE capture_id=? AND status='classified'",
     )
-      .bind(reason, new Date().toISOString(), stranded.capture_id)
+      .bind(reason, new Date().toISOString(), next.capture_id)
       .run();
     return {
       remaining: 1,
-      cursor: run.cursor,
+      cursor: null,
       result: { status: "ineligible", reason },
     };
   }
-  const saved = parsePipelineCursor<{ after_id?: unknown }>(run);
-  const afterId = typeof saved?.after_id === "string" ? saved.after_id : null;
-  const previousIndex = afterId
-    ? active.findIndex((document) => document.id === afterId)
-    : -1;
-  const document =
-    active[(afterId && previousIndex < 0 ? -1 : previousIndex) + 1];
-  if (!document) return { remaining: 0, cursor: null, result: null };
   if (!(await documentsAreUnlocked(env, [document])))
     return {
       remaining: 1,
-      cursor: run.cursor,
+      cursor: null,
       result: null,
       busy: true,
     };
-  const cursor = JSON.stringify({ after_id: document.id });
   const result = await finalizePipelineDocument(env, document);
   return {
     remaining: 1,
-    cursor,
+    cursor: null,
     result,
   };
 }
@@ -2627,6 +3202,7 @@ export async function jevRoute(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/jev/")) return null;
@@ -3150,38 +3726,14 @@ export async function jevRoute(
     const blocked = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM jev_jobs WHERE status='blocked'",
     ).first<{ count: number }>();
-    const captures = await loadCaptures();
-    const current = captures
-      .filter((capture) => capture.is_current)
-      .sort(
-        (a, b) =>
-          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
-      );
+    let loadedCaptures: Capture[] | null = null;
+    const capturesForStep = async () =>
+      (loadedCaptures ??= await loadCaptures());
     let run = await activePipelineRun(env);
-    if (run && run.version !== JEV_PIPELINE_VERSION) {
-      const restarted = await env.DB.prepare(
-        "UPDATE jev_pipeline_runs SET version=?,phase='pages',cursor=NULL,step_token=NULL,step_started_at=NULL,updated_at=? WHERE id=? AND version=? AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
-      )
-        .bind(
-          JEV_PIPELINE_VERSION,
-          new Date().toISOString(),
-          run.id,
-          run.version,
-        )
-        .first<JevPipelineRun>();
-      if (!restarted)
-        return json({
-          result: null,
-          phase: run.phase,
-          remaining: 1,
-          busy: true,
-          blocked: blocked?.count ?? 0,
-        });
-      run = restarted;
-    }
     if (!run) {
       const latest = await latestPipelineRun(env);
-      const boundary = current.at(-1);
+      await seedCompletedContinuity(env, latest);
+      const boundary = await currentBoundary(env);
       if (boundary) {
         const probe: JevPipelineRun = {
           ...(latest ?? {
@@ -3197,27 +3749,27 @@ export async function jevRoute(
           snapshot_created_at: boundary.created_at,
           snapshot_capture_id: boundary.id,
         };
-        const candidate = (await unqueuedArtifacts(env, current, probe))[0];
+        const candidate = await firstUnqueuedArtifact(env, probe);
         if (candidate)
           await queueJevJob(env, candidate.capture_id, candidate.sha256);
       }
-      if (!(await pipelineNeedsRun(env, current, latest)))
+      if (!(await pipelineNeedsRun(env, boundary, latest)))
         return json({
           result: null,
           phase: "complete",
           remaining: 0,
           busy: false,
-          waiting: (await currentWaitingCaptureCount(env, captures)) > 0,
+          waiting: await hasCurrentWaitingCapture(env),
           blocked: blocked?.count ?? 0,
         });
-      run = await startPipelineRun(env, current);
+      run = await startPipelineRun(env, boundary);
       if (!run)
         return json({
           result: null,
           phase: "complete",
           remaining: 0,
           busy: false,
-          waiting: (await currentWaitingCaptureCount(env, captures)) > 0,
+          waiting: await hasCurrentWaitingCapture(env),
           blocked: blocked?.count ?? 0,
         });
     }
@@ -3235,13 +3787,7 @@ export async function jevRoute(
     let saved = false;
     try {
       if (run.phase === "pages") {
-        const step = await pagePipelineStep(
-          request,
-          env,
-          loadCaptures,
-          current,
-          run,
-        );
+        const step = await pagePipelineStep(request, env, loadCapture, run);
         const phase = step.remaining === 0 ? "group" : "pages";
         await savePipelineStep(env, run, token, phase, null);
         saved = true;
@@ -3257,8 +3803,8 @@ export async function jevRoute(
         const step = await groupPipelineStep(
           request,
           env,
-          loadCaptures,
-          captures,
+          capturesForStep,
+          loadCapture,
           run,
         );
         await savePipelineStep(env, run, token, step.phase, step.cursor);
@@ -3278,7 +3824,7 @@ export async function jevRoute(
         const step = await reconcileDetachedPayments(
           request,
           env,
-          loadCaptures,
+          capturesForStep,
           after,
           run,
         );
@@ -3295,15 +3841,15 @@ export async function jevRoute(
         });
       }
       if (run.phase === "documents") {
-        const step = await documentPipelineStep(env, captures, run);
+        const step = await documentPipelineStep(env, loadCapture, run);
         const phase = step.remaining === 0 ? "complete" : "documents";
         await savePipelineStep(env, run, token, phase, step.cursor);
         saved = true;
         if (
           phase === "complete" &&
-          (await pipelineNeedsRun(env, current, run))
+          (await pipelineNeedsRun(env, await currentBoundary(env), run))
         ) {
-          const next = await startPipelineRun(env, current);
+          const next = await startPipelineRun(env, await currentBoundary(env));
           if (next)
             return json({
               result: step.result,

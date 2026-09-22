@@ -240,6 +240,12 @@ capture is not a claim that its accounting data has been verified.
 
 ## Engineering priorities
 
+Use indexed, bounded database queries to claim the next item of downstream work.
+Persist versioned progress so completed pages and phases are not replayed when a later
+pipeline step changes. Do not load or sort the full capture or document collection on
+every item when the database can select the next eligible row. Check query plans and
+row counts for queue and backfill paths.
+
 1. Fast capture and accurate financial processing, with source integrity, durable saves
    and recoverability as non-negotiable requirements. Keep downstream work off the capture path.
 2. Clean, maintainable code: explicit state transitions, cohesive modules, shared logic,

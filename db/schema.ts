@@ -69,6 +69,11 @@ export const artifacts = sqliteTable(
       table.kind,
       table.created_at,
     ),
+    index("artifacts_kind_created_key").on(
+      table.kind,
+      table.created_at,
+      table.key,
+    ),
   ],
 );
 export const station = sqliteTable("station", {
@@ -328,7 +333,35 @@ export const jevJobs = sqliteTable(
   },
   (table) => [
     uniqueIndex("jev_job_ocr").on(table.capture_id, table.ocr_sha256),
-    index("jev_job_status_created").on(table.status, table.created_at),
+    index("jev_job_status_created").on(
+      table.status,
+      table.created_at,
+      table.id,
+    ),
+  ],
+);
+export const jevContinuityEdges = sqliteTable(
+  "jev_continuity_edges",
+  {
+    capture_id: text("capture_id")
+      .primaryKey()
+      .references(() => captures.id),
+    scan_created_at: text("scan_created_at").notNull(),
+    source_sha256: text("source_sha256").notNull(),
+    ocr_sha256: text("ocr_sha256").notNull(),
+    previous_capture_id: text("previous_capture_id"),
+    previous_source_sha256: text("previous_source_sha256"),
+    previous_ocr_sha256: text("previous_ocr_sha256"),
+    relationship: text("relationship"),
+    assessment_id: text("assessment_id"),
+    processed_at: text("processed_at").notNull(),
+  },
+  (table) => [
+    index("jev_continuity_scan_order").on(
+      table.scan_created_at,
+      table.capture_id,
+    ),
+    index("jev_continuity_previous_capture").on(table.previous_capture_id),
   ],
 );
 export const jevPipelineRuns = sqliteTable(

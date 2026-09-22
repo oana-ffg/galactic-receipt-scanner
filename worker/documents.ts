@@ -39,16 +39,30 @@ type FileRow = {
   payload: string;
 };
 
+function storedDocumentPayload(payload: string): ReceiptDocument {
+  const document = JSON.parse(payload) as ReceiptDocument;
+  // Older immutable revisions contain a processing crop. It is no longer state.
+  for (const page of document.pages) delete (page as { crop?: unknown }).crop;
+  return document;
+}
+
 export async function storedDocuments(env: Env): Promise<ReceiptDocument[]> {
   const rows = await env.DB.prepare(
     "SELECT v.payload FROM document_heads h JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision",
   ).all<{ payload: string }>();
-  return rows.results.map((row) => {
-    const document = JSON.parse(row.payload) as ReceiptDocument;
-    // Older immutable revisions contain a processing crop. It is no longer state.
-    for (const page of document.pages) delete (page as { crop?: unknown }).crop;
-    return document;
-  });
+  return rows.results.map((row) => storedDocumentPayload(row.payload));
+}
+
+export async function storedDocumentById(
+  env: Env,
+  documentId: string,
+): Promise<ReceiptDocument | null> {
+  const row = await env.DB.prepare(
+    "SELECT v.payload FROM document_heads h JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision WHERE h.id=?",
+  )
+    .bind(documentId)
+    .first<{ payload: string }>();
+  return row ? storedDocumentPayload(row.payload) : null;
 }
 function samePageSources(left: unknown, right: ReceiptDocument["pages"]) {
   if (!Array.isArray(left)) return false;
