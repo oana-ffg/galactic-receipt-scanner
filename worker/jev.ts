@@ -3268,6 +3268,32 @@ export async function jevRoute(
        WHERE (${currentTake}) AND head.capture_id IS NULL
        ORDER BY captures.created_at,captures.id LIMIT 25`,
     ).all<{ id: string }>();
+    const pendingContinuity = await env.DB.prepare(
+      `SELECT captures.id AS capture_id,pages.document_id,
+         captures.created_at AS scan_created_at,
+         role.created_at AS page_role_assessed_at,job.status AS jev_job_status
+       FROM captures
+       LEFT JOIN document_pages pages ON pages.capture_id=captures.id
+       LEFT JOIN jev_page_heads head ON head.capture_id=captures.id
+         AND head.source_sha256=captures.sha256
+       LEFT JOIN jev_assessments role ON role.id=head.assessment_id
+       LEFT JOIN jev_jobs job ON job.capture_id=captures.id
+         AND job.ocr_sha256=head.ocr_sha256
+       LEFT JOIN jev_continuity_edges edge ON edge.capture_id=captures.id
+       WHERE (${currentTake}) AND (edge.capture_id IS NULL
+         OR head.capture_id IS NULL
+         OR edge.source_sha256!=captures.sha256
+         OR edge.ocr_sha256!=head.ocr_sha256
+         OR (edge.previous_capture_id IS NOT NULL
+           AND edge.previous_source_sha256 IS NULL))
+       ORDER BY captures.created_at,captures.id LIMIT 25`,
+    ).all<{
+      capture_id: string;
+      document_id: string | null;
+      scan_created_at: string;
+      page_role_assessed_at: string | null;
+      jev_job_status: string | null;
+    }>();
     return json({
       configured: Boolean(env.TYPESAFE_API_KEY),
       jobs: counts.results,
@@ -3280,6 +3306,7 @@ export async function jevRoute(
       current_captures_continuity_processed: coverage?.continuity_done ?? 0,
       current_captures_continuity_pending:
         (coverage?.total ?? 0) - (coverage?.continuity_done ?? 0),
+      pending_continuity: pendingContinuity.results,
       pipeline: pipeline
         ? {
             version: pipeline.version,

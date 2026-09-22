@@ -2655,6 +2655,17 @@ it("leaves a changed OCR page and its successor pending during historical seedin
         .all<{ capture_id: string }>()
     ).results,
   ).toEqual([{ capture_id: captures[2].id }]);
+  const status = await (
+    await mf.dispatchFetch(`${origin}/api/jev/status`, {
+      headers: { ...ownerHeaders, Authorization: `Bearer ${processingToken}` },
+    })
+  ).json<any>();
+  expect(status.current_captures_continuity_pending).toBe(2);
+  expect(
+    status.pending_continuity.map(
+      (page: { capture_id: string }) => page.capture_id,
+    ),
+  ).toEqual([captures[0].id, captures[1].id]);
 });
 
 it("leaves the open tail unclassified until the following raw capture has PP OCR", async () => {
