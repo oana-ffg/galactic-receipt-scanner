@@ -5,6 +5,7 @@ import {
 } from "../web/extraction";
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
+import { currentTake } from "./capture-selection";
 import { loadCompletenessAudits } from "./completeness-state";
 import {
   DOCUMENT_EVIDENCE_LIMIT,
@@ -48,7 +49,7 @@ function storedDocumentPayload(payload: string): ReceiptDocument {
 
 export async function storedDocuments(env: Env): Promise<ReceiptDocument[]> {
   const rows = await env.DB.prepare(
-    "SELECT v.payload FROM document_heads h JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision",
+    "SELECT v.payload FROM document_heads h CROSS JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision",
   ).all<{ payload: string }>();
   return rows.results.map((row) => storedDocumentPayload(row.payload));
 }
@@ -64,6 +65,48 @@ export async function storedDocumentById(
     .first<{ payload: string }>();
   return row ? storedDocumentPayload(row.payload) : null;
 }
+export async function storedDocumentsByIds(
+  env: Env,
+  ids: string[],
+): Promise<Map<string, ReceiptDocument>> {
+  const result = new Map<string, ReceiptDocument>();
+  for (let offset = 0; offset < ids.length; offset += 99) {
+    const chunk = ids.slice(offset, offset + 99);
+    const rows = await env.DB.prepare(
+      `SELECT h.id,v.payload FROM document_heads h
+       JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+       WHERE h.id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(...chunk)
+      .all<{ id: string; payload: string }>();
+    for (const row of rows.results)
+      result.set(row.id, storedDocumentPayload(row.payload));
+  }
+  return result;
+}
+export async function storedAliasesForTargets(
+  env: Env,
+  targetIds: string[],
+): Promise<ReceiptDocument[]> {
+  if (!targetIds.length) return [];
+  const aliases: ReceiptDocument[] = [];
+  for (let offset = 0; offset < targetIds.length; offset += 50) {
+    const chunk = targetIds.slice(offset, offset + 50);
+    const slots = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT v.payload FROM document_heads h
+       CROSS JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+       WHERE json_extract(v.payload,'$.mergedInto') IN (${slots})
+          OR json_extract(v.payload,'$.duplicateOf') IN (${slots})`,
+    )
+      .bind(...chunk, ...chunk)
+      .all<{ payload: string }>();
+    aliases.push(
+      ...rows.results.map((row) => storedDocumentPayload(row.payload)),
+    );
+  }
+  return aliases;
+}
 function samePageSources(left: unknown, right: ReceiptDocument["pages"]) {
   if (!Array.isArray(left)) return false;
   const source = (page: ReceiptDocument["pages"][number]) => ({
@@ -74,12 +117,34 @@ function samePageSources(left: unknown, right: ReceiptDocument["pages"]) {
   });
   return JSON.stringify(left.map(source)) === JSON.stringify(right.map(source));
 }
-async function names(env: Env) {
-  return (
-    await env.DB.prepare(
-      "SELECT filename,document_id FROM document_names",
-    ).all<{ filename: string; document_id: string }>()
-  ).results;
+async function names(env: Env, documents: ReceiptDocument[]) {
+  const bases = [
+    ...new Set(
+      documents.flatMap((document) => {
+        const base = filenameBase(document);
+        return base ? [base, base.replace(/^(\d{4}-\d{2}-\d{2})_/, "$1-")] : [];
+      }),
+    ),
+  ];
+  if (!bases.length) return [];
+  if (bases.length > 100)
+    return (
+      await env.DB.prepare(
+        "SELECT filename,document_id FROM document_names",
+      ).all<{ filename: string; document_id: string }>()
+    ).results;
+  const result: { filename: string; document_id: string }[] = [];
+  for (let offset = 0; offset < bases.length; offset += 40) {
+    const chunk = bases.slice(offset, offset + 40);
+    const ranges = chunk.map(() => "(filename>=? AND filename<?)").join(" OR ");
+    const rows = await env.DB.prepare(
+      `SELECT filename,document_id FROM document_names WHERE ${ranges}`,
+    )
+      .bind(...chunk.flatMap((base) => [base, `${base}\uffff`]))
+      .all<{ filename: string; document_id: string }>();
+    result.push(...rows.results);
+  }
+  return [...new Map(result.map((row) => [row.filename, row])).values()];
 }
 function chooseName(
   doc: ReceiptDocument,
@@ -292,6 +357,7 @@ export async function documentRoute(
   loadCaptures: () => Promise<Capture[]>,
   commit?: { statements: D1PreparedStatement[]; trustedProcessing: boolean },
   loadCapture?: (id: string) => Promise<Capture | null>,
+  loadSelectedCaptures?: (ids: string[]) => Promise<Capture[]>,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/documents")) return null;
@@ -299,14 +365,201 @@ export async function documentRoute(
     request.method === "GET"
       ? url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})$/)
       : null;
+  const namedAction = url.pathname.match(
+    /^\/api\/documents\/([0-9a-f-]{36})\/(pdf|history)$/,
+  );
   const sourceId =
     request.method === "GET" && url.pathname === "/api/documents"
       ? url.searchParams.get("captureId")
       : null;
+  const summaryLimit =
+    request.method === "GET" &&
+    url.pathname === "/api/documents" &&
+    url.searchParams.get("summary") === "1" &&
+    !url.searchParams.get("q")
+      ? Number(url.searchParams.get("limit") ?? 50)
+      : null;
+  const searchQuery =
+    request.method === "GET" &&
+    url.pathname === "/api/documents" &&
+    url.searchParams.get("summary") === "1"
+      ? (url.searchParams.get("q") ?? "").toLowerCase()
+      : "";
+  const scopedPost =
+    request.method === "POST" &&
+    url.pathname === "/api/documents" &&
+    loadSelectedCaptures
+      ? await bodyJson(request, 2 * 1024 * 1024)
+      : null;
   let captures: Capture[];
   let stored: ReceiptDocument[];
-  if ((single || sourceId) && loadCapture) {
-    const requestedId = single?.[1] ?? sourceId!;
+  let summaryPage: { total: number; next: string | null } | null = null;
+  if (scopedPost) {
+    const changes = scopedPost.documents;
+    requireThat(
+      Array.isArray(changes) &&
+        changes.length > 0 &&
+        changes.length <= MAX_DOCUMENT_CHANGES &&
+        changes.every(
+          (item) => item && typeof item.id === "string" && UUID.test(item.id),
+        ),
+      400,
+      "Save 1 to 100 document changes with valid IDs.",
+    );
+    const ids = changes.map((item: ReceiptDocument) => item.id);
+    const prior = await storedDocumentsByIds(env, ids);
+    const targets = changes.flatMap((item: ReceiptDocument) =>
+      [item.duplicateOf, item.mergedInto].filter(
+        (id): id is string => typeof id === "string" && UUID.test(id),
+      ),
+    );
+    const relations = await storedDocumentsByIds(env, targets);
+    const reparented = changes
+      .filter(
+        (item: ReceiptDocument) =>
+          (item.duplicateOf ?? null) !==
+            (prior.get(item.id)?.duplicateOf ?? null) ||
+          (item.mergedInto ?? null) !==
+            (prior.get(item.id)?.mergedInto ?? null),
+      )
+      .map((item: ReceiptDocument) => item.id);
+    const aliases = await storedAliasesForTargets(env, reparented);
+    stored = [
+      ...new Map([
+        ...prior,
+        ...relations,
+        ...aliases.map((alias) => [alias.id, alias] as const),
+      ]).values(),
+    ];
+    const sourceIds = [
+      ...new Set([
+        ...stored.flatMap((document) =>
+          document.pages.map((page) => page.captureId),
+        ),
+        ...changes.flatMap((item: ReceiptDocument) =>
+          Array.isArray(item.pages)
+            ? item.pages
+                .map((page) => page?.captureId)
+                .filter(
+                  (id): id is string => typeof id === "string" && UUID.test(id),
+                )
+            : [],
+        ),
+        ...ids,
+        ...targets,
+      ]),
+    ];
+    captures = await loadSelectedCaptures!(sourceIds);
+  } else if (searchQuery && loadSelectedCaptures) {
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    requireThat(
+      Number.isInteger(limit) && limit >= 1 && limit <= 100,
+      400,
+      "Use 1 to 100 summaries per page.",
+    );
+    const after = url.searchParams.get("after") ?? "";
+    const matches = (await storedDocuments(env))
+      .filter(
+        (document) =>
+          !document.mergedInto &&
+          `${document.vendor ?? ""} ${document.receiptDate ?? ""} ${document.reference ?? ""} ${document.text} ${document.uncertainties.join(" ")}`
+            .toLowerCase()
+            .includes(searchQuery),
+      )
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const page = matches
+      .filter((document) => document.id > after)
+      .slice(0, limit + 1);
+    stored = page.slice(0, limit);
+    const ids = [
+      ...new Set(
+        stored.flatMap((document) =>
+          document.pages.map((item) => item.captureId),
+        ),
+      ),
+    ];
+    captures = await loadSelectedCaptures(ids);
+    requireThat(
+      captures.length === ids.length,
+      503,
+      "A selected document page is unavailable.",
+    );
+    summaryPage = {
+      total: matches.length,
+      next: page.length > limit ? stored.at(-1)!.id : null,
+    };
+  } else if (summaryLimit !== null && loadSelectedCaptures) {
+    requireThat(
+      Number.isInteger(summaryLimit) &&
+        summaryLimit >= 1 &&
+        summaryLimit <= 100,
+      400,
+      "Use 1 to 100 summaries per page.",
+    );
+    const after = url.searchParams.get("after") ?? "";
+    const [savedRows, virtualRows, savedCount, virtualCount] =
+      await Promise.all([
+        env.DB.prepare(
+          `SELECT h.id,v.payload FROM document_heads h
+         JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+         WHERE h.id>? AND json_extract(v.payload,'$.mergedInto') IS NULL
+         ORDER BY h.id LIMIT ?`,
+        )
+          .bind(after, summaryLimit + 1)
+          .all<{ id: string; payload: string }>(),
+        env.DB.prepare(
+          `SELECT captures.id FROM captures
+         LEFT JOIN document_pages page ON page.capture_id=captures.id
+         LEFT JOIN document_heads saved ON saved.id=captures.id
+         WHERE captures.id>? AND page.capture_id IS NULL AND saved.id IS NULL
+           AND (${currentTake}) ORDER BY captures.id LIMIT ?`,
+        )
+          .bind(after, summaryLimit + 1)
+          .all<{ id: string }>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) AS total FROM document_heads h
+         JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+         WHERE json_extract(v.payload,'$.mergedInto') IS NULL`,
+        ).first<{ total: number }>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) AS total FROM captures
+         LEFT JOIN document_pages page ON page.capture_id=captures.id
+         LEFT JOIN document_heads saved ON saved.id=captures.id
+         WHERE page.capture_id IS NULL AND saved.id IS NULL AND (${currentTake})`,
+        ).first<{ total: number }>(),
+      ]);
+    const ordered = [
+      ...savedRows.results.map((row) => ({ ...row, virtual: false })),
+      ...virtualRows.results.map((row) => ({
+        id: row.id,
+        payload: "",
+        virtual: true,
+      })),
+    ].sort((a, b) => a.id.localeCompare(b.id));
+    const page = ordered.slice(0, summaryLimit);
+    stored = page
+      .filter((row) => !row.virtual)
+      .map((row) => storedDocumentPayload(row.payload));
+    const ids = [
+      ...new Set([
+        ...stored.flatMap((document) =>
+          document.pages.map((item) => item.captureId),
+        ),
+        ...page.filter((row) => row.virtual).map((row) => row.id),
+      ]),
+    ];
+    captures = await loadSelectedCaptures(ids);
+    requireThat(
+      captures.length === ids.length,
+      503,
+      "A selected document page is unavailable.",
+    );
+    summaryPage = {
+      total: (savedCount?.total ?? 0) + (virtualCount?.total ?? 0),
+      next: ordered.length > summaryLimit ? page.at(-1)!.id : null,
+    };
+  } else if ((single || sourceId || namedAction) && loadCapture) {
+    const requestedId = single?.[1] ?? namedAction?.[1] ?? sourceId!;
     const page = sourceId
       ? await env.DB.prepare(
           "SELECT document_id FROM document_pages WHERE capture_id=?",
@@ -320,7 +573,9 @@ export async function documentRoute(
     );
     if (
       saved &&
-      (single || saved.pages.some((item) => item.captureId === sourceId))
+      (single ||
+        namedAction ||
+        saved.pages.some((item) => item.captureId === sourceId))
     ) {
       stored = [saved];
       const selected = await Promise.all(
@@ -378,7 +633,22 @@ export async function documentRoute(
     completenessAudits = state.audits;
     jevRoles = state.roles;
   };
-  const reserved = await names(env);
+  const nameCandidates = scopedPost
+    ? [
+        ...docs,
+        ...(scopedPost.documents as ReceiptDocument[]).filter(
+          (item: unknown): item is ReceiptDocument =>
+            !!item &&
+            typeof item === "object" &&
+            (typeof (item as ReceiptDocument).vendor === "string" ||
+              (item as ReceiptDocument).vendor === null) &&
+            (typeof (item as ReceiptDocument).receiptDate === "string" ||
+              (item as ReceiptDocument).receiptDate === null),
+        ),
+      ]
+    : docs;
+  const reserved =
+    namedAction?.[2] === "history" ? [] : await names(env, nameCandidates);
   let fileRows: FileRow[] = [];
   let filesLoaded = false;
   const loadFileRows = async (documentIds?: string[]) => {
@@ -514,12 +784,16 @@ export async function documentRoute(
                 .includes(query),
           )
           .sort((a, b) => a.id.localeCompare(b.id));
-        const page = matches.filter((d) => d.id > after).slice(0, limit + 1);
+        const page = summaryPage
+          ? matches
+          : matches.filter((d) => d.id > after).slice(0, limit + 1);
         await loadFileRows(page.slice(0, limit).map((document) => document.id));
         await loadReviewState(page.slice(0, limit));
         return json({
-          total: matches.length,
-          next: page.length > limit ? page[limit - 1].id : null,
+          total: summaryPage?.total ?? matches.length,
+          next:
+            summaryPage?.next ??
+            (page.length > limit ? page[limit - 1].id : null),
           documents: page.slice(0, limit).map((d) => {
             const v = view(d);
             return {
@@ -562,7 +836,7 @@ export async function documentRoute(
     }
   }
   if (url.pathname === "/api/documents" && request.method === "POST") {
-    const input = await bodyJson(request, 2 * 1024 * 1024);
+    const input = scopedPost ?? (await bodyJson(request, 2 * 1024 * 1024));
     requireThat(
       Array.isArray(input.documents) &&
         input.documents.length > 0 &&
@@ -683,6 +957,24 @@ export async function documentRoute(
     const explicitPages = new Set(
       changed.flatMap((d) => d.pages.map((p) => p.captureId)),
     );
+    if (scopedPost) {
+      const changedIds = new Set(changed.map((document) => document.id));
+      const pageIds = [...explicitPages];
+      for (let offset = 0; offset < pageIds.length; offset += 99) {
+        const chunk = pageIds.slice(offset, offset + 99);
+        const owners = await env.DB.prepare(
+          `SELECT capture_id,document_id FROM document_pages
+           WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
+        )
+          .bind(...chunk)
+          .all<{ capture_id: string; document_id: string }>();
+        requireThat(
+          owners.results.every((owner) => changedIds.has(owner.document_id)),
+          409,
+          "Page belongs to another document. Transfer it in the same save.",
+        );
+      }
+    }
     const reconciled = final.filter(
       (d) =>
         d.revision > 0 ||
@@ -779,9 +1071,7 @@ export async function documentRoute(
       saved: changed.map((d) => ({ id: d.id, revision: d.revision + 1 })),
     });
   }
-  const match = url.pathname.match(
-    /^\/api\/documents\/([0-9a-f-]{36})\/(pdf|history)$/,
-  );
+  const match = namedAction;
   requireThat(match, 404, "Document route not found.");
   const [, id, action] = match;
   const doc = stored.find((d) => d.id === id);

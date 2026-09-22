@@ -352,6 +352,39 @@ it("paginates compact summaries and returns individual sources without all batch
   ).json();
   expect(lookup.document.id).toBe(a.id);
 });
+it("pages default summaries using selected captures only", async () => {
+  await capture();
+  await capture();
+  const selected = async (id: string) =>
+    (await (await request(`/api/captures/${id}`)).json()) as any;
+  const db = await mf.getD1Database("DB");
+  const response = await documentRoute(
+    new Request(origin + "/api/documents?summary=1&limit=1"),
+    { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as any,
+    async () => {
+      throw new Error("Full capture collection was loaded");
+    },
+    undefined,
+    selected,
+    async (ids) => Promise.all(ids.map(selected)),
+  );
+  const page = (await response!.json()) as any;
+  expect(page.documents).toHaveLength(1);
+  expect(page.next).toBeTruthy();
+  expect(page.total).toBeGreaterThanOrEqual(2);
+});
+it("reserves filenames for a full summary page within the database bind limit", async () => {
+  const documents = [];
+  for (let index = 0; index < 51; index++) {
+    const document = newDocument(await capture());
+    document.vendor = `Synthetic Merchant ${index}`;
+    document.receiptDate = "2026-09-22";
+    documents.push(document);
+  }
+  expect((await save(documents)).status).toBe(200);
+  const response = await request("/api/documents?summary=1&limit=51");
+  expect(response.status).toBe(200);
+});
 it("keeps unresolved reasons on retained documents during agent-driven merges", async () => {
   const a = newDocument(await capture()),
     b = newDocument(await capture());
@@ -393,6 +426,20 @@ it("keeps unresolved reasons on retained documents during agent-driven merges", 
   c.broken = [...a.broken];
   c.uncertainties = [...a.uncertainties];
   expect((await save([a, c])).status).toBe(200);
+});
+it("rejects a merge that would leave an incoming alias pointing to another alias", async () => {
+  const first = newDocument(await capture());
+  const retained = newDocument(await capture());
+  const alias = newDocument(await capture());
+  alias.duplicateOf = first.id;
+  alias.evidence = "Synthetic duplicate scan";
+  expect((await save([first, retained, alias])).status).toBe(200);
+  first.revision = retained.revision = 1;
+  retained.pages.push(...first.pages);
+  first.pages = [];
+  first.mergedInto = retained.id;
+  first.evidence = "Synthetic merge";
+  expect((await save([first, retained])).status).toBe(400);
 });
 it("pins visual approval to a stored PDF hash and requires review after regeneration", async () => {
   const d = newDocument(await capture());

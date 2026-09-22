@@ -295,12 +295,45 @@ async function route(
       .first<CaptureRow>();
     return row ? (publicCapture(row) as import("../web/types").Capture) : null;
   };
+  const loadSelectedCaptures = async (ids: string[]) => {
+    const result: import("../web/types").Capture[] = [];
+    for (let offset = 0; offset < ids.length; offset += 99) {
+      const chunk = ids.slice(offset, offset + 99);
+      const rows = await env.DB.prepare(
+        `${captureSelection}, ${outlineSelection} FROM captures WHERE id IN (${chunk.map(() => "?").join(",")})`,
+      )
+        .bind(...chunk)
+        .all<CaptureRow>();
+      result.push(
+        ...(rows.results.map(
+          publicCapture,
+        ) as import("../web/types").Capture[]),
+      );
+    }
+    return result;
+  };
   await protectBlindParse(request, env);
-  const paymentMatches = await paymentMatchesRoute(request, env, loadCaptures);
+  const paymentMatches = await paymentMatchesRoute(
+    request,
+    env,
+    loadSelectedCaptures,
+  );
   if (paymentMatches) return paymentMatches;
-  const jevResponse = await jevRoute(request, env, loadCaptures, loadCapture);
+  const jevResponse = await jevRoute(
+    request,
+    env,
+    loadCaptures,
+    loadCapture,
+    loadSelectedCaptures,
+  );
   if (jevResponse) return jevResponse;
-  const processingResponse = await processingRoute(request, env, loadCaptures);
+  const processingResponse = await processingRoute(
+    request,
+    env,
+    loadCaptures,
+    loadCapture,
+    loadSelectedCaptures,
+  );
   if (processingResponse) return processingResponse;
   const documentResponse = await documentRoute(
     request,
@@ -308,6 +341,7 @@ async function route(
     loadCaptures,
     undefined,
     loadCapture,
+    loadSelectedCaptures,
   );
   if (documentResponse) return documentResponse;
   const method = request.method;

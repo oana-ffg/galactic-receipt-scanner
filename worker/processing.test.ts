@@ -261,6 +261,43 @@ it("does not globally gate a ready receipt behind another unfinished Jev job", a
   const ready = await capture();
   expect((await claim()).document.id).toBe(ready.id);
 });
+it("selects a Jev-ready Luna claim without loading the capture collection", async () => {
+  const ready = await capture();
+  const current = await ok(`/api/captures/${ready.id}`);
+  const db = await mf.getD1Database("DB");
+  const response = await processingRoute(
+    new Request(origin + "/api/processing/claim", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ stage: "small" }),
+    }),
+    { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as unknown as Env,
+    async () => {
+      throw new Error("Full capture collection was loaded");
+    },
+    async (id) => (id === ready.id ? current : null),
+  );
+  expect((await response!.json()).claim.document.id).toBe(ready.id);
+});
+it("returns nearby scan context without loading the document collection", async () => {
+  const ready = await capture();
+  const lease = await claim();
+  const db = await mf.getD1Database("DB");
+  const response = await processingRoute(
+    new Request(origin + `/api/processing/context?token=${lease.token}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+    { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as unknown as Env,
+    async () => {
+      throw new Error("Full capture collection was loaded");
+    },
+    async (id) => (id === ready.id ? await ok(`/api/captures/${id}`) : null),
+  );
+  const context = (await response!.json()) as any;
+  expect(context.document.id).toBe(ready.id);
+  expect(context.previous_images).toEqual([]);
+  expect(context.next_images).toEqual([]);
+});
 it("withholds the ready tail when the next raw capture has not reached Jev", async () => {
   const first = await capture();
   const second = await capture(false);
@@ -386,6 +423,8 @@ it("does not queue a Luna reparse when a batch starts just before its commit", a
       }),
       { DB: wrapped, BUCKET: await mf.getR2Bucket("BUCKET") } as unknown as Env,
       async () => [{ ...captureRecord, is_current: true }],
+      async (id) =>
+        id === captureRecord.id ? { ...captureRecord, is_current: true } : null,
     ),
   ).rejects.toMatchObject({ status: 409 });
   const after = (await ok(`/api/documents/${captureRecord.id}`)).document;
@@ -1266,6 +1305,7 @@ it("rolls back document and provenance writes when a lease expires after the ini
       }),
       { DB: wrapped, BUCKET: await mf.getR2Bucket("BUCKET") } as unknown as Env,
       async () => [{ ...c, is_current: true }],
+      async (id) => (id === c.id ? { ...c, is_current: true } : null),
     ),
   ).rejects.toMatchObject({ status: 409 });
   expect(
@@ -1364,6 +1404,18 @@ it("keeps incomplete pages out of human review and retries them after new scans"
     true,
   );
   expect((await claim()).document.id).toBe(c.id);
+});
+it("accepts a full batch exclusion list without exceeding the database bind limit", async () => {
+  const exclude_document_ids = Array.from({ length: 1000 }, () =>
+    crypto.randomUUID(),
+  );
+  const response = await req(
+    "/api/processing/claim",
+    { stage: "small", exclude_document_ids },
+    true,
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect((await response.json()).reason).toBe("queue-empty");
 });
 it("uses integer amounts, keeps included VAT separate and reconciles payment fees", () => {
   const e = extraction();

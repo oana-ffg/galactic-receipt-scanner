@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { newDocument, type DocumentView } from "../web/documents";
 import type { Capture } from "../web/types";
 
-test("copies a saved receipt reference, reopens filtered documents and recovers from clipboard denial", async ({
+test("copies saved receipt details, reopens filtered documents and recovers from clipboard denial", async ({
   page,
   context,
 }) => {
@@ -62,9 +62,7 @@ test("copies a saved receipt reference, reopens filtered documents and recovers 
   );
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.getByRole("button", { name: "Copy for Codex" }).click();
-  await expect(
-    page.getByText("Copied. Paste into Codex and add what looks wrong."),
-  ).toBeVisible();
+  await expect(page.getByText("Copied receipt details.")).toBeVisible();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toContain(`Document ID: ${doc.id}`);
   expect(copied).toContain("Saved document revision: 7");
@@ -77,7 +75,7 @@ test("copies a saved receipt reference, reopens filtered documents and recovers 
     .getAttribute("href");
   expect(copied).toContain(`Receipt viewer: ${link}`);
 
-  // A later parse must not change the reference already copied for investigation.
+  // A later parse must not change the details already copied.
   doc.revision = 8;
   await page.goto(link!);
   await expect(page.locator("#review-detail h2")).toHaveText(doc.filename!);
@@ -91,7 +89,7 @@ test("copies a saved receipt reference, reopens filtered documents and recovers 
   });
   await page.getByRole("button", { name: "Copy for Codex" }).click();
   const fallback = page.getByRole("textbox", {
-    name: "Receipt investigation prompt",
+    name: "Receipt details",
   });
   await expect(fallback).toBeVisible();
   await expect(fallback).toBeFocused();

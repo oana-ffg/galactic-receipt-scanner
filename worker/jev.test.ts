@@ -4,7 +4,7 @@ import { newDocument } from "../web/documents";
 import {
   loadPurchaseCategoryChoices,
   documentEvidence,
-  jevReadyDocuments,
+  jevOpenTailDocumentId,
   jevSummary,
   mergeDocuments,
   normalizeCompletenessDecision,
@@ -2884,23 +2884,7 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     DB: db,
     BUCKET: await mf.getR2Bucket("BUCKET"),
   } as any;
-  expect(
-    (await jevReadyDocuments(env, [firstDocument], [first])).has(first.id),
-  ).toBe(true);
-  let readinessQueries = 0;
-  const countingEnv = {
-    DB: {
-      prepare(sql: string) {
-        readinessQueries += 1;
-        return db.prepare(sql);
-      },
-    },
-  } as any;
-  await jevReadyDocuments(
-    countingEnv,
-    Array.from({ length: 100 }, () => firstDocument),
-  );
-  expect(readinessQueries).toBe(5);
+  expect((await jevSummary(env, firstDocument)).ready).toBe(true);
 
   const classified = await db
     .prepare(
@@ -2960,7 +2944,7 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     .bind(first.id, updated.revision)
     .run();
   // A revision-zero Jev head can predate the first saved document version.
-  expect((await jevReadyDocuments(env, [updated])).has(first.id)).toBe(true);
+  expect((await jevSummary(env, updated)).ready).toBe(true);
   legacy.pages[0].crop = [0, 0, 1, 1];
   await db
     .prepare(
@@ -2975,25 +2959,17 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     .bind(await hashLegacy(legacy.pages), first.id)
     .run();
   // The same check also works when the classified revision exists historically.
-  expect((await jevReadyDocuments(env, [updated])).has(first.id)).toBe(true);
+  expect((await jevSummary(env, updated)).ready).toBe(true);
   const rotated = structuredClone(updated);
   rotated.pages[0].rotation = 90;
-  expect((await jevReadyDocuments(env, [rotated])).has(first.id)).toBe(false);
+  expect((await jevSummary(env, rotated)).ready).toBe(false);
 
   const second = await saveCapture();
   await db
     .prepare("UPDATE captures SET created_at=? WHERE id=?")
     .bind("2026-01-01T00:00:01.000Z", second.id)
     .run();
-  expect(
-    (
-      await jevReadyDocuments(
-        env,
-        [firstDocument, newDocument(second)],
-        [first, second],
-      )
-    ).has(first.id),
-  ).toBe(false);
+  expect(await jevOpenTailDocumentId(env)).toBe(first.id);
 
   const waiting = await drainBackfill(processingToken);
   expect(

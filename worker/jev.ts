@@ -13,7 +13,9 @@ import {
 } from "../web/ocr-data";
 import {
   documentRoute,
+  storedAliasesForTargets,
   storedDocumentById,
+  storedDocumentsByIds,
   storedDocuments,
 } from "./documents";
 import {
@@ -879,6 +881,7 @@ async function saveDocuments(
   loadCaptures: () => Promise<Capture[]>,
   documents: ReceiptDocument[],
   statements: D1PreparedStatement[] = [],
+  loadCapture?: (id: string) => Promise<Capture | null>,
 ) {
   let response: Response | null;
   try {
@@ -891,6 +894,15 @@ async function saveDocuments(
       env,
       loadCaptures,
       { statements, trustedProcessing: true },
+      loadCapture,
+      loadCapture
+        ? async (ids) => {
+            const captures = await Promise.all(ids.map(loadCapture));
+            return captures.filter(
+              (capture): capture is Capture => capture !== null,
+            );
+          }
+        : undefined,
     );
   } catch (error) {
     if (error instanceof HttpError && error.status === 409)
@@ -984,15 +996,30 @@ export async function mergeDocuments(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
-  captures: Capture[],
+  captures: Capture[] | null,
   current: ReceiptDocument,
   candidate: ReceiptDocument,
   relationship: "continuation" | "payment_match",
   roles: Map<string, PageRole>,
-  allDocuments: ReceiptDocument[],
+  allDocuments: ReceiptDocument[] | null,
+  loadCapture?: (id: string) => Promise<Capture | null>,
 ) {
+  const sourceIds = [
+    ...new Set(
+      [...current.pages, ...candidate.pages].map((page) => page.captureId),
+    ),
+  ];
+  const sources =
+    captures ??
+    (
+      await env.DB.prepare(
+        `SELECT id,created_at FROM captures WHERE id IN (${sourceIds.map(() => "?").join(",")})`,
+      )
+        .bind(...sourceIds)
+        .all<Pick<Capture, "id" | "created_at">>()
+    ).results;
   const captureOrderById = new Map(
-    captures.map((capture) => [capture.id, captureOrder(capture)]),
+    sources.map((capture) => [capture.id, captureOrder(capture)]),
   );
   const { target, donor, movedCaptureIds } = prepareJevMerge(
     current,
@@ -1015,7 +1042,11 @@ export async function mergeDocuments(
   )
     return null;
   const changed = [target, donor];
-  retargetAbsorbedAliases(changed, allDocuments, target.id);
+  retargetAbsorbedAliases(
+    changed,
+    allDocuments ?? (await storedAliasesForTargets(env, [donor.id])),
+    target.id,
+  );
   requireThat(
     changed.length <= 100,
     409,
@@ -1038,6 +1069,7 @@ export async function mergeDocuments(
     loadCaptures,
     changed,
     updateJobs,
+    loadCapture,
   );
   target.revision = result.saved.find(
     (saved) => saved.id === target.id,
@@ -1553,14 +1585,6 @@ function parsePipelineCursor<T>(run: JevPipelineRun): T | null {
   }
 }
 
-export async function jevDocumentHeads(env: Env) {
-  return (
-    await env.DB.prepare(
-      "SELECT * FROM jev_document_heads",
-    ).all<JevDocumentHead>()
-  ).results;
-}
-
 type AssessmentPayload = {
   input?: {
     pins?: { capture_id: string; ocr_sha256: string }[];
@@ -1696,119 +1720,51 @@ async function documentHeadReady(
   );
 }
 
-async function documentAssessmentPayloads(env: Env) {
-  const rows = await env.DB.prepare(
-    `SELECT a.id,a.payload FROM jev_assessments a
-     JOIN (
-       SELECT assessment_id AS id FROM jev_document_heads
-       UNION
-       SELECT category_assessment_id AS id FROM jev_document_heads WHERE category_assessment_id IS NOT NULL
-     ) referenced ON referenced.id=a.id`,
-  ).all<{ id: string; payload: string }>();
-  const result = new Map<string, AssessmentPayload>();
-  for (const row of rows.results) {
-    const payload = parseAssessmentPayload(row.payload);
-    if (payload) result.set(row.id, payload);
-  }
-  return result;
-}
-
-export async function jevReadyDocuments(
-  env: Env,
-  documents: ReceiptDocument[],
-  captures: Capture[] = [],
-) {
-  const [heads, artifactRows, pageRows, assessments, priorVersions] =
-    await Promise.all([
-      jevDocumentHeads(env),
-      env.DB.prepare(
-        "SELECT capture_id,sha256 FROM artifacts WHERE kind='ocr'",
-      ).all<{ capture_id: string; sha256: string }>(),
-      env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>(),
-      documentAssessmentPayloads(env),
-      env.DB.prepare(
-        "SELECT v.document_id,v.payload FROM jev_document_heads h JOIN document_versions v ON v.document_id=h.document_id AND v.revision=h.document_revision",
-      ).all<{ document_id: string; payload: string }>(),
-    ]);
-  const priorPayloads = new Map(
-    priorVersions.results.map((row) => [row.document_id, row.payload]),
-  );
-  const pageHeadRows = pageRows.results;
-  const headsByDocument = new Map(
-    heads.map((head) => [head.document_id, head]),
-  );
-  const pageHeadsByCapture = new Map(
-    pageHeadRows.map((head) => [head.capture_id, head]),
-  );
-  const artifactPins = new Set(
-    artifactRows.results.map(
-      (artifact) => `${artifact.capture_id}\u0000${artifact.sha256}`,
-    ),
-  );
-  const ready = new Map<string, JevDocumentHead>();
-  for (const document of documents) {
-    const head = headsByDocument.get(document.id) ?? null;
-    const pages = document.pages
-      .map((page) => pageHeadsByCapture.get(page.captureId))
-      .filter((page): page is PageHead => !!page);
+export async function jevOpenTailDocumentId(env: Env): Promise<string | null> {
+  const completed = await env.DB.prepare(
+    "SELECT snapshot_created_at,snapshot_capture_id FROM jev_pipeline_runs WHERE version=? AND phase='complete' ORDER BY created_at DESC,id DESC LIMIT 1",
+  )
+    .bind(JEV_PIPELINE_VERSION)
+    .first<{ snapshot_created_at: string; snapshot_capture_id: string }>();
+  if (completed) {
+    const newest = await env.DB.prepare(
+      `SELECT captures.created_at,captures.id FROM captures WHERE (${currentTake})
+       ORDER BY captures.created_at DESC,captures.id DESC LIMIT 1`,
+    ).first<{ created_at: string; id: string }>();
     if (
-      head?.role === "purchase_document" &&
-      documentHeadReadyFromEvidence(
-        document,
-        head,
-        pages,
-        artifactPins,
-        assessments,
-        head.page_fingerprint === (await pageFingerprint(document)) ||
-          (await legacyHeadMatches(
-            document,
-            head,
-            priorPayloads.get(document.id),
-          )),
-      )
+      !newest ||
+      `${newest.created_at}\u0000${newest.id}` <=
+        `${completed.snapshot_created_at}\u0000${completed.snapshot_capture_id}`
     )
-      ready.set(document.id, head);
+      return null;
   }
-  if (captures.length) {
-    const completed = await env.DB.prepare(
-      "SELECT snapshot_created_at,snapshot_capture_id FROM jev_pipeline_runs WHERE version=? AND phase='complete' ORDER BY created_at DESC,id DESC LIMIT 1",
+  const missing = await env.DB.prepare(
+    `SELECT captures.created_at,captures.id FROM captures
+     LEFT JOIN jev_page_heads head ON head.capture_id=captures.id
+     WHERE (${currentTake}) AND (captures.created_at,captures.id)>(?,?)
+       AND (head.capture_id IS NULL OR head.source_sha256!=captures.sha256)
+     ORDER BY captures.created_at,captures.id LIMIT 1`,
+  )
+    .bind(
+      completed?.snapshot_created_at ?? "",
+      completed?.snapshot_capture_id ?? "",
     )
-      .bind(JEV_PIPELINE_VERSION)
-      .first<{
-        snapshot_created_at: string;
-        snapshot_capture_id: string;
-      }>();
-    const current = captures
-      .filter((capture) => capture.is_current)
-      .sort(
-        (a, b) =>
-          a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
-      );
-    const boundary = completed
-      ? `${completed.snapshot_created_at}\u0000${completed.snapshot_capture_id}`
-      : null;
-    const newStart = boundary
-      ? current.findIndex((capture) => captureOrder(capture) > boundary)
-      : 0;
-    if (newStart >= 0) {
-      const headByCapture = new Map(
-        pageHeadRows.map((head) => [head.capture_id, head]),
-      );
-      const missingIndex = current.findIndex((capture, index) => {
-        if (index < newStart) return false;
-        const head = headByCapture.get(capture.id);
-        return !head || head.source_sha256 !== capture.sha256;
-      });
-      if (missingIndex > 0) {
-        const precedingCaptureId = current[missingIndex - 1].id;
-        const openTail = documents.find((document) =>
-          document.pages.some((page) => page.captureId === precedingCaptureId),
-        );
-        if (openTail) ready.delete(openTail.id);
-      }
-    }
-  }
-  return ready;
+    .first<{ created_at: string; id: string }>();
+  if (!missing) return null;
+  const preceding = await env.DB.prepare(
+    `SELECT captures.id FROM captures WHERE (${currentTake})
+     AND (captures.created_at,captures.id)<(?,?)
+     ORDER BY captures.created_at DESC,captures.id DESC LIMIT 1`,
+  )
+    .bind(missing.created_at, missing.id)
+    .first<{ id: string }>();
+  if (!preceding) return null;
+  const page = await env.DB.prepare(
+    "SELECT document_id FROM document_pages WHERE capture_id=?",
+  )
+    .bind(preceding.id)
+    .first<{ document_id: string }>();
+  return page?.document_id ?? preceding.id;
 }
 
 async function documentOcrArtifactPins(env: Env, document: ReceiptDocument) {
@@ -2672,8 +2628,6 @@ async function pageGroupPipelineStep(
             busy: true,
           };
         else {
-          const captures = await loadCaptures();
-          const allDocuments = records(await storedDocuments(env), captures);
           const relevantIds = [
             ...new Set(
               [...currentDocument.pages, ...precedingDocument.pages].map(
@@ -2696,12 +2650,13 @@ async function pageGroupPipelineStep(
               request,
               env,
               loadCaptures,
-              captures,
+              null,
               currentDocument,
               precedingDocument,
               decision.answer.choice as "continuation" | "payment_match",
               roles,
-              allDocuments,
+              null,
+              loadCapture,
             );
           } catch (error) {
             if (error instanceof JevMutationBusy)
@@ -3530,13 +3485,18 @@ async function reconcileDetachedPayments(
     };
   if (!(await documentsAreUnlocked(env, [purchase, payment])))
     return { result: null, remaining: 1, busy: true, next: after };
-  const captures = await loadCaptures();
-  const allDocuments = records(await storedDocuments(env), captures);
+  const relevantIds = [
+    ...new Set(
+      [...purchase.pages, ...payment.pages].map((page) => page.captureId),
+    ),
+  ];
   const roles = new Map(
     (
-      await env.DB.prepare("SELECT capture_id,role FROM jev_page_heads").all<
-        Pick<PageHead, "capture_id" | "role">
-      >()
+      await env.DB.prepare(
+        `SELECT capture_id,role FROM jev_page_heads WHERE capture_id IN (${relevantIds.map(() => "?").join(",")})`,
+      )
+        .bind(...relevantIds)
+        .all<Pick<PageHead, "capture_id" | "role">>()
     ).results.map((head) => [head.capture_id, head.role]),
   );
   let merged: ReceiptDocument | null;
@@ -3545,12 +3505,13 @@ async function reconcileDetachedPayments(
       request,
       env,
       loadCaptures,
-      captures,
+      null,
       purchase,
       payment,
       "payment_match",
       roles,
-      allDocuments,
+      null,
+      loadCapture,
     );
   } catch (error) {
     if (error instanceof JevMutationBusy)
@@ -3576,6 +3537,7 @@ export async function jevRoute(
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
   loadCapture: (id: string) => Promise<Capture | null>,
+  loadSelectedCaptures?: (ids: string[]) => Promise<Capture[]>,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/jev/")) return null;
@@ -3857,21 +3819,30 @@ export async function jevRoute(
       400,
       "Provide two disjoint groups of current page IDs.",
     );
-    const captures = await loadCaptures();
-    const currentIds = new Set(
-      captures
-        .filter((capture) => capture.is_current)
-        .map((capture) => capture.id),
+    const requestedIds = [...input.left_page_ids, ...input.right_page_ids];
+    const captures = loadSelectedCaptures
+      ? await loadSelectedCaptures(requestedIds)
+      : await Promise.all(requestedIds.map(loadCapture));
+    requireThat(
+      captures.length === requestedIds.length &&
+        captures.every((capture) => capture?.is_current),
+      404,
+      "Benchmark page is not a current source page.",
     );
-    const documents = records(await storedDocuments(env), captures).filter(
-      (document) => !document.mergedInto && !document.duplicateOf,
+    const captureById = new Map(
+      (captures as Capture[]).map((capture) => [capture.id, capture]),
+    );
+    const currentIds = new Set(requestedIds);
+    const documents = await Promise.all(
+      requestedIds.map((id) => documentForCapture(env, captureById.get(id)!)),
     );
     const available = new Map(
-      documents.flatMap((document) =>
-        document.pages.map(
-          (page) => [page.captureId, { document, page }] as const,
-        ),
-      ),
+      requestedIds.flatMap((id, index) => {
+        const document = documents[index];
+        if (document.mergedInto || document.duplicateOf) return [];
+        const page = document.pages.find((item) => item.captureId === id);
+        return page ? [[id, { document, page }] as const] : [];
+      }),
     );
     const group = (ids: string[]): ReceiptDocument => {
       const first = available.get(ids[0]);
@@ -3947,12 +3918,48 @@ export async function jevRoute(
       400,
       "Invalid Jev document cursor.",
     );
-    const captures = await loadCaptures();
-    const candidates = records(await storedDocuments(env), captures)
-      .filter((document) => !document.mergedInto && !document.duplicateOf)
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .filter((document) => after === null || document.id > after)
-      .slice(0, limit + 1);
+    const selected = await env.DB.prepare(
+      `SELECT id,virtual FROM (
+         SELECT h.id AS id,0 AS virtual FROM document_heads h
+         JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+         WHERE h.id>? AND json_extract(v.payload,'$.mergedInto') IS NULL
+           AND json_extract(v.payload,'$.duplicateOf') IS NULL
+         UNION ALL
+         SELECT captures.id AS id,1 AS virtual FROM captures
+         LEFT JOIN document_pages page ON page.capture_id=captures.id
+         LEFT JOIN document_heads saved ON saved.id=captures.id
+         WHERE captures.id>? AND page.capture_id IS NULL AND saved.id IS NULL
+           AND (${currentTake})
+       ) ORDER BY id LIMIT ?`,
+    )
+      .bind(after ?? "", after ?? "", limit + 1)
+      .all<{ id: string; virtual: number }>();
+    const savedIds = selected.results
+      .filter((row) => !row.virtual)
+      .map((row) => row.id);
+    const virtualIds = selected.results
+      .filter((row) => row.virtual)
+      .map((row) => row.id);
+    const saved = await storedDocumentsByIds(env, savedIds);
+    const captures = loadSelectedCaptures
+      ? await loadSelectedCaptures(virtualIds)
+      : await Promise.all(virtualIds.map(loadCapture));
+    requireThat(
+      captures.every((capture) => capture !== null),
+      503,
+      "A selected Jev document page is unavailable.",
+    );
+    const virtual = new Map(
+      (captures as Capture[]).map((capture) => [
+        capture.id,
+        newDocument(capture),
+      ]),
+    );
+    const candidates = selected.results.map((row) => {
+      const document = row.virtual ? virtual.get(row.id) : saved.get(row.id);
+      requireThat(document, 503, "A selected Jev document is unavailable.");
+      return document;
+    });
     const documents = candidates.slice(0, limit);
     const { audits: completenessAudits } = await loadCompletenessAudits(
       env,
@@ -4334,17 +4341,78 @@ export async function jevRoute(
 export async function paymentMatchesRoute(
   request: Request,
   env: Env,
-  loadCaptures: () => Promise<Capture[]>,
+  loadSelectedCaptures: (ids: string[]) => Promise<Capture[]>,
 ): Promise<Response | null> {
   if (
     new URL(request.url).pathname !== "/api/payment-matches" ||
     request.method !== "GET"
   )
     return null;
-  const documents = records(
-    await storedDocuments(env),
-    await loadCaptures(),
-  ).filter((document) => !document.mergedInto && !document.duplicateOf);
+  const rows = (
+    await env.DB.prepare(
+      `SELECT id,task,subject_id,candidate_id,payload,created_at
+       FROM jev_assessments WHERE task LIKE ?
+         AND json_extract(payload,'$.response.answers.relationship.choice')='payment_match'
+       ORDER BY created_at DESC,id DESC`,
+    )
+      .bind(`${DETACHED_PAYMENT_TASK}-%`)
+      .all<{
+        id: string;
+        task: string;
+        subject_id: string;
+        candidate_id: string;
+        payload: string;
+        created_at: string;
+      }>()
+  ).results;
+  const pinIds = [
+    ...new Set(
+      rows.flatMap((row) => {
+        const payload = JSON.parse(row.payload) as {
+          input?: {
+            current?: { pins?: unknown };
+            candidate?: { pins?: unknown };
+          };
+        };
+        return [payload.input?.current?.pins, payload.input?.candidate?.pins]
+          .flatMap((pins) => (Array.isArray(pins) ? pins : []))
+          .map((pin) => pin?.capture_id)
+          .filter(
+            (id): id is string => typeof id === "string" && UUID.test(id),
+          );
+      }),
+    ),
+  ];
+  const captures = await loadSelectedCaptures(pinIds);
+  const captureById = new Map(captures.map((capture) => [capture.id, capture]));
+  const assigned = new Map<string, string>();
+  for (let offset = 0; offset < pinIds.length; offset += 99) {
+    const chunk = pinIds.slice(offset, offset + 99);
+    const owners = await env.DB.prepare(
+      `SELECT capture_id,document_id FROM document_pages
+       WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(...chunk)
+      .all<{ capture_id: string; document_id: string }>();
+    for (const owner of owners.results)
+      assigned.set(owner.capture_id, owner.document_id);
+  }
+  const saved = await storedDocumentsByIds(env, [
+    ...new Set([...assigned.values(), ...pinIds]),
+  ]);
+  const documents = [
+    ...new Map(
+      pinIds.flatMap((id) => {
+        const capture = captureById.get(id);
+        if (!capture?.is_current) return [];
+        const document =
+          saved.get(assigned.get(id) ?? id) ?? newDocument(capture);
+        return document.mergedInto || document.duplicateOf
+          ? []
+          : [[document.id, document] as const];
+      }),
+    ).values(),
+  ];
   const ownerByPage = new Map(
     documents.flatMap((document) =>
       document.pages.map((page) => [page.captureId, document.id] as const),
@@ -4358,12 +4426,20 @@ export async function paymentMatchesRoute(
       document.pages.map((page) => [page.captureId, page] as const),
     ),
   );
-  const heads = (
-    await env.DB.prepare(
-      "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
-    ).all<Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">>()
-  ).results;
-  const headsByPage = new Map(heads.map((head) => [head.capture_id, head]));
+  const headsByPage = new Map<
+    string,
+    Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">
+  >();
+  for (let offset = 0; offset < pinIds.length; offset += 99) {
+    const chunk = pinIds.slice(offset, offset + 99);
+    const heads = await env.DB.prepare(
+      `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads
+       WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(...chunk)
+      .all<Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">>();
+    for (const head of heads.results) headsByPage.set(head.capture_id, head);
+  }
   const resolvePins = (value: unknown) => {
     if (!Array.isArray(value) || !value.length) return null;
     const pins = value as { capture_id?: string; ocr_sha256?: string }[];
@@ -4387,20 +4463,6 @@ export async function paymentMatchesRoute(
       }),
     };
   };
-  const rows = (
-    await env.DB.prepare(
-      "SELECT id,task,subject_id,candidate_id,payload,created_at FROM jev_assessments WHERE task LIKE ? ORDER BY created_at DESC,id DESC",
-    )
-      .bind(`${DETACHED_PAYMENT_TASK}-%`)
-      .all<{
-        id: string;
-        task: string;
-        subject_id: string;
-        candidate_id: string;
-        payload: string;
-        created_at: string;
-      }>()
-  ).results;
   const matches = rows.flatMap((row) => {
     const payload = JSON.parse(row.payload) as {
       input?: { current?: { pins?: unknown }; candidate?: { pins?: unknown } };

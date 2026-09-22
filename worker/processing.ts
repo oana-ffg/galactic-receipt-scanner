@@ -25,12 +25,15 @@ import {
   type ProcessingState,
 } from "../web/extraction";
 import { bodyJson, digest, HttpError, json, requireThat, UUID } from "./http";
-import { jevReadyDocuments, jevSummary } from "./jev";
+import { jevOpenTailDocumentId, jevSummary } from "./jev";
 import {
   documentRoute,
   MAX_DOCUMENT_CHANGES,
-  storedDocuments,
+  storedDocumentById,
+  storedDocumentsByIds,
+  storedAliasesForTargets,
 } from "./documents";
+import { currentTake } from "./capture-selection";
 
 type Lock = {
   token: string;
@@ -94,20 +97,166 @@ export async function protectBlindParse(request: Request, env: Env) {
     "Save the independent full parse before reading earlier extraction results.",
   );
 }
-async function records(env: Env, captures: Capture[]) {
-  const stored = await storedDocuments(env);
-  const assigned = new Set(
-    stored.flatMap((d) => d.pages.map((p) => p.captureId)),
-  );
-  const storedIds = new Set(stored.map((document) => document.id));
-  return [
-    ...stored,
-    ...captures
-      .filter(
-        (c) => c.is_current && !assigned.has(c.id) && !storedIds.has(c.id),
+type ClaimCandidate = {
+  id: string;
+  priority: number;
+  created_at: string;
+  scan_id: string;
+};
+
+async function claimCandidateRows(
+  env: Env,
+  stage: "small" | "large",
+  excluded: Set<string>,
+  after: ClaimCandidate | null,
+  captureCount: number,
+): Promise<ClaimCandidate[]> {
+  const excludedIds = [...excluded];
+  const exclusion = excludedIds.length
+    ? "AND COALESCE(page.document_id,captures.id) NOT IN (SELECT value FROM json_each(?))"
+    : "";
+  const candidates: ClaimCandidate[] = [];
+  for (const priority of stage === "small" ? [0, 1] : [0]) {
+    if (after && priority < after.priority) continue;
+    const cursor = after?.priority === priority ? after : null;
+    const eligibility =
+      priority === 1
+        ? `(page.capture_id IS NOT NULL
+            AND json_extract(v.payload,'$.processing.extraction.completeness')='fragment'
+            AND COALESCE(json_extract(v.payload,'$.processing.needs_reparse'),0)=0
+            AND COALESCE(json_extract(v.payload,'$.processing.seen_capture_count'),0)<?)`
+        : stage === "small"
+          ? `((page.capture_id IS NULL AND h.id IS NULL AND (${currentTake}))
+            OR (page.capture_id IS NOT NULL AND h.id IS NOT NULL
+              AND (json_extract(v.payload,'$.processing') IS NULL
+                OR json_extract(v.payload,'$.processing.needs_reparse')=1)))`
+          : `(page.capture_id IS NOT NULL
+              AND json_extract(v.payload,'$.processing') IS NOT NULL
+              AND COALESCE(json_extract(v.payload,'$.processing.needs_reparse'),0)=0
+              AND json_extract(v.payload,'$.processing.large_model_confidence') IS NULL
+              AND COALESCE(json_extract(v.payload,'$.processing.has_human_review'),0)=0)`;
+    const rows = await env.DB.prepare(
+      `SELECT COALESCE(page.document_id,captures.id) AS id,
+         ? AS priority,captures.created_at,captures.id AS scan_id
+       FROM captures INDEXED BY captures_created_id
+       LEFT JOIN document_pages page ON page.capture_id=captures.id
+       LEFT JOIN document_heads h ON h.id=COALESCE(page.document_id,captures.id)
+       LEFT JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+       JOIN jev_document_heads jev
+         ON jev.document_id=COALESCE(page.document_id,captures.id)
+         AND jev.role='purchase_document'
+       WHERE (captures.created_at,captures.id)>(?,?)
+         AND (page.capture_id IS NULL
+           OR page.capture_id=json_extract(v.payload,'$.pages[0].captureId'))
+         AND json_extract(v.payload,'$.mergedInto') IS NULL
+         AND json_extract(v.payload,'$.duplicateOf') IS NULL
+         AND ${eligibility}
+         AND (page.capture_id IS NULL OR EXISTS (
+           SELECT 1 FROM document_pages member
+           JOIN captures ON captures.id=member.capture_id
+           WHERE member.document_id=page.document_id AND (${currentTake})
+         ))
+         ${exclusion}
+       ORDER BY captures.created_at,captures.id LIMIT ?`,
+    )
+      .bind(
+        priority,
+        cursor?.created_at ?? "",
+        cursor?.scan_id ?? "",
+        ...(priority === 1 ? [captureCount] : []),
+        ...(excludedIds.length ? [JSON.stringify(excludedIds)] : []),
+        25 - candidates.length,
       )
-      .map(newDocument),
-  ];
+      .all<ClaimCandidate>();
+    candidates.push(...rows.results);
+    if (candidates.length === 25) break;
+  }
+  return candidates;
+}
+
+async function claimDocument(
+  env: Env,
+  id: string,
+  loadCapture: (id: string) => Promise<Capture | null>,
+): Promise<{ document: ReceiptDocument; captures: Capture[] } | null> {
+  const saved = await storedDocumentById(env, id);
+  const first = saved ? null : await loadCapture(id);
+  if (!saved && !first?.is_current) return null;
+  const document = saved ?? newDocument(first!);
+  const captures = await Promise.all(
+    document.pages.map((page) => loadCapture(page.captureId)),
+  );
+  if (captures.some((capture) => !capture)) return null;
+  return { document, captures: captures as Capture[] };
+}
+
+async function capturesForPages(
+  pages: ReceiptDocument["pages"],
+  loadCapture: (id: string) => Promise<Capture | null>,
+): Promise<Capture[]> {
+  const ids = [...new Set(pages.map((page) => page.captureId))];
+  const captures = await Promise.all(ids.map(loadCapture));
+  requireThat(
+    captures.every((capture) => capture !== null),
+    409,
+    "A source page is unavailable.",
+  );
+  return captures as Capture[];
+}
+
+async function draftSources(
+  env: Env,
+  inputDocuments: unknown,
+  loadCapture: (id: string) => Promise<Capture | null>,
+): Promise<{ previous: ReceiptDocument[]; captures: Capture[] }> {
+  requireThat(
+    Array.isArray(inputDocuments) &&
+      inputDocuments.length > 0 &&
+      inputDocuments.length <= 20 &&
+      inputDocuments.every(
+        (item) => item && typeof item.id === "string" && UUID.test(item.id),
+      ),
+    400,
+    "Freeze 1 to 20 affected documents with valid IDs.",
+  );
+  const ids = inputDocuments.map((item) => item.id as string);
+  const stored = await storedDocumentsByIds(env, ids);
+  const previous: ReceiptDocument[] = [];
+  for (const id of ids) {
+    const saved = stored.get(id);
+    if (saved) {
+      previous.push(saved);
+      continue;
+    }
+    const [capture, assigned] = await Promise.all([
+      loadCapture(id),
+      env.DB.prepare(
+        "SELECT document_id FROM document_pages WHERE capture_id=?",
+      )
+        .bind(id)
+        .first<{ document_id: string }>(),
+    ]);
+    if (capture?.is_current && !assigned) previous.push(newDocument(capture));
+  }
+  const proposedPages = inputDocuments.flatMap((item) =>
+    Array.isArray(item.pages) ? item.pages : [],
+  ) as ReceiptDocument["pages"];
+  requireThat(
+    proposedPages.length <= 100 &&
+      proposedPages.every(
+        (page) =>
+          page &&
+          typeof page.captureId === "string" &&
+          UUID.test(page.captureId),
+      ),
+    400,
+    "Freeze at most 100 valid source pages.",
+  );
+  const captures = await capturesForPages(
+    [...previous.flatMap((document) => document.pages), ...proposedPages],
+    loadCapture,
+  );
+  return { previous, captures };
 }
 function validateExtraction(value: unknown): asserts value is Extraction {
   const errors = extractionErrors(value);
@@ -187,6 +336,8 @@ async function save(
   load: () => Promise<Capture[]>,
   documents: ReceiptDocument[],
   statements: D1PreparedStatement[],
+  loadCapture?: (id: string) => Promise<Capture | null>,
+  loadSelectedCaptures?: (ids: string[]) => Promise<Capture[]>,
 ) {
   return (await documentRoute(
     new Request(new URL("/api/documents", request.url), {
@@ -197,12 +348,16 @@ async function save(
     env,
     load,
     { statements, trustedProcessing: true },
+    loadCapture,
+    loadSelectedCaptures,
   ))!;
 }
 export async function processingRoute(
   request: Request,
   env: Env,
   load: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
+  loadSelectedCaptures?: (ids: string[]) => Promise<Capture[]>,
 ): Promise<Response | null> {
   const url = new URL(request.url),
     path = url.pathname,
@@ -270,9 +425,12 @@ export async function processingRoute(
       400,
       "Use distinct saved document IDs and exact revisions.",
     );
-    const stored = await storedDocuments(env);
+    const stored = await storedDocumentsByIds(
+      env,
+      requested.map(({ id }) => id),
+    );
     const changed = requested.map(({ id, revision }) => {
-      const current = stored.find((doc) => doc.id === id);
+      const current = stored.get(id);
       requireThat(
         current && current.revision === revision,
         409,
@@ -303,7 +461,15 @@ export async function processingRoute(
     const clearGuard = env.DB.prepare(
       "DELETE FROM processing_commits WHERE token=?",
     ).bind(guardToken);
-    return save(request, env, load, changed, [guard, clearGuard]);
+    return save(
+      request,
+      env,
+      load,
+      changed,
+      [guard, clearGuard],
+      loadCapture,
+      loadSelectedCaptures,
+    );
   }
   if (path === "/api/processing/readings" && method === "GET") {
     const id = url.searchParams.get("document_id");
@@ -568,16 +734,18 @@ export async function processingRoute(
       409,
       "Category changed. Reload before archiving.",
     );
-    const captures = await load(),
-      docs = await records(env, captures),
-      assigned = docs.filter(
-        (doc) =>
-          !doc.mergedInto &&
-          !doc.duplicateOf &&
-          doc.processing?.extraction.category_id === input.id,
-      );
+    const assigned = await env.DB.prepare(
+      `SELECT h.id FROM document_heads h
+       CROSS JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+       WHERE json_extract(v.payload,'$.mergedInto') IS NULL
+         AND json_extract(v.payload,'$.duplicateOf') IS NULL
+         AND json_extract(v.payload,'$.processing.extraction.category_id')=?
+       LIMIT 1`,
+    )
+      .bind(input.id)
+      .first<{ id: string }>();
     requireThat(
-      assigned.length === 0,
+      !assigned,
       409,
       "Reassign every retained document before archiving this category.",
     );
@@ -641,9 +809,7 @@ export async function processingRoute(
       400,
       "Explain the category choice using the receipt items.",
     );
-    const captures = await load(),
-      docs = await records(env, captures);
-    const doc = docs.find((d) => d.id === input.document_id);
+    const doc = await storedDocumentById(env, String(input.document_id ?? ""));
     requireThat(
       doc &&
         doc.processing &&
@@ -671,7 +837,15 @@ export async function processingRoute(
     // Existing human approval covers unchanged financial fields, with this explicit owner correction.
     if (doc.processing.has_human_review)
       doc.processing.human_review_revision = doc.revision + 1;
-    return save(request, env, async () => captures, [doc], []);
+    return save(
+      request,
+      env,
+      load,
+      [doc],
+      [],
+      loadCapture,
+      loadSelectedCaptures,
+    );
   }
   if (path === "/api/processing/claim" && method === "POST") {
     requireThat(
@@ -679,7 +853,7 @@ export async function processingRoute(
       403,
       "Model processing requires scoped machine credentials.",
     );
-    const input = await bodyJson(request);
+    const input = await bodyJson(request, 64 * 1024);
     requireThat(
       input.stage === "small" || input.stage === "large",
       400,
@@ -746,24 +920,19 @@ export async function processingRoute(
         409,
         "A claim token is permanently bound to its original request.",
       );
-    const captures = await load(),
-      docs = await records(env, captures);
-    const current = new Set(
-      captures.filter((c) => c.is_current).map((c) => c.id),
-    );
-    const time = new Map(captures.map((c) => [c.id, c.created_at]));
     const claimResponse = async (lock: Lock) => {
-      const document = docs.find(
-        (candidate) =>
-          candidate.id === lock.document_id &&
-          candidate.revision === lock.revision &&
-          !candidate.mergedInto &&
-          !candidate.duplicateOf,
-      );
+      const selected = await claimDocument(env, lock.document_id, loadCapture);
+      const document = selected?.document;
       requireThat(
-        document,
+        document &&
+          document.revision === lock.revision &&
+          !document.mergedInto &&
+          !document.duplicateOf,
         409,
         "Claimed document changed; wait for the lease to expire before retrying.",
+      );
+      const time = new Map(
+        selected!.captures.map((capture) => [capture.id, capture.created_at]),
       );
       return json({
         claim: {
@@ -838,51 +1007,73 @@ export async function processingRoute(
         "The claim token is already being resolved; retry only the exact same request.",
       );
     }
-    const jevReady = await jevReadyDocuments(env, docs, captures);
-    const candidates = docs
-      .filter(
-        (d) =>
-          !excluded.has(d.id) &&
-          !d.mergedInto &&
-          !d.duplicateOf &&
-          d.pages.some((p) => current.has(p.captureId)) &&
-          (input.stage === "small"
-            ? jevReady.has(d.id) &&
-              (!d.processing ||
-                d.processing.needs_reparse ||
-                (processingDisposition(d.processing) === "awaiting-pages" &&
-                  captures.length > d.processing.seen_capture_count))
-            : d.processing &&
-              jevReady.has(d.id) &&
-              !d.processing.needs_reparse &&
-              d.processing.large_model_confidence === null &&
-              !d.processing.has_human_review &&
-              (input.review_all === true
-                ? ["extracted", "model-review", "broken"]
-                : ["model-review", "broken"]
-              ).includes(processingDisposition(d.processing))),
-      )
-      .sort(
-        (a, b) =>
-          Number(!!a.processing && !a.processing.needs_reparse) -
-            Number(!!b.processing && !b.processing.needs_reparse) ||
-          (time.get(a.pages[0].captureId) ?? "").localeCompare(
-            time.get(b.pages[0].captureId) ?? "",
-          ) ||
-          a.id.localeCompare(b.id),
-      );
-    const d = targeted
-      ? docs.find(
-          (doc) => doc.id === input.document_id && !excluded.has(doc.id),
-        )
-      : candidates[0];
+    const count = await env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM captures",
+    ).first<{ total: number }>();
+    const captureCount = count?.total ?? 0;
+    let d: ReceiptDocument | null = null;
+    let currentPages: Capture[] = [];
+    if (targeted) {
+      const selected = excluded.has(input.document_id as string)
+        ? null
+        : await claimDocument(env, input.document_id as string, loadCapture);
+      d = selected?.document ?? null;
+      currentPages = selected?.captures ?? [];
+    } else {
+      const openTail = await jevOpenTailDocumentId(env);
+      let cursor: ClaimCandidate | null = null;
+      for (;;) {
+        const rows = await claimCandidateRows(
+          env,
+          input.stage,
+          excluded,
+          cursor,
+          captureCount,
+        );
+        if (!rows.length) break;
+        for (const row of rows) {
+          if (row.id === openTail) continue;
+          const selected = await claimDocument(env, row.id, loadCapture);
+          if (!selected) continue;
+          const candidate = selected.document;
+          if (
+            candidate.mergedInto ||
+            candidate.duplicateOf ||
+            !selected.captures.some((capture) => capture.is_current)
+          )
+            continue;
+          const eligible =
+            input.stage === "small"
+              ? !candidate.processing ||
+                candidate.processing.needs_reparse ||
+                (processingDisposition(candidate.processing) ===
+                  "awaiting-pages" &&
+                  captureCount > candidate.processing.seen_capture_count)
+              : !!candidate.processing &&
+                !candidate.processing.needs_reparse &&
+                candidate.processing.large_model_confidence === null &&
+                !candidate.processing.has_human_review &&
+                (input.review_all === true
+                  ? ["extracted", "model-review", "broken"]
+                  : ["model-review", "broken"]
+                ).includes(processingDisposition(candidate.processing));
+          if (eligible && (await jevSummary(env, candidate)).ready) {
+            d = candidate;
+            currentPages = selected.captures;
+            break;
+          }
+        }
+        if (d || rows.length < 25) break;
+        cursor = rows.at(-1)!;
+      }
+    }
     if (targeted) {
       requireThat(d, 404, "Review document not found.");
       requireThat(
         d.revision === input.revision &&
           !d.mergedInto &&
           !d.duplicateOf &&
-          d.pages.some((p) => current.has(p.captureId)) &&
+          currentPages.some((capture) => capture.is_current) &&
           !!d.processing &&
           !d.processing.has_human_review,
         409,
@@ -1009,10 +1200,8 @@ export async function processingRoute(
       409,
       "Finish the active model claim before confirming a PDF.",
     );
-    const input = await bodyJson(request),
-      captures = await load(),
-      docs = await records(env, captures);
-    const doc = docs.find((d) => d.id === input.document_id);
+    const input = await bodyJson(request);
+    const doc = await storedDocumentById(env, String(input.document_id ?? ""));
     requireThat(
       doc &&
         doc.revision === input.revision &&
@@ -1039,7 +1228,10 @@ export async function processingRoute(
         body: JSON.stringify({ documents: [doc] }),
       }),
       env,
-      async () => captures,
+      load,
+      undefined,
+      loadCapture,
+      loadSelectedCaptures,
     ))!;
   }
   if (path === "/api/processing/human-review" && method === "POST") {
@@ -1051,9 +1243,7 @@ export async function processingRoute(
     const input = await bodyJson(request, 1024 * 1024);
     validateExtraction(input.extraction);
     await categoryCheck(env, input.extraction);
-    const captures = await load(),
-      docs = await records(env, captures);
-    const doc = docs.find((d) => d.id === input.document_id);
+    const doc = await storedDocumentById(env, String(input.document_id ?? ""));
     requireThat(
       doc && doc.revision === input.revision,
       409,
@@ -1090,13 +1280,19 @@ export async function processingRoute(
       }),
       new Date().toISOString(),
     );
-    return save(request, env, async () => captures, [doc], [humanRecord]);
+    return save(
+      request,
+      env,
+      load,
+      [doc],
+      [humanRecord],
+      loadCapture,
+      loadSelectedCaptures,
+    );
   }
   if (path === "/api/processing/detach" && method === "POST") {
     const input = await bodyJson(request);
-    const captures = await load(),
-      docs = await records(env, captures);
-    const d = docs.find((d) => d.id === input.document_id);
+    const d = await storedDocumentById(env, String(input.document_id ?? ""));
     requireThat(
       d && d.revision === input.revision && d.pages.length > 1,
       409,
@@ -1129,7 +1325,9 @@ export async function processingRoute(
         409,
         "A model is processing a document. Retry when its lease finishes.",
       );
-    const separate = newDocument(captures.find((c) => c.id === p.captureId)!);
+    const detachedCapture = await loadCapture(p.captureId);
+    requireThat(detachedCapture, 503, "A source page is unavailable.");
+    const separate = newDocument(detachedCapture);
     separate.id = crypto.randomUUID();
     separate.pages = [p];
     d.pages = d.pages.filter((page) => page !== p);
@@ -1167,7 +1365,15 @@ export async function processingRoute(
         ).bind(lock.token),
       );
     }
-    return save(request, env, async () => captures, [d, separate], statements);
+    return save(
+      request,
+      env,
+      load,
+      [d, separate],
+      statements,
+      loadCapture,
+      loadSelectedCaptures,
+    );
   }
   requireThat(
     request.headers.has("authorization"),
@@ -1303,13 +1509,17 @@ export async function processingRoute(
     const frozen =
       lock.stage === "small"
         ? await (async () => {
-            const captures = await load();
+            const sources = await draftSources(
+              env,
+              input.documents,
+              loadCapture,
+            );
             return lunaDraft(
               input,
               lock.document_id,
               lock.revision,
-              await records(env, captures),
-              captures,
+              sources.previous,
+              sources.captures,
             );
           })()
         : input.extraction;
@@ -1363,6 +1573,14 @@ export async function processingRoute(
     );
     const frozen = JSON.parse(lock.draft!) as LunaDraft;
     requireThat(frozen.version === 1, 409, "Unsupported Luna draft.");
+    const draftDocument = frozen.documents.find(
+      (document) => document.id === lock.document_id,
+    );
+    requireThat(draftDocument, 409, "Frozen document is unavailable.");
+    const draftCaptures = await capturesForPages(
+      draftDocument.pages,
+      loadCapture,
+    );
     const pp =
       input.provider === "ppocr"
         ? await ppConfirmation(
@@ -1370,7 +1588,7 @@ export async function processingRoute(
             input,
             frozen,
             lock.document_id,
-            await load(),
+            draftCaptures,
           )
         : null;
     const checked = pp?.checked ?? checkQwen(input, frozen, lock.document_id);
@@ -1395,7 +1613,7 @@ export async function processingRoute(
         frozen,
         lock.document_id,
         input.extraction as Extraction,
-        await load(),
+        draftCaptures,
       ));
     const payload = JSON.stringify(pp?.payload ?? { qwen: checked, evidence });
     requireThat(
@@ -1447,71 +1665,94 @@ export async function processingRoute(
       409,
       "Save the independent parse before comparison.",
     );
-    const captures = await load(),
-      docs = await records(env, captures);
-    const doc = docs.find((d) => d.id === lock.document_id);
+    const selected = await claimDocument(env, lock.document_id, loadCapture);
+    const doc = selected?.document;
     requireThat(
       doc && doc.revision === lock.revision,
       409,
       "Claimed document changed.",
     );
-
-    const ordered = captures
-      .filter((c) => c.is_current)
+    const orderedPages = selected!.captures
+      .filter((capture) => capture.is_current)
       .sort(
         (a, b) =>
           a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
       );
-    const after = url.searchParams.get("after_capture");
-    const last = after
-      ? ordered.findIndex((c) => c.id === after)
-      : Math.max(
-          ...doc.pages.map((p) =>
-            ordered.findIndex((c) => c.id === p.captureId),
-          ),
-        );
-    requireThat(last >= 0, 400, "Unknown page cursor.");
-    const first = Math.min(
-      ...doc.pages
-        .map((p) => ordered.findIndex((c) => c.id === p.captureId))
-        .filter((i) => i >= 0),
+    requireThat(
+      orderedPages.length > 0,
+      409,
+      "Claimed pages are no longer current.",
     );
-    const neighbor = (c: (typeof ordered)[number]) => ({
-      id: c.id,
-      sha256: c.sha256,
-      created_at: c.created_at,
-      document_id: docs.find((d) => d.pages.some((p) => p.captureId === c.id))
-        ?.id,
-    });
+    const after = url.searchParams.get("after_capture");
+    const nextCursor = after ? await loadCapture(after) : orderedPages.at(-1)!;
+    requireThat(nextCursor?.is_current, 400, "Unknown page cursor.");
+    type Neighbor = {
+      id: string;
+      sha256: string;
+      created_at: string;
+      document_id: string;
+    };
+    const [previousImages, nextImages] = await Promise.all([
+      env.DB.prepare(
+        `SELECT captures.id,captures.sha256,captures.created_at,
+          COALESCE(page.document_id,captures.id) AS document_id
+         FROM captures LEFT JOIN document_pages page ON page.capture_id=captures.id
+         WHERE (${currentTake}) AND (captures.created_at,captures.id)<(?,?)
+         ORDER BY captures.created_at DESC,captures.id DESC LIMIT 2`,
+      )
+        .bind(orderedPages[0].created_at, orderedPages[0].id)
+        .all<Neighbor>(),
+      env.DB.prepare(
+        `SELECT captures.id,captures.sha256,captures.created_at,
+          COALESCE(page.document_id,captures.id) AS document_id
+         FROM captures LEFT JOIN document_pages page ON page.capture_id=captures.id
+         WHERE (${currentTake}) AND (captures.created_at,captures.id)>(?,?)
+         ORDER BY captures.created_at,captures.id LIMIT 2`,
+      )
+        .bind(nextCursor.created_at, nextCursor.id)
+        .all<Neighbor>(),
+    ]);
     const date = url.searchParams.get("date"),
       total = url.searchParams.get("total_minor"),
       currency = url.searchParams.get("currency");
-    const matches = docs.filter((d) => {
-      const e = d.processing?.extraction;
-      if (
-        !date ||
-        total === null ||
-        !currency ||
-        !e ||
-        e.total_minor === null ||
-        (e.currency !== null && e.currency !== currency) ||
-        d.mergedInto ||
-        d.duplicateOf ||
-        d.id === doc.id
-      )
-        return false;
-      // A slip can supply a receipt's hidden date/currency. Keep exact-amount
-      // candidates with those missing fields available for visual association.
-      const amountDelta = Math.abs(e.total_minor - Number(total));
-      return (
-        (!e.receipt_date ||
-          Math.abs(Date.parse(e.receipt_date) - Date.parse(date)) <=
-            3 * 86400000) &&
-        (e.receipt_date && e.currency
-          ? amountDelta <= Math.max(100, Math.abs(Number(total)) * 0.02)
-          : amountDelta === 0)
-      );
-    });
+    const requestedTotal = Number(total);
+    const matches =
+      date &&
+      total !== null &&
+      currency &&
+      Number.isFinite(requestedTotal) &&
+      Number.isFinite(Date.parse(date))
+        ? (
+            await env.DB.prepare(
+              `SELECT v.payload FROM document_heads h
+             CROSS JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+             WHERE h.id!=?
+               AND json_extract(v.payload,'$.mergedInto') IS NULL
+               AND json_extract(v.payload,'$.duplicateOf') IS NULL
+               AND json_extract(v.payload,'$.processing.extraction.total_minor') IS NOT NULL
+               AND (json_extract(v.payload,'$.processing.extraction.currency') IS NULL
+                 OR json_extract(v.payload,'$.processing.extraction.currency')=?)
+               AND (json_extract(v.payload,'$.processing.extraction.receipt_date') IS NULL
+                 OR ABS(julianday(json_extract(v.payload,'$.processing.extraction.receipt_date'))-julianday(?))<=3)
+               AND ((json_extract(v.payload,'$.processing.extraction.receipt_date') IS NOT NULL
+                 AND json_extract(v.payload,'$.processing.extraction.currency') IS NOT NULL
+                 AND ABS(json_extract(v.payload,'$.processing.extraction.total_minor')-?)<=?)
+                 OR ((json_extract(v.payload,'$.processing.extraction.receipt_date') IS NULL
+                   OR json_extract(v.payload,'$.processing.extraction.currency') IS NULL)
+                   AND json_extract(v.payload,'$.processing.extraction.total_minor')=?))
+             ORDER BY h.id LIMIT 51`,
+            )
+              .bind(
+                doc.id,
+                currency,
+                date,
+                requestedTotal,
+                Math.max(100, Math.abs(requestedTotal) * 0.02),
+                requestedTotal,
+              )
+              .all<{ payload: string }>()
+          ).results.map((row) => JSON.parse(row.payload) as ReceiptDocument)
+        : [];
     const relevantIds = [doc.id, ...matches.slice(0, 50).map((d) => d.id)];
     const rejected = (
       await env.DB.prepare(
@@ -1530,11 +1771,8 @@ export async function processingRoute(
           ? JSON.parse(lock.draft).extraction
           : JSON.parse(lock.draft)
         : null,
-      previous_images: ordered
-        .slice(Math.max(0, first - 2), first)
-        .reverse()
-        .map(neighbor),
-      next_images: ordered.slice(last + 1, last + 3).map(neighbor),
+      previous_images: previousImages.results,
+      next_images: nextImages.results,
       candidates: matches.slice(0, 50).map((d) => ({
         id: d.id,
         revision: d.revision,
@@ -1566,9 +1804,8 @@ export async function processingRoute(
       409,
       "Save Astra's independent full parse first.",
     );
-    const captures = await load(),
-      docs = await records(env, captures);
-    const previous = docs.find((d) => d.id === lock.document_id);
+    const selected = await claimDocument(env, lock.document_id, loadCapture);
+    const previous = selected?.document;
     requireThat(
       previous && previous.revision === lock.revision,
       409,
@@ -1619,7 +1856,10 @@ export async function processingRoute(
     requireThat(
       Array.isArray(changed) &&
         changed.length > 0 &&
-        changed.length <= MAX_SUBMITTED_DOCUMENTS,
+        changed.length <= MAX_SUBMITTED_DOCUMENTS &&
+        changed.every(
+          (item) => item && typeof item.id === "string" && UUID.test(item.id),
+        ),
       400,
       "Submit at most 20 affected documents.",
     );
@@ -1632,16 +1872,31 @@ export async function processingRoute(
     // Existing aliases must continue to point directly at the retained record.
     // Normalize them inside this leased atomic save so a whole-document merge
     // cannot create leaf -> absorbed donor -> target relationship chains.
-    retargetAbsorbedAliases(changed, docs, d.id);
+    const absorbedIds = changed
+      .filter((item) => item.mergedInto === d.id)
+      .map((item) => item.id);
+    const [stored, aliases] = await Promise.all([
+      storedDocumentsByIds(
+        env,
+        changed.map((item) => item.id),
+      ),
+      storedAliasesForTargets(env, absorbedIds),
+    ]);
+    for (const alias of aliases) stored.set(alias.id, alias);
+    retargetAbsorbedAliases(changed, aliases, d.id);
     requireThat(
       changed.length <= MAX_DOCUMENT_CHANGES,
       400,
       "The server cannot safely retarget more than 100 affected documents in one merge; preserve the claim for owner-reviewed repair.",
     );
+    const changedIds = changed.map((item) => item.id);
     const rejected = (
       await env.DB.prepare(
-        "SELECT capture_id,document_id FROM rejected_associations",
-      ).all<{ capture_id: string; document_id: string }>()
+        `SELECT capture_id,document_id FROM rejected_associations
+         WHERE document_id IN (${changedIds.map(() => "?").join(",")})`,
+      )
+        .bind(...changedIds)
+        .all<{ capture_id: string; document_id: string }>()
     ).results;
     for (const item of changed) {
       requireThat(
@@ -1649,7 +1904,8 @@ export async function processingRoute(
         400,
         "Invalid changed document.",
       );
-      const old = docs.find((d) => d.id === item.id);
+      const old =
+        stored.get(item.id) ?? (item.id === previous.id ? previous : undefined);
       // Only the target receives fresh model validation. Other affected records are invalidated.
       item.processing = old?.processing
         ? structuredClone(old.processing)
@@ -1671,10 +1927,18 @@ export async function processingRoute(
         "This page association was rejected; keep it detached for another match.",
       );
     }
+    const relevantCaptures = await Promise.all(
+      d.pages.map((page) => loadCapture(page.captureId)),
+    );
+    requireThat(
+      relevantCaptures.every((capture) => capture !== null),
+      409,
+      "A submitted source page is unavailable.",
+    );
     const comparison = await compareStoredOcr(env, d, input.extraction, {
       engine: "ppocr",
       strictRegion: true,
-      captures,
+      captures: relevantCaptures as Capture[],
     });
     requireThat(
       comparison.status !== "missing",
@@ -1685,10 +1949,7 @@ export async function processingRoute(
     // Retain inherited review notes even when reassessment omits or paraphrases them.
     // The immutable attempt still stores the model's exact submitted reading below.
     for (const donor of changed.filter((item) => item.mergedInto === d.id)) {
-      const required = requiredMergeReviewReasons(
-        donor,
-        docs.find((old) => old.id === donor.id),
-      );
+      const required = requiredMergeReviewReasons(donor, stored.get(donor.id));
       extracted.uncertainties = [
         ...new Set([...extracted.uncertainties, ...required.uncertainties]),
       ];
@@ -1734,7 +1995,10 @@ export async function processingRoute(
     );
     d.processing!.ocr_comparison = comparison;
     d.processing!.jev_assessment = jevDocument;
-    d.processing!.seen_capture_count = captures.length;
+    const count = await env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM captures",
+    ).first<{ total: number }>();
+    d.processing!.seen_capture_count = count?.total ?? 0;
     const saved = changed.map((document) => ({
       id: document.id,
       revision: document.revision + 1,
@@ -1767,7 +2031,15 @@ export async function processingRoute(
         lock.token,
       ),
     ];
-    return save(request, env, async () => captures, changed, statements);
+    return save(
+      request,
+      env,
+      load,
+      changed,
+      statements,
+      loadCapture,
+      loadSelectedCaptures,
+    );
   }
   throw new HttpError(404, "Processing route not found.");
 }
