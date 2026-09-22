@@ -2412,6 +2412,15 @@ it("seeds verified continuity once and checks only a newly scanned page", async 
       .first<{ count: number }>())!.count,
   ).toBe(2);
   expect(await scanCount()).toBe(1);
+  const status = await (
+    await mf.dispatchFetch(`${origin}/api/jev/status`, {
+      headers: { ...ownerHeaders, Authorization: `Bearer ${processingToken}` },
+    })
+  ).json<any>();
+  expect(status).toMatchObject({
+    current_captures_continuity_processed: 2,
+    current_captures_continuity_pending: 0,
+  });
 
   const capture = await saveCapture();
   const createdAt = "2026-01-01T00:00:02.000Z";

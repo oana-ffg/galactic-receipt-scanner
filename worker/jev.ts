@@ -1379,20 +1379,6 @@ async function latestPipelineRun(env: Env) {
   ).first<JevPipelineRun>();
 }
 
-async function currentWaitingCaptureCount(env: Env, captures: Capture[]) {
-  const current = new Set(
-    captures
-      .filter((capture) => capture.is_current)
-      .map((capture) => capture.id),
-  );
-  const waiting = (
-    await env.DB.prepare(
-      "SELECT DISTINCT capture_id FROM jev_jobs WHERE status='waiting'",
-    ).all<{ capture_id: string }>()
-  ).results;
-  return waiting.filter((job) => current.has(job.capture_id)).length;
-}
-
 async function currentBoundary(env: Env): Promise<OrderedCapture | null> {
   return env.DB.prepare(
     `SELECT captures.id,captures.created_at,captures.sha256 FROM captures
@@ -3219,33 +3205,47 @@ export async function jevRoute(
       "SELECT COALESCE(ineligible_reason,'unspecified') AS reason,COUNT(*) AS count FROM jev_jobs WHERE status='ineligible' GROUP BY COALESCE(ineligible_reason,'unspecified') ORDER BY reason",
     ).all<{ reason: string; count: number }>();
     const pipeline = await latestPipelineRun(env);
-    const captures = (await loadCaptures()).filter(
-      (capture) => capture.is_current,
-    );
-    const waitingCurrentCaptures = await currentWaitingCaptureCount(
-      env,
-      captures,
-    );
-    const pageHeads = (
-      await env.DB.prepare(
-        "SELECT capture_id,source_sha256 FROM jev_page_heads",
-      ).all<Pick<PageHead, "capture_id" | "source_sha256">>()
-    ).results;
-    const headSources = new Map(
-      pageHeads.map((head) => [head.capture_id, head.source_sha256]),
-    );
-    const missingPageHeads = captures.filter(
-      (capture) => headSources.get(capture.id) !== capture.sha256,
-    );
+    const coverage = await env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+         COALESCE(SUM(head.capture_id IS NULL),0) AS missing_heads,
+         COALESCE(SUM(edge.capture_id IS NOT NULL
+           AND edge.source_sha256=captures.sha256
+           AND edge.ocr_sha256=head.ocr_sha256
+           AND (edge.previous_capture_id IS NULL
+             OR edge.previous_source_sha256 IS NOT NULL)),0) AS continuity_done
+       FROM captures
+       LEFT JOIN jev_page_heads head ON head.capture_id=captures.id
+         AND head.source_sha256=captures.sha256
+       LEFT JOIN jev_continuity_edges edge ON edge.capture_id=captures.id
+       WHERE (${currentTake})`,
+    ).first<{
+      total: number;
+      missing_heads: number;
+      continuity_done: number;
+    }>();
+    const waitingCurrentCaptures = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT captures.id) AS count FROM jev_jobs job
+       JOIN captures ON captures.id=job.capture_id
+       WHERE job.status='waiting' AND (${currentTake})`,
+    ).first<{ count: number }>();
+    const missingPageHeads = await env.DB.prepare(
+      `SELECT captures.id FROM captures LEFT JOIN jev_page_heads head
+         ON head.capture_id=captures.id AND head.source_sha256=captures.sha256
+       WHERE (${currentTake}) AND head.capture_id IS NULL
+       ORDER BY captures.created_at,captures.id LIMIT 25`,
+    ).all<{ id: string }>();
     return json({
       configured: Boolean(env.TYPESAFE_API_KEY),
       jobs: counts.results,
       historical_ineligible_job_reasons: ineligibleReasons.results,
-      current_captures_with_waiting_jobs: waitingCurrentCaptures,
-      current_captures_missing_page_head: missingPageHeads.length,
-      missing_page_head_capture_ids: missingPageHeads
-        .slice(0, 25)
-        .map((capture) => capture.id),
+      current_captures_with_waiting_jobs: waitingCurrentCaptures?.count ?? 0,
+      current_captures_missing_page_head: coverage?.missing_heads ?? 0,
+      missing_page_head_capture_ids: missingPageHeads.results.map(
+        (capture) => capture.id,
+      ),
+      current_captures_continuity_processed: coverage?.continuity_done ?? 0,
+      current_captures_continuity_pending:
+        (coverage?.total ?? 0) - (coverage?.continuity_done ?? 0),
       pipeline: pipeline
         ? {
             version: pipeline.version,
