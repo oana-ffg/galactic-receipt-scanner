@@ -3357,37 +3357,38 @@ async function reconcileDetachedPayments(
       .all<PageHead>()
   ).results;
   if (unindexed.length) {
-    for (const head of unindexed) {
-      const capture = await loadCapture(head.capture_id);
-      requireThat(
-        capture?.is_current && capture.sha256 === head.source_sha256,
-        503,
-        "Indexed receipt page changed during payment preparation.",
+    for (let offset = 0; offset < unindexed.length; offset += 5) {
+      const prepared = await Promise.all(
+        unindexed.slice(offset, offset + 5).map(async (head) => {
+          const capture = await loadCapture(head.capture_id);
+          requireThat(
+            capture?.is_current && capture.sha256 === head.source_sha256,
+            503,
+            "Indexed receipt page changed during payment preparation.",
+          );
+          const document = await documentForCapture(env, capture);
+          const page = document.pages.find(
+            (item) => item.captureId === head.capture_id,
+          );
+          requireThat(page, 503, "Indexed receipt page is unavailable.");
+          const found = await pinnedPpOcr(env, page, head.ocr_sha256);
+          requireThat(
+            found,
+            503,
+            "Pinned PP OCR is unavailable for detached-payment ranking.",
+          );
+          return env.DB.prepare(
+            "UPDATE jev_page_heads SET date_candidates=COALESCE(date_candidates,?),payment_match_index=COALESCE(payment_match_index,?) WHERE capture_id=? AND source_sha256=? AND ocr_sha256=?",
+          ).bind(
+            JSON.stringify(ocrDateCandidates(found.value.text)),
+            JSON.stringify(paymentMatchIndex(found.value.text)),
+            head.capture_id,
+            head.source_sha256,
+            head.ocr_sha256,
+          );
+        }),
       );
-      const document = await documentForCapture(env, capture);
-      const page = document.pages.find(
-        (item) => item.captureId === head.capture_id,
-      );
-      requireThat(page, 503, "Indexed receipt page is unavailable.");
-      const found = await pinnedPpOcr(env, page, head.ocr_sha256);
-      requireThat(
-        found,
-        503,
-        "Pinned PP OCR is unavailable for detached-payment ranking.",
-      );
-      const dates = ocrDateCandidates(found.value.text);
-      const matchIndex = paymentMatchIndex(found.value.text);
-      await env.DB.prepare(
-        "UPDATE jev_page_heads SET date_candidates=COALESCE(date_candidates,?),payment_match_index=COALESCE(payment_match_index,?) WHERE capture_id=? AND source_sha256=? AND ocr_sha256=?",
-      )
-        .bind(
-          JSON.stringify(dates),
-          JSON.stringify(matchIndex),
-          head.capture_id,
-          head.source_sha256,
-          head.ocr_sha256,
-        )
-        .run();
+      await env.DB.batch(prepared);
     }
     return {
       result: { status: "indexed", pages: unindexed.length },
