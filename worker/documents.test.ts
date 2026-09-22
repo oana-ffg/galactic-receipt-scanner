@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
+import { documentRoute } from "./documents";
 import type { Quality } from "../web/types";
 let mf: Awaited<ReturnType<typeof runtime>>;
 beforeAll(async () => {
@@ -26,7 +27,7 @@ async function request(
     },
   });
 }
-async function capture(quality: Partial<Quality> = {}) {
+async function capture(quality: Partial<Quality> = {}, retakeOf?: string) {
   const id = crypto.randomUUID();
   const r = await request(
     `/api/captures/${id}`,
@@ -34,6 +35,7 @@ async function capture(quality: Partial<Quality> = {}) {
     new Uint8Array([255, 216, 255, Math.floor(Math.random() * 255)]),
     {
       "X-Capture-Status": "accepted",
+      ...(retakeOf ? { "X-Retake-Of": retakeOf } : {}),
       "X-Capture-Metadata": JSON.stringify({
         sourcePixels: [1400, 2200],
         quality: { ok: true, receiptPixels: [1400, 2200], ...quality },
@@ -135,6 +137,14 @@ it("preserves scan times and sources through non-adjacent grouping, splitting an
   const second = await (await request("/api/documents")).json();
   const grouped = second.documents.find((d: any) => d.id === a.id);
   expect(grouped.pages.map((p: any) => p.captureId)).toEqual([a.id, b.id]);
+  expect(
+    (await (await request(`/api/documents?captureId=${b.id}`)).json()).document
+      .id,
+  ).toBe(a.id);
+  const donorAlias = (await (await request(`/api/documents/${b.id}`)).json())
+    .document;
+  expect(donorAlias.pages).toEqual([]);
+  expect(donorAlias.mergedInto).toBe(a.id);
   const mergedLayouts = (await (
     await request("/api/processing/ocr-layouts")
   ).json()) as any;
@@ -156,6 +166,24 @@ it("preserves scan times and sources through non-adjacent grouping, splitting an
   expect(
     (await (await request(`/api/documents/${a.id}/history`)).json()).length,
   ).toBe(3);
+});
+it("reads one document without loading the collection and excludes an unsaved retired take", async () => {
+  const source = await capture();
+  const db = await mf.getD1Database("DB");
+  const response = await documentRoute(
+    new Request(`${origin}/api/documents/${source.id}`),
+    { DB: db } as any,
+    async () => {
+      throw Error("full capture collection was loaded");
+    },
+    undefined,
+    async (id) => (id === source.id ? source : null),
+  );
+  expect(response?.status).toBe(200);
+  expect(((await response!.json()) as any).document.id).toBe(source.id);
+  const retake = await capture({}, source.id);
+  expect((await request(`/api/documents/${source.id}`)).status).toBe(404);
+  expect((await request(`/api/documents/${retake.id}`)).status).toBe(200);
 });
 it("rejects spoofed sources, missing fields, cyclic duplicates and invalid money", async () => {
   const c = await capture(),

@@ -302,7 +302,13 @@ async function route(
   if (jevResponse) return jevResponse;
   const processingResponse = await processingRoute(request, env, loadCaptures);
   if (processingResponse) return processingResponse;
-  const documentResponse = await documentRoute(request, env, loadCaptures);
+  const documentResponse = await documentRoute(
+    request,
+    env,
+    loadCaptures,
+    undefined,
+    loadCapture,
+  );
   if (documentResponse) return documentResponse;
   const method = request.method;
   const outlineResponse = await outlineRoute(request, env);

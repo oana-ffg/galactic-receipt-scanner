@@ -291,11 +291,68 @@ export async function documentRoute(
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
   commit?: { statements: D1PreparedStatement[]; trustedProcessing: boolean },
+  loadCapture?: (id: string) => Promise<Capture | null>,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/documents")) return null;
-  const captures = await loadCaptures();
-  const stored = await storedDocuments(env);
+  const single =
+    request.method === "GET"
+      ? url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})$/)
+      : null;
+  const sourceId =
+    request.method === "GET" && url.pathname === "/api/documents"
+      ? url.searchParams.get("captureId")
+      : null;
+  let captures: Capture[];
+  let stored: ReceiptDocument[];
+  if ((single || sourceId) && loadCapture) {
+    const requestedId = single?.[1] ?? sourceId!;
+    const page = sourceId
+      ? await env.DB.prepare(
+          "SELECT document_id FROM document_pages WHERE capture_id=?",
+        )
+          .bind(sourceId)
+          .first<{ document_id: string }>()
+      : null;
+    const saved = await storedDocumentById(
+      env,
+      page?.document_id ?? requestedId,
+    );
+    if (
+      saved &&
+      (single || saved.pages.some((item) => item.captureId === sourceId))
+    ) {
+      stored = [saved];
+      const selected = await Promise.all(
+        saved.pages.map((item) => loadCapture(item.captureId)),
+      );
+      requireThat(
+        selected.every((item) => item !== null),
+        503,
+        "A saved document page is unavailable.",
+      );
+      captures = selected as Capture[];
+    } else {
+      const capture = await loadCapture(requestedId);
+      const assignment =
+        capture &&
+        (await env.DB.prepare(
+          "SELECT document_id FROM document_pages WHERE capture_id=?",
+        )
+          .bind(capture.id)
+          .first<{ document_id: string }>());
+      requireThat(
+        capture?.is_current && !assignment,
+        404,
+        "Document not found.",
+      );
+      stored = [];
+      captures = [capture];
+    }
+  } else {
+    captures = await loadCaptures();
+    stored = await storedDocuments(env);
+  }
   const assigned = new Set(
     stored.flatMap((d) => d.pages.map((p) => p.captureId)),
   );
