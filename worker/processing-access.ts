@@ -36,6 +36,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/processing/pdf-review",
       "/api/processing/reparse",
       "/api/jev/backfill",
+      "/api/jev/seed-completed-continuity",
       "/api/jev/completeness",
       "/api/jev/group-audit",
       "/api/jev/relationship-benchmark",

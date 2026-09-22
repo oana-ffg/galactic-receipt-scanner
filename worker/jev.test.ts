@@ -2498,6 +2498,165 @@ it("seeds verified continuity once and checks only a newly scanned page", async 
   });
 });
 
+it("seeds completed scan markers without advancing an active later pipeline", async () => {
+  const processingToken = `rsc_${"s".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: (request: Request) =>
+      paymentJevResponse(request, "unrelated"),
+  });
+  const db = await mf.getD1Database("DB");
+  const captures = [await saveCapture(), await saveCapture()];
+  for (const [index, capture] of captures.entries()) {
+    const at = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(at, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT ${index}`, at);
+  }
+  expect((await drainBackfill(processingToken)).result.phase).toBe("complete");
+  const beforeAssessments = await db
+    .prepare("SELECT COUNT(*) AS count FROM jev_assessments")
+    .first<{ count: number }>();
+  await db.prepare("DELETE FROM jev_continuity_edges").run();
+  await db
+    .prepare("UPDATE jev_jobs SET status='classified' WHERE capture_id=?")
+    .bind(captures[1].id)
+    .run();
+  await db
+    .prepare(
+      `INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,created_at,updated_at)
+     SELECT 'later-run',8,'group',snapshot_created_at,snapshot_capture_id,
+       '2026-02-01T00:00:00.000Z','2026-02-01T00:00:00.000Z'
+     FROM jev_pipeline_runs WHERE phase='complete' LIMIT 1`,
+    )
+    .run();
+  const response = await mf.dispatchFetch(
+    `${origin}/api/jev/seed-completed-continuity`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: "{}",
+    },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ seeded: 2 });
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_continuity_edges")
+      .first(),
+  ).toEqual({ count: 2 });
+  const again = await mf.dispatchFetch(
+    `${origin}/api/jev/seed-completed-continuity`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: "{}",
+    },
+  );
+  expect(await again.json()).toEqual({ seeded: 0 });
+  expect(
+    await db
+      .prepare("SELECT phase FROM jev_pipeline_runs WHERE id='later-run'")
+      .first(),
+  ).toEqual({ phase: "group" });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM jev_assessments").first(),
+  ).toEqual(beforeAssessments);
+});
+
+it("leaves a changed OCR page and its successor pending during historical seeding", async () => {
+  const processingToken = `rsc_${"h".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: (request: Request) =>
+      paymentJevResponse(request, "unrelated"),
+  });
+  const db = await mf.getD1Database("DB");
+  const captures = [
+    await saveCapture(),
+    await saveCapture(),
+    await saveCapture(),
+  ];
+  for (const [index, capture] of captures.entries()) {
+    const at = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(at, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT ${index}`, at);
+  }
+  expect((await drainBackfill(processingToken)).result.phase).toBe("complete");
+  await db.prepare("DELETE FROM jev_continuity_edges").run();
+  const changedOcr = await seedHistoricalOcr(
+    captures[0],
+    "SHOP RECEIPT REVISED OCR",
+    "2026-02-01T00:00:00.000Z",
+  );
+  await db
+    .prepare(
+      `INSERT INTO jev_assessments(id,task,subject_id,subject_revision,candidate_id,candidate_revision,model,input_sha256,payload,created_at)
+     SELECT 'later-role',task,subject_id,subject_revision,candidate_id,candidate_revision,
+       model,'later-input',json_set(payload,'$.input.ocr_sha256',?),
+       '2099-01-01T00:00:00.000Z'
+     FROM jev_assessments WHERE id=(SELECT assessment_id FROM jev_page_heads WHERE capture_id=?)`,
+    )
+    .bind(changedOcr, captures[0].id)
+    .run();
+  await db
+    .prepare(
+      "UPDATE jev_page_heads SET ocr_sha256=?,assessment_id='later-role' WHERE capture_id=?",
+    )
+    .bind(changedOcr, captures[0].id)
+    .run();
+  await db
+    .prepare(
+      "UPDATE jev_jobs SET ocr_sha256=?,status='classified' WHERE capture_id=?",
+    )
+    .bind(changedOcr, captures[0].id)
+    .run();
+  const response = await mf.dispatchFetch(
+    `${origin}/api/jev/seed-completed-continuity`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: "{}",
+    },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ seeded: 1 });
+  expect(
+    (
+      await db
+        .prepare("SELECT capture_id FROM jev_continuity_edges")
+        .all<{ capture_id: string }>()
+    ).results,
+  ).toEqual([{ capture_id: captures[2].id }]);
+});
+
 it("leaves the open tail unclassified until the following raw capture has PP OCR", async () => {
   const processingToken = `rsc_${"o".repeat(43)}`;
   const relationshipPairs: string[] = [];

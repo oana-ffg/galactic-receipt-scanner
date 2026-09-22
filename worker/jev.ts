@@ -1380,6 +1380,12 @@ async function latestPipelineRun(env: Env) {
   ).first<JevPipelineRun>();
 }
 
+async function latestCompletedPipelineRun(env: Env) {
+  return env.DB.prepare(
+    "SELECT * FROM jev_pipeline_runs WHERE phase='complete' ORDER BY created_at DESC,id DESC LIMIT 1",
+  ).first<JevPipelineRun>();
+}
+
 async function currentBoundary(env: Env): Promise<OrderedCapture | null> {
   return env.DB.prepare(
     `SELECT captures.id,captures.created_at,captures.sha256 FROM captures
@@ -2233,13 +2239,16 @@ async function orderedCapture(
 async function seedCompletedContinuity(
   env: Env,
   completed: JevPipelineRun | null,
+  repair = false,
 ) {
-  if (!completed || completed.phase !== "complete") return;
-  const existing = await env.DB.prepare(
-    "SELECT 1 AS found FROM jev_continuity_edges LIMIT 1",
-  ).first<{ found: number }>();
-  if (existing) return;
-  await env.DB.prepare(
+  if (!completed || completed.phase !== "complete") return 0;
+  if (!repair) {
+    const existing = await env.DB.prepare(
+      "SELECT 1 AS found FROM jev_continuity_edges LIMIT 1",
+    ).first<{ found: number }>();
+    if (existing) return 0;
+  }
+  const result = await env.DB.prepare(
     `INSERT OR IGNORE INTO jev_continuity_edges(
        capture_id,scan_created_at,source_sha256,ocr_sha256,
        previous_capture_id,previous_source_sha256,previous_ocr_sha256,
@@ -2247,26 +2256,37 @@ async function seedCompletedContinuity(
      SELECT id,created_at,sha256,ocr_sha256,previous_id,previous_sha256,
        previous_ocr_sha256,'verified-history',NULL,?
      FROM (
-       SELECT captures.id,captures.created_at,captures.sha256,head.ocr_sha256,
+       SELECT captures.id,captures.created_at,captures.sha256,
+         CASE WHEN role.id IS NOT NULL THEN head.ocr_sha256 END AS ocr_sha256,
          LAG(captures.id) OVER scan_order AS previous_id,
          LAG(captures.sha256) OVER scan_order AS previous_sha256,
-         LAG(head.ocr_sha256) OVER scan_order AS previous_ocr_sha256
+         LAG(CASE WHEN role.id IS NOT NULL THEN head.ocr_sha256 END)
+           OVER scan_order AS previous_ocr_sha256
        FROM captures LEFT JOIN jev_page_heads head
          ON head.capture_id=captures.id AND head.source_sha256=captures.sha256
+       LEFT JOIN jev_assessments role
+         ON role.id=head.assessment_id AND role.task='page-role'
+         AND role.subject_id=captures.id AND role.created_at<=?
+         AND json_extract(role.payload,'$.input.ocr_sha256')=head.ocr_sha256
        WHERE (${currentTake}) AND (captures.created_at,captures.id)<=(?,?)
        WINDOW scan_order AS (ORDER BY captures.created_at,captures.id)
      ) ordered
-     WHERE ocr_sha256 IS NOT NULL AND EXISTS (
+     WHERE ocr_sha256 IS NOT NULL
+       AND (previous_id IS NULL OR previous_ocr_sha256 IS NOT NULL)
+       AND EXISTS (
        SELECT 1 FROM jev_jobs job WHERE job.capture_id=ordered.id
-         AND job.ocr_sha256=ordered.ocr_sha256 AND job.status='complete'
+         AND job.ocr_sha256=ordered.ocr_sha256
+         AND job.status IN ('complete','classified')
      )`,
   )
     .bind(
       new Date().toISOString(),
+      completed.updated_at,
       completed.snapshot_created_at,
       completed.snapshot_capture_id,
     )
     .run();
+  return result.meta.changes;
 }
 
 async function nextContinuityCapture(
@@ -3202,6 +3222,15 @@ export async function jevRoute(
     403,
     "Jev processing requires scoped machine credentials.",
   );
+  if (
+    url.pathname === "/api/jev/seed-completed-continuity" &&
+    request.method === "POST"
+  ) {
+    const completed = await latestCompletedPipelineRun(env);
+    return json({
+      seeded: await seedCompletedContinuity(env, completed, true),
+    });
+  }
   if (url.pathname === "/api/jev/status" && request.method === "GET") {
     const counts = await env.DB.prepare(
       "SELECT status,COUNT(*) AS count FROM jev_jobs GROUP BY status",
@@ -3737,7 +3766,7 @@ export async function jevRoute(
     let run = await activePipelineRun(env);
     if (!run) {
       const latest = await latestPipelineRun(env);
-      await seedCompletedContinuity(env, latest);
+      await seedCompletedContinuity(env, await latestCompletedPipelineRun(env));
       const boundary = await currentBoundary(env);
       if (boundary) {
         const probe: JevPipelineRun = {
