@@ -2239,7 +2239,7 @@ async function orderedCapture(
 async function seedCompletedContinuity(
   env: Env,
   completed: JevPipelineRun | null,
-  repair = false,
+  repair?: { cutoff?: string; captureIds?: string[] },
 ) {
   if (!completed || completed.phase !== "complete") return 0;
   if (!repair) {
@@ -2277,13 +2277,14 @@ async function seedCompletedContinuity(
        SELECT 1 FROM jev_jobs job WHERE job.capture_id=ordered.id
          AND job.ocr_sha256=ordered.ocr_sha256
          AND job.status IN ('complete','classified')
-     )`,
+     )${repair?.captureIds ? ` AND ordered.id IN (${repair.captureIds.map(() => "?").join(",")})` : ""}`,
   )
     .bind(
       new Date().toISOString(),
-      completed.updated_at,
+      repair?.cutoff ?? completed.updated_at,
       completed.snapshot_created_at,
       completed.snapshot_capture_id,
+      ...(repair?.captureIds ?? []),
     )
     .run();
   return result.meta.changes;
@@ -3227,8 +3228,40 @@ export async function jevRoute(
     request.method === "POST"
   ) {
     const completed = await latestCompletedPipelineRun(env);
+    const input = await bodyJson(request);
+    const cutoff = input.replay_completed_at;
+    const captureIds = input.capture_ids;
+    let repair: { cutoff?: string; captureIds?: string[] } = {};
+    // A scan replay may finish while later pipeline phases still run.
+    if (cutoff !== undefined || captureIds !== undefined) {
+      requireThat(
+        typeof cutoff === "string" &&
+          !Number.isNaN(Date.parse(cutoff)) &&
+          new Date(cutoff).toISOString() === cutoff &&
+          completed &&
+          cutoff > completed.updated_at &&
+          Date.parse(cutoff) <= Date.now() &&
+          Array.isArray(captureIds) &&
+          captureIds.length > 0 &&
+          captureIds.length <= 25 &&
+          captureIds.every((id) => typeof id === "string" && UUID.test(id)) &&
+          new Set(captureIds).size === captureIds.length,
+        400,
+        "Provide a later verified replay time and up to 25 capture IDs.",
+      );
+      const latest = await latestPipelineRun(env);
+      requireThat(
+        latest &&
+          latest.snapshot_created_at === completed.snapshot_created_at &&
+          latest.snapshot_capture_id === completed.snapshot_capture_id &&
+          cutoff <= latest.updated_at,
+        409,
+        "Replay snapshot does not match the completed Jev snapshot.",
+      );
+      repair = { cutoff, captureIds: captureIds as string[] };
+    }
     return json({
-      seeded: await seedCompletedContinuity(env, completed, true),
+      seeded: await seedCompletedContinuity(env, completed, repair),
     });
   }
   if (url.pathname === "/api/jev/status" && request.method === "GET") {

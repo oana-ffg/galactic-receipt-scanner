@@ -2666,6 +2666,57 @@ it("leaves a changed OCR page and its successor pending during historical seedin
       (page: { capture_id: string }) => page.capture_id,
     ),
   ).toEqual([captures[0].id, captures[1].id]);
+
+  // A later saved scan replay can establish just these two outstanding pages.
+  await db
+    .prepare(
+      "UPDATE jev_assessments SET created_at='2026-01-15T00:00:00.000Z' WHERE task='page-role' AND id!='later-role'",
+    )
+    .run();
+  await db
+    .prepare(
+      "UPDATE jev_assessments SET created_at='2026-03-01T00:00:00.000Z' WHERE id='later-role'",
+    )
+    .run();
+  await db
+    .prepare(
+      "UPDATE jev_pipeline_runs SET created_at='2026-01-01T00:00:00.000Z',updated_at='2026-02-01T00:00:00.000Z' WHERE phase='complete'",
+    )
+    .run();
+  await db
+    .prepare(
+      `INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,created_at,updated_at)
+     SELECT 'later-run',8,'group',snapshot_created_at,snapshot_capture_id,
+       '2026-02-02T00:00:00.000Z','2026-04-01T00:00:00.000Z'
+     FROM jev_pipeline_runs WHERE phase='complete' LIMIT 1`,
+    )
+    .run();
+  const replay = await mf.dispatchFetch(
+    `${origin}/api/jev/seed-completed-continuity`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: JSON.stringify({
+        replay_completed_at: "2026-03-15T00:00:00.000Z",
+        capture_ids: [captures[0].id, captures[1].id],
+      }),
+    },
+  );
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual({ seeded: 2 });
+  const after = await (
+    await mf.dispatchFetch(`${origin}/api/jev/status`, {
+      headers: { ...ownerHeaders, Authorization: `Bearer ${processingToken}` },
+    })
+  ).json<any>();
+  expect(after.current_captures_continuity_pending).toBe(0);
+  expect(after.pipeline.phase).toBe("group");
 });
 
 it("leaves the open tail unclassified until the following raw capture has PP OCR", async () => {
