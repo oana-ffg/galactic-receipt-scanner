@@ -24,7 +24,7 @@ import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
 import { authorizeProcessor } from "./processing-access";
 import { connectionRoute } from "./connections";
-import { jevRoute, queueJevJob, runJevJob } from "./jev";
+import { jevRoute, paymentMatchesRoute, queueJevJob, runJevJob } from "./jev";
 import {
   isControlCommand,
   retakeTarget,
@@ -296,6 +296,8 @@ async function route(
     return rows.results.map(publicCapture) as import("../web/types").Capture[];
   };
   await protectBlindParse(request, env);
+  const paymentMatches = await paymentMatchesRoute(request, env, loadCaptures);
+  if (paymentMatches) return paymentMatches;
   const jevResponse = await jevRoute(request, env, loadCaptures);
   if (jevResponse) return jevResponse;
   const processingResponse = await processingRoute(request, env, loadCaptures);

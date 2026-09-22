@@ -34,6 +34,19 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   if (className) node.className = className;
   return node;
 };
+type PaymentMatch = {
+  assessment_id: string;
+  matched_at: string;
+  match_pass: "date" | "amount" | "likely";
+  receipt_document_id: string;
+  payment_document_id: string;
+  original_receipt_document_id: string;
+  original_payment_document_id: string;
+  status: "attached" | "needs-review" | "changed";
+  evidence_current: boolean;
+  probability: number;
+  confidence: number;
+};
 function field(label: string, value: string, multiline = false) {
   const input = multiline ? el("textarea") : el("input");
   input.value = value;
@@ -53,8 +66,9 @@ function amount(value: string): number {
 
 export async function mountReview(app: HTMLElement) {
   app.innerHTML =
-    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><p id="review-intervention-alert" role="alert"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="source-intervention">Needs source intervention</option><option value="scan-review">Completeness scan review</option><option value="luna-reparse">Needs Luna reparse</option><option value="non-receipt">Non-receipt documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
+    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><p id="review-intervention-alert" role="alert"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="payment-matches">Payment matches</option><option value="source-intervention">Needs source intervention</option><option value="scan-review">Completeness scan review</option><option value="luna-reparse">Needs Luna reparse</option><option value="non-receipt">Non-receipt documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
+  let paymentMatches: PaymentMatch[] = [];
   let selected = new URL(location.href).searchParams.get("document");
   let categories: PurchaseCategory[] = [];
   let busy = false;
@@ -67,6 +81,7 @@ export async function mountReview(app: HTMLElement) {
   if (
     [
       "source-intervention",
+      "payment-matches",
       "scan-review",
       "luna-reparse",
       "non-receipt",
@@ -96,9 +111,12 @@ export async function mountReview(app: HTMLElement) {
     }
   }
   async function refresh() {
-    [catalog, categories] = await Promise.all([
+    [catalog, categories, paymentMatches] = await Promise.all([
       readDocuments(),
       api<PurchaseCategory[]>("/api/processing/categories?include_archived=1"),
+      api<{ matches: PaymentMatch[] }>("/api/payment-matches").then(
+        (value) => value.matches,
+      ),
     ]);
     app
       .querySelector("#review-categories")!
@@ -129,6 +147,50 @@ export async function mountReview(app: HTMLElement) {
   }
   function renderList() {
     list.replaceChildren();
+    if (filter.value === "payment-matches") {
+      const needle = search.value.toLowerCase();
+      for (const match of paymentMatches) {
+        const receipt = catalog.documents.find(
+          (item) => item.id === match.receipt_document_id,
+        );
+        const slip = catalog.documents.find(
+          (item) => item.id === match.payment_document_id,
+        );
+        const receiptLabel =
+          receipt?.filename ??
+          receipt?.vendor ??
+          match.original_receipt_document_id;
+        const slipLabel =
+          slip?.filename ?? slip?.vendor ?? match.original_payment_document_id;
+        if (
+          !`${receiptLabel} ${slipLabel} ${match.status} ${match.match_pass}`
+            .toLowerCase()
+            .includes(needle)
+        )
+          continue;
+        const card = el("article", undefined, "review-item");
+        card.append(el("strong", `${receiptLabel} ↔ ${slipLabel}`));
+        card.append(
+          el(
+            "span",
+            `${match.status.replaceAll("-", " ")}${match.status === "changed" ? " · pages or OCR changed since Jev checked it" : match.evidence_current ? "" : " · OCR changed since Jev checked it"} · ${match.match_pass} pass · ${new Date(match.matched_at).toLocaleString()} · Jev ${Math.round(match.probability * 100)}% probability, ${Math.round(match.confidence * 100)}% confidence`,
+          ),
+        );
+        const links = el("span");
+        const receiptLink = el("a", "Open receipt");
+        receiptLink.href = `/review?document=${encodeURIComponent(match.receipt_document_id)}&view=payment-matches`;
+        const slipLink = el("a", "Open payment slip");
+        slipLink.href = `/review?document=${encodeURIComponent(match.payment_document_id)}&view=payment-matches`;
+        links.append(receiptLink, " · ", slipLink);
+        card.append(links);
+        list.append(card);
+      }
+      if (!list.childElementCount)
+        list.append(el("p", "No payment matches found."));
+      app.querySelector("#review-counts")!.textContent =
+        `${paymentMatches.length} payment matches · ${paymentMatches.filter((item) => item.status === "needs-review").length} need verification`;
+      return;
+    }
     const interventionCount = catalog.documents.filter(
       (d) => needsSourceIntervention(d) && !d.mergedInto,
     ).length;
@@ -877,6 +939,7 @@ export async function mountReview(app: HTMLElement) {
     if (
       [
         "source-intervention",
+        "payment-matches",
         "scan-review",
         "luna-reparse",
         "non-receipt",

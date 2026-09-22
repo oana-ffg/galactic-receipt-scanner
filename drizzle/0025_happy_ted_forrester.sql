@@ -1,0 +1,1 @@
+ALTER TABLE `jev_page_heads` ADD `payment_match_index` text;

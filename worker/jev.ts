@@ -35,7 +35,20 @@ const COMPLETENESS_DECISIONS = {
 } as const;
 const MAX_JEV_TEXT = 24_000;
 const JEV_ELIGIBILITY_VERSION = 3;
-const JEV_PIPELINE_VERSION = 7;
+const JEV_PIPELINE_VERSION = 8;
+const DETACHED_PAYMENT_TASK = "payment-match-detached-v2";
+
+const detachedPaymentQuestion = {
+  relationship: {
+    type: "choice" as const,
+    instructions:
+      "We are matching a separately scanned payment slip to its purchase receipt so the receipt includes its payment proof. Decide whether these are the same purchase.",
+    criteria: {
+      payment_match: "The payment slip belongs to this receipt",
+      unrelated: "The payment slip belongs to a different purchase",
+    },
+  },
+};
 
 const scanRelationshipQuestion = {
   relationship: {
@@ -149,6 +162,7 @@ type PageHead = {
   model: string;
   assessment_id: string;
   date_candidates: string | null;
+  payment_match_index: string | null;
   updated_at: string;
 };
 export type JevDocumentHead = {
@@ -203,6 +217,74 @@ function ocrDateCandidates(text: string) {
   ))
     add(match[3], match[2], match[1]);
   return [...dates].sort();
+}
+
+type PaymentMatchIndex = { amounts: number[]; terms: string[] };
+
+function paymentMatchIndex(text: string): PaymentMatchIndex {
+  const amounts = new Set<number>();
+  for (const match of text.matchAll(
+    /(?<!\d)(?:\d{1,3}(?:[., ]\d{3})+|\d{1,6})[.,]\d{2}(?!\d)/g,
+  )) {
+    const digits = match[0].replace(/\D/g, "");
+    const value = Number(digits);
+    if (value > 0 && value <= 100_000_000) amounts.add(value);
+  }
+  const common = new Set([
+    "BETALING",
+    "DANKORT",
+    "DEBIT",
+    "CREDIT",
+    "CARD",
+    "KORT",
+    "KVITTERING",
+    "RECEIPT",
+    "TOTAL",
+    "MOMS",
+    "AMOUNT",
+    "TERMINAL",
+    "APPROVED",
+    "GODKENDT",
+    "TRANSACTION",
+    "TRANSAKTION",
+    "MASTER",
+    "VISA",
+    "CUSTOMER",
+    "KUNDE",
+    "THANK",
+    "TAK",
+    "PURCHASE",
+  ]);
+  const terms = new Set(
+    (text.toLocaleUpperCase().match(/[\p{L}]{4,}/gu) ?? [])
+      .filter((term) => !common.has(term))
+      .slice(0, 250),
+  );
+  return {
+    amounts: [...amounts].sort((a, b) => a - b),
+    terms: [...terms].sort(),
+  };
+}
+
+function parsedPaymentMatchIndex(value: string | null): PaymentMatchIndex {
+  let parsed: PaymentMatchIndex;
+  try {
+    parsed = JSON.parse(value ?? "null") as PaymentMatchIndex;
+  } catch {
+    throw new HttpError(503, "Stored payment match index is invalid.");
+  }
+  requireThat(
+    parsed &&
+      Array.isArray(parsed.amounts) &&
+      parsed.amounts.every(
+        (amount) => Number.isSafeInteger(amount) && amount > 0,
+      ) &&
+      Array.isArray(parsed.terms) &&
+      parsed.terms.every((term) => typeof term === "string"),
+    503,
+    "Stored payment match index is invalid.",
+  );
+  return parsed;
 }
 
 async function sha256(value: unknown) {
@@ -620,8 +702,9 @@ async function classifyPage(
   validateChoice(answer, pageRoles);
   const now = new Date().toISOString();
   const dates = JSON.stringify(ocrDateCandidates(text));
+  const matchIndex = JSON.stringify(paymentMatchIndex(text));
   await env.DB.prepare(
-    "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,date_candidates,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(capture_id) DO UPDATE SET source_sha256=excluded.source_sha256,ocr_sha256=excluded.ocr_sha256,role=excluded.role,probability=excluded.probability,confidence=excluded.confidence,model=excluded.model,assessment_id=excluded.assessment_id,date_candidates=excluded.date_candidates,updated_at=excluded.updated_at",
+    "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,date_candidates,payment_match_index,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(capture_id) DO UPDATE SET source_sha256=excluded.source_sha256,ocr_sha256=excluded.ocr_sha256,role=excluded.role,probability=excluded.probability,confidence=excluded.confidence,model=excluded.model,assessment_id=excluded.assessment_id,date_candidates=excluded.date_candidates,payment_match_index=excluded.payment_match_index,updated_at=excluded.updated_at",
   )
     .bind(
       capture.id,
@@ -633,6 +716,7 @@ async function classifyPage(
       result.model,
       saved.id,
       dates,
+      matchIndex,
       now,
     )
     .run();
@@ -646,6 +730,7 @@ async function classifyPage(
     model: result.model,
     assessment_id: saved.id,
     date_candidates: dates,
+    payment_match_index: matchIndex,
     updated_at: now,
   };
 }
@@ -695,7 +780,7 @@ async function compareDocuments(
     current: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>;
     candidate: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>;
   },
-  prompt: "scan" | "detached" = "scan",
+  prompt: "scan" | "payment" = "scan",
 ) {
   const currentEvidence =
     suppliedEvidence?.current ?? (await documentEvidence(env, current));
@@ -728,27 +813,35 @@ async function compareDocuments(
         prompt === "scan"
           ? { current: candidateOcr.text, next: currentOcr.text }
           : input,
-        prompt === "scan"
-          ? scanRelationshipQuestion
-          : relationshipQuestion("baseline"),
+        prompt === "scan" ? scanRelationshipQuestion : detachedPaymentQuestion,
         budget,
       ),
     (result) =>
-      validateChoice(result.answers.relationship, [
-        "continuation",
-        "payment_match",
-        ...(prompt === "scan" ? ["duplicate"] : []),
-        "unrelated",
-      ]),
+      validateChoice(
+        result.answers.relationship,
+        prompt === "payment"
+          ? ["payment_match", "unrelated"]
+          : [
+              "continuation",
+              "payment_match",
+              ...(prompt === "scan" ? ["duplicate"] : []),
+              "unrelated",
+            ],
+      ),
   );
   const result = saved.result;
   const answer = result.answers.relationship;
-  validateChoice(answer, [
-    "continuation",
-    "payment_match",
-    ...(prompt === "scan" ? ["duplicate"] : []),
-    "unrelated",
-  ]);
+  validateChoice(
+    answer,
+    prompt === "payment"
+      ? ["payment_match", "unrelated"]
+      : [
+          "continuation",
+          "payment_match",
+          ...(prompt === "scan" ? ["duplicate"] : []),
+          "unrelated",
+        ],
+  );
   return {
     answer,
     assessment_id: saved.id,
@@ -2262,33 +2355,44 @@ async function reconcileDetachedPayments(
         );
       }),
   );
-  const activePages = new Map(
-    documents.flatMap((document) =>
-      document.pages.map((page) => [page.captureId, page] as const),
+  const currentPages = new Map(
+    allDocuments.flatMap((document) =>
+      document.pages
+        .filter((page) => capturesById.get(page.captureId)?.is_current)
+        .map((page) => [page.captureId, page] as const),
     ),
   );
   const unindexed = (
     await env.DB.prepare(
-      "SELECT * FROM jev_page_heads WHERE date_candidates IS NULL ORDER BY updated_at,capture_id LIMIT 25",
+      "SELECT * FROM jev_page_heads WHERE date_candidates IS NULL OR payment_match_index IS NULL ORDER BY updated_at,capture_id",
     ).all<PageHead>()
-  ).results;
+  ).results
+    .filter(
+      (head) =>
+        currentPages.get(head.capture_id)?.sha256 === head.source_sha256,
+    )
+    .slice(0, 25);
   if (unindexed.length) {
     for (const head of unindexed) {
-      const page = activePages.get(head.capture_id);
-      let dates: string[] = [];
-      if (page && head.source_sha256 === page.sha256) {
-        const found = await pinnedPpOcr(env, page, head.ocr_sha256);
-        requireThat(
-          found,
-          503,
-          "Pinned PP OCR is unavailable for detached-payment ranking.",
-        );
-        dates = ocrDateCandidates(found.value.text);
-      }
+      const page = currentPages.get(head.capture_id)!;
+      const found = await pinnedPpOcr(env, page, head.ocr_sha256);
+      requireThat(
+        found,
+        503,
+        "Pinned PP OCR is unavailable for detached-payment ranking.",
+      );
+      const dates = ocrDateCandidates(found.value.text);
+      const matchIndex = paymentMatchIndex(found.value.text);
       await env.DB.prepare(
-        "UPDATE jev_page_heads SET date_candidates=? WHERE capture_id=? AND date_candidates IS NULL",
+        "UPDATE jev_page_heads SET date_candidates=COALESCE(date_candidates,?),payment_match_index=COALESCE(payment_match_index,?) WHERE capture_id=? AND source_sha256=? AND ocr_sha256=?",
       )
-        .bind(JSON.stringify(dates), head.capture_id)
+        .bind(
+          JSON.stringify(dates),
+          JSON.stringify(matchIndex),
+          head.capture_id,
+          head.source_sha256,
+          head.ocr_sha256,
+        )
         .run();
     }
     return {
@@ -2304,7 +2408,12 @@ async function reconcileDetachedPayments(
     pageHeadRows.map((row) => [row.capture_id, row]),
   );
   const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
-  type RankedDocument = { document: ReceiptDocument; dates: Set<string> };
+  type RankedDocument = {
+    document: ReceiptDocument;
+    dates: Set<string>;
+    amounts: Set<number>;
+    terms: Set<string>;
+  };
   const purchases: RankedDocument[] = [];
   const payments: RankedDocument[] = [];
   for (const document of documents) {
@@ -2321,6 +2430,8 @@ async function reconcileDetachedPayments(
     const hasReceipt = heads.some((head) => head!.role === "receipt");
     const hasPayment = heads.some((head) => head!.role === "payment_evidence");
     const dates = new Set<string>();
+    const amounts = new Set<number>();
+    const terms = new Set<string>();
     for (const head of heads) {
       let parsed: unknown;
       try {
@@ -2338,31 +2449,78 @@ async function reconcileDetachedPayments(
         "Stored Jev date candidates are invalid.",
       );
       parsed.forEach((date) => dates.add(date));
+      const matchIndex = parsedPaymentMatchIndex(head!.payment_match_index);
+      matchIndex.amounts.forEach((amount) => amounts.add(amount));
+      matchIndex.terms.forEach((term) => terms.add(term));
     }
-    // A transaction can legitimately produce more than one detached payment slip.
-    // Keep receipt-backed documents eligible even after one slip has been attached;
-    // exact dates only rank candidates and Jev still decides from all evidence.
-    if (hasReceipt) purchases.push({ document, dates });
-    if (hasPayment && !hasReceipt) payments.push({ document, dates });
+    if (hasReceipt && !hasPayment)
+      purchases.push({ document, dates, amounts, terms });
+    if (hasPayment && !hasReceipt)
+      payments.push({ document, dates, amounts, terms });
   }
   purchases.sort((a, b) => a.document.id.localeCompare(b.document.id));
   payments.sort((a, b) => a.document.id.localeCompare(b.document.id));
+  const termFrequency = new Map<string, number>();
+  for (const document of [...purchases, ...payments])
+    for (const term of document.terms)
+      termFrequency.set(term, (termFrequency.get(term) ?? 0) + 1);
+  const likelyByPayment = new Map<string, Set<string>>();
+  for (const payment of payments) {
+    const candidates = purchases.flatMap((purchase) => {
+      if (
+        [...payment.dates].some((date) => purchase.dates.has(date)) ||
+        [...payment.amounts].some((amount) => purchase.amounts.has(amount))
+      )
+        return [];
+      const sharedTerms = [...payment.terms].filter(
+        (term) =>
+          purchase.terms.has(term) &&
+          (termFrequency.get(term) ?? 0) <=
+            Math.max(5, Math.ceil(documents.length * 0.1)),
+      );
+      const nearbyAmounts = [...payment.amounts].some((amount) =>
+        [...purchase.amounts].some(
+          (other) =>
+            Math.abs(amount - other) <=
+            Math.max(100, Math.round(amount * 0.05)),
+        ),
+      );
+      if (!sharedTerms.length && !nearbyAmounts) return [];
+      return [
+        {
+          id: purchase.document.id,
+          score: sharedTerms.length * 2 + Number(nearbyAmounts),
+        },
+      ];
+    });
+    candidates.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    likelyByPayment.set(
+      payment.document.id,
+      new Set(candidates.slice(0, 12).map((candidate) => candidate.id)),
+    );
+  }
   const budget: JevBudget = { remaining: 1 };
   let cursor = after;
   try {
-    for (const dateRank of [0, 1, 2] as const) {
+    for (const matchPass of [0, 1, 2] as const) {
       for (const payment of payments) {
         for (const purchase of purchases) {
           const sharedDate = [...purchase.dates].some((date) =>
             payment.dates.has(date),
           );
-          const pairRank = sharedDate
-            ? 0
-            : purchase.dates.size === 0 || payment.dates.size === 0
-              ? 1
-              : 2;
-          if (pairRank !== dateRank) continue;
-          const key = `${dateRank}|${payment.document.id}|${purchase.document.id}`;
+          const sharedAmount = [...purchase.amounts].some((amount) =>
+            payment.amounts.has(amount),
+          );
+          const pairPass = sharedDate ? 0 : sharedAmount ? 1 : 2;
+          if (
+            pairPass !== matchPass ||
+            (matchPass === 2 &&
+              !likelyByPayment
+                .get(payment.document.id)
+                ?.has(purchase.document.id))
+          )
+            continue;
+          const key = `${matchPass}|${payment.document.id}|${purchase.document.id}`;
           if (after !== null && key <= after) continue;
           const [purchaseEvidence, paymentEvidence] = await Promise.all([
             documentEvidence(env, purchase.document),
@@ -2385,11 +2543,11 @@ async function reconcileDetachedPayments(
             purchase.document,
             payment.document,
             budget,
-            "document-relationship-detached-v1",
+            `${DETACHED_PAYMENT_TASK}-${["date", "amount", "likely"][matchPass]}`,
             purchaseEvidence && paymentEvidence
               ? { current: purchaseEvidence, candidate: paymentEvidence }
               : undefined,
-            "detached",
+            "payment",
           );
           if (
             decision?.answer.choice !== "payment_match" ||
@@ -2401,7 +2559,7 @@ async function reconcileDetachedPayments(
           if (purchase.document.processing || payment.document.processing)
             return {
               result: {
-                status: "luna-disagreement",
+                status: "needs-review",
                 current_document_id: purchase.document.id,
                 next_document_id: payment.document.id,
                 relationship: decision.answer.choice,
@@ -2409,6 +2567,7 @@ async function reconcileDetachedPayments(
                   decision.answer.probabilities[decision.answer.choice],
                 confidence: decision.answer.confidence,
                 assessment_id: decision.assessment_id,
+                match_pass: ["date", "amount", "likely"][matchPass],
               },
               remaining: 1,
               next: key,
@@ -2443,7 +2602,13 @@ async function reconcileDetachedPayments(
             continue;
           }
           return {
-            result: { status: "merged", document_id: merged.id },
+            result: {
+              status: "merged",
+              document_id: merged.id,
+              payment_document_id: payment.document.id,
+              assessment_id: decision.assessment_id,
+              match_pass: ["date", "amount", "likely"][matchPass],
+            },
             remaining: 1,
             next: null,
           };
@@ -3170,4 +3335,113 @@ export async function jevRoute(
     }
   }
   throw new HttpError(404, "Jev route not found.");
+}
+
+export async function paymentMatchesRoute(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+): Promise<Response | null> {
+  if (
+    new URL(request.url).pathname !== "/api/payment-matches" ||
+    request.method !== "GET"
+  )
+    return null;
+  const documents = records(
+    await storedDocuments(env),
+    await loadCaptures(),
+  ).filter((document) => !document.mergedInto && !document.duplicateOf);
+  const ownerByPage = new Map(
+    documents.flatMap((document) =>
+      document.pages.map((page) => [page.captureId, document.id] as const),
+    ),
+  );
+  const documentById = new Map(
+    documents.map((document) => [document.id, document]),
+  );
+  const currentPages = new Map(
+    documents.flatMap((document) =>
+      document.pages.map((page) => [page.captureId, page] as const),
+    ),
+  );
+  const heads = (
+    await env.DB.prepare(
+      "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
+    ).all<Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">>()
+  ).results;
+  const headsByPage = new Map(heads.map((head) => [head.capture_id, head]));
+  const resolvePins = (value: unknown) => {
+    if (!Array.isArray(value) || !value.length) return null;
+    const pins = value as { capture_id?: string; ocr_sha256?: string }[];
+    const owner = ownerByPage.get(pins[0].capture_id ?? "");
+    if (
+      !owner ||
+      !pins.every((pin) => ownerByPage.get(pin.capture_id ?? "") === owner)
+    )
+      return null;
+    return {
+      owner,
+      sameGroup: documentById.get(owner)?.pages.length === pins.length,
+      current: pins.every((pin) => {
+        const page = currentPages.get(pin.capture_id ?? "");
+        const head = headsByPage.get(pin.capture_id ?? "");
+        return Boolean(
+          page &&
+          head?.source_sha256 === page.sha256 &&
+          head.ocr_sha256 === pin.ocr_sha256,
+        );
+      }),
+    };
+  };
+  const rows = (
+    await env.DB.prepare(
+      "SELECT id,task,subject_id,candidate_id,payload,created_at FROM jev_assessments WHERE task LIKE ? ORDER BY created_at DESC,id DESC",
+    )
+      .bind(`${DETACHED_PAYMENT_TASK}-%`)
+      .all<{
+        id: string;
+        task: string;
+        subject_id: string;
+        candidate_id: string;
+        payload: string;
+        created_at: string;
+      }>()
+  ).results;
+  const matches = rows.flatMap((row) => {
+    const payload = JSON.parse(row.payload) as {
+      input?: { current?: { pins?: unknown }; candidate?: { pins?: unknown } };
+      response?: JevResponse;
+    };
+    const answer = payload.response?.answers.relationship;
+    if (answer?.choice !== "payment_match") return [];
+    const receipt = resolvePins(payload.input?.current?.pins);
+    const slip = resolvePins(payload.input?.candidate?.pins);
+    const evidenceCurrent = Boolean(receipt?.current && slip?.current);
+    const separateGroupsCurrent = Boolean(
+      evidenceCurrent && receipt?.sameGroup && slip?.sameGroup,
+    );
+    return [
+      {
+        assessment_id: row.id,
+        matched_at: row.created_at,
+        match_pass: row.task.slice(DETACHED_PAYMENT_TASK.length + 1),
+        receipt_document_id: receipt?.owner ?? row.subject_id,
+        payment_document_id: slip?.owner ?? row.candidate_id,
+        original_receipt_document_id: row.subject_id,
+        original_payment_document_id: row.candidate_id,
+        status:
+          !receipt || !slip
+            ? "changed"
+            : receipt.owner === slip.owner
+              ? "attached"
+              : separateGroupsCurrent
+                ? "needs-review"
+                : "changed",
+        evidence_current: evidenceCurrent,
+        probability: answer.probabilities.payment_match,
+        confidence: answer.confidence,
+      },
+    ];
+  });
+  return json({ matches });
 }

@@ -1725,7 +1725,7 @@ it("waits for an active old step but reclaims an expired one during replay upgra
   const now = "2030-01-01T00:00:00.000Z";
   await db
     .prepare(
-      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,cursor,step_token,step_started_at,created_at,updated_at) VALUES(?,6,'group',?,?,NULL,?,?,?,?)",
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,cursor,step_token,step_started_at,created_at,updated_at) VALUES(?,7,'group',?,?,NULL,?,?,?,?)",
     )
     .bind("old-run", now, capture.id, "active-token", now, now, now)
     .run();
@@ -1743,7 +1743,7 @@ it("waits for an active old step but reclaims an expired one during replay upgra
         "SELECT version,step_token FROM jev_pipeline_runs WHERE id='old-run'",
       )
       .first(),
-  ).toEqual({ version: 7, step_token: null });
+  ).toEqual({ version: 8, step_token: null });
 });
 
 it("replays a saved low-score continuation when upgrading the pipeline", async () => {
@@ -1812,7 +1812,7 @@ it("replays a saved low-score continuation when upgrading the pipeline", async (
   ).toEqual({ count: 1 });
 });
 
-it("lets Jev attach a second detached payment slip to a receipt that already has one", async () => {
+it("leaves a second detached payment slip separate when the receipt already has one", async () => {
   const processingToken = `rsc_${"m".repeat(43)}`;
   const secondSlipPairs: string[] = [];
   await mf.dispose();
@@ -1882,7 +1882,7 @@ it("lets Jev attach a second detached payment slip to a receipt that already has
 
   const { result } = await drainBackfill(processingToken);
   expect(result).toMatchObject({ remaining: 0, blocked: 0 });
-  expect(secondSlipPairs).toEqual([`${receipt.id}|${secondSlip.id}`]);
+  expect(secondSlipPairs).toEqual([]);
 
   const catalog = await (
     await mf.dispatchFetch(`${origin}/api/documents`, {
@@ -1895,8 +1895,12 @@ it("lets Jev attach a second detached payment slip to a receipt that already has
   expect(merged.pages.map((page: any) => page.captureId)).toEqual([
     receipt.id,
     firstSlip.id,
-    secondSlip.id,
   ]);
+  expect(
+    catalog.documents
+      .find((document: any) => document.id === secondSlip.id)
+      .pages.map((page: any) => page.captureId),
+  ).toEqual([secondSlip.id]);
 });
 
 it("does not let an older completed artifact hide a newer unqueued PP artifact", async () => {
@@ -2732,6 +2736,121 @@ it("tries shared dates first but lets Jev match apparently conflicting dates", a
   ).toBe(true);
 });
 
+it("tries date, amount, then likely detached slips and lists the accepted match", async () => {
+  const processingToken = `rsc_${"p".repeat(43)}`;
+  const compared: string[] = [];
+  let reconciling = false;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      let relationship: "continuation" | "payment_match" | "unrelated" =
+        "unrelated";
+      if (
+        reconciling &&
+        body.questions.relationship &&
+        Object.keys(body.questions.relationship.criteria).length === 2
+      ) {
+        expect(Object.keys(body.questions.relationship.criteria)).toEqual([
+          "payment_match",
+          "unrelated",
+        ]);
+        compared.push(body.state.current.document_id);
+        if (relationshipOcr(body.state).current.includes("ALPHA"))
+          relationship = "payment_match";
+      }
+      return paymentJevResponse(request, relationship);
+    },
+  });
+  const payment = await saveCapture();
+  const date = await saveCapture();
+  const amount = await saveCapture();
+  const likely = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of [payment, date, amount, likely].entries())
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(`2026-01-01T00:00:0${index}.000Z`, capture.id)
+      .run();
+  await seedHistoricalOcr(
+    payment,
+    "PAYMENT SLIP 21.09.2026 TOTAL 123,45 ALPHA",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    date,
+    "SHOP RECEIPT 21.09.2026 TOTAL 999,99 BETA",
+    "2026-01-01T00:00:01.000Z",
+  );
+  await seedHistoricalOcr(
+    amount,
+    "SHOP RECEIPT 22.09.2026 TOTAL 123,45 GAMMA",
+    "2026-01-01T00:00:02.000Z",
+  );
+  await seedHistoricalOcr(
+    likely,
+    "SHOP RECEIPT 23.09.2026 TOTAL 123,40 ALPHA",
+    "2026-01-01T00:00:03.000Z",
+  );
+  let step: any;
+  for (let index = 0; index < 60; index += 1) {
+    step = await runBackfill(processingToken);
+    if (step.phase === "dates") break;
+  }
+  expect(step.phase).toBe("dates");
+  reconciling = true;
+  const { result, results } = await drainBackfill(processingToken);
+  expect(result.remaining).toBe(0);
+  const heads = await db
+    .prepare(
+      "SELECT capture_id,role,date_candidates,payment_match_index FROM jev_page_heads",
+    )
+    .all();
+  expect(
+    compared,
+    JSON.stringify({
+      steps: results.map((step) => [step.phase, step.result]),
+      heads,
+    }),
+  ).toEqual([date.id, amount.id, likely.id]);
+  const response = await mf.dispatchFetch(`${origin}/api/payment-matches`, {
+    headers: ownerHeaders,
+  });
+  expect(response.status).toBe(200);
+  const matches = (await response.json<any>()).matches;
+  expect(matches).toMatchObject([
+    {
+      original_receipt_document_id: likely.id,
+      original_payment_document_id: payment.id,
+      match_pass: "likely",
+      status: "attached",
+    },
+  ]);
+  await db
+    .prepare("UPDATE jev_assessments SET subject_id=? WHERE id=?")
+    .bind(crypto.randomUUID(), matches[0].assessment_id)
+    .run();
+  const relinked = await mf.dispatchFetch(`${origin}/api/payment-matches`, {
+    headers: ownerHeaders,
+  });
+  expect((await relinked.json<any>()).matches[0].receipt_document_id).toBe(
+    likely.id,
+  );
+  await db
+    .prepare("UPDATE jev_page_heads SET ocr_sha256=? WHERE capture_id=?")
+    .bind("a".repeat(64), likely.id)
+    .run();
+  const changed = await mf.dispatchFetch(`${origin}/api/payment-matches`, {
+    headers: ownerHeaders,
+  });
+  expect((await changed.json<any>()).matches[0]).toMatchObject({
+    status: "attached",
+    evidence_current: false,
+  });
+});
+
 it("does not match a current payment against a receipt capture retired after the snapshot", async () => {
   const processingToken = `rsc_${"x".repeat(43)}`;
   const reconciliationPairs: string[] = [];
@@ -2851,7 +2970,7 @@ it("checkpoints ranked reconciliation without repeating candidate pairs", async 
   expect(
     await db
       .prepare(
-        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-detached-v1' AND subject_id IN (?,?) AND candidate_id IN (?,?)",
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='payment-match-detached-v2-date' AND subject_id IN (?,?) AND candidate_id IN (?,?)",
       )
       .bind(captures[2].id, captures[3].id, captures[0].id, captures[1].id)
       .first(),

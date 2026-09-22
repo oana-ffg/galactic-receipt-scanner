@@ -290,6 +290,7 @@ export const jevPageHeads = sqliteTable("jev_page_heads", {
   model: text("model").notNull(),
   assessment_id: text("assessment_id").notNull(),
   date_candidates: text("date_candidates"),
+  payment_match_index: text("payment_match_index"),
   updated_at: text("updated_at").notNull(),
 });
 export const jevDocumentHeads = sqliteTable("jev_document_heads", {
