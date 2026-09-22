@@ -210,6 +210,15 @@ async function unrelatedPaymentJevResponse(request: Request) {
   return paymentJevResponse(request, "unrelated");
 }
 
+function relationshipOcr(state: any) {
+  return typeof state.current === "string"
+    ? { current: state.next as string, candidate: state.current as string }
+    : {
+        current: state.current.ocr as string,
+        candidate: state.candidate.ocr as string,
+      };
+}
+
 async function syntheticJevResponse(request: Request) {
   const body = (await request.json()) as any;
   const text = JSON.stringify(body.state);
@@ -1108,6 +1117,140 @@ it("backfills a historical receipt before its later matching payment slip", asyn
   ]);
 });
 
+it("reports Jev's proposed join without changing Luna's saved group", async () => {
+  const processingToken = `rsc_${"l".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: matchingPaymentJevResponse,
+  });
+  const receipt = await saveCapture();
+  const payment = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  for (const [index, capture] of [receipt, payment].entries()) {
+    const at = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(at, capture.id)
+      .run();
+    await seedHistoricalOcr(
+      capture,
+      index ? "PAYMENT SLIP\nTOTAL 12.34" : "SHOP RECEIPT\nTOTAL 12.34",
+      at,
+    );
+  }
+  const luna = newDocument(receipt);
+  luna.processing = {
+    extraction: {
+      type: "receipt",
+      vendor: "Synthetic shop",
+      receipt_date: "2026-01-01",
+      reference: "SYNTHETIC-123",
+      currency: "DKK",
+      has_handwriting: false,
+      has_payment_slip: false,
+      payment_status: "unknown",
+      card_last_four: null,
+      line_items: [
+        {
+          description: "Synthetic item",
+          quantity: 1,
+          unit_price_minor: 1234,
+          amount_minor: 1234,
+        },
+      ],
+      adjustments: [],
+      total_minor: 1234,
+      charged_total_minor: 1234,
+      payment_adjustments: [],
+      vat_minor: null,
+      tax_basis: "gross",
+      completeness: "complete",
+      category_id: null,
+      certainty: "medium",
+      uncertainties: [],
+      broken_reasons: [],
+      confirmed_arithmetic_mismatch: false,
+      evidence: "Synthetic receipt source.",
+    },
+    not_invoice: false,
+    has_handwriting: false,
+    small_model_certainty: "medium",
+    large_model_confidence: null,
+    has_human_review: false,
+    human_review_revision: null,
+    needs_reparse: false,
+    seen_capture_count: 1,
+  };
+  const saved = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      documents: [newDocument(receipt), newDocument(payment)],
+    }),
+  });
+  expect(saved.status, await saved.text()).toBe(200);
+  const current = await (
+    await mf.dispatchFetch(`${origin}/api/documents/${receipt.id}`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  const revision = current.document.revision + 1;
+  luna.revision = revision;
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+      )
+      .bind(
+        receipt.id,
+        revision,
+        JSON.stringify(luna),
+        new Date().toISOString(),
+      ),
+    db
+      .prepare("UPDATE document_heads SET revision=? WHERE id=?")
+      .bind(revision, receipt.id),
+  ]);
+  const replay = await drainBackfill(processingToken);
+  expect(
+    replay.results.some(
+      (step) =>
+        step.result?.status === "luna-disagreement" &&
+        step.result.current_document_id === receipt.id &&
+        step.result.next_document_id === payment.id,
+    ),
+  ).toBe(true);
+  const afterResponse = await mf.dispatchFetch(
+    `${origin}/api/documents/${receipt.id}`,
+    {
+      headers: ownerHeaders,
+    },
+  );
+  const after = await afterResponse.json<any>();
+  expect(afterResponse.status, JSON.stringify(after)).toBe(200);
+  expect(after.document.pages.map((page: any) => page.captureId)).toEqual([
+    receipt.id,
+  ]);
+  expect(after.document.processing).toBeTruthy();
+  expect(after.document.revision).toBe(revision);
+  expect(after.document.processing.extraction.total_minor).toBe(1234);
+  const paymentAfter = await (
+    await mf.dispatchFetch(`${origin}/api/documents/${payment.id}`, {
+      headers: ownerHeaders,
+    })
+  ).json<any>();
+  expect(
+    paymentAfter.document.pages.map((page: any) => page.captureId),
+  ).toEqual([payment.id]);
+});
+
 it("audits an existing grouped page without changing its membership", async () => {
   const processingToken = `rsc_${"a".repeat(43)}`;
   const comparisons: Array<{ current: string; candidate: string }> = [];
@@ -1119,8 +1262,7 @@ it("audits an existing grouped page without changing its membership", async () =
       const body = (await request.clone().json()) as any;
       if (body.questions.relationship)
         comparisons.push({
-          current: body.state.current.ocr,
-          candidate: body.state.candidate.ocr,
+          ...relationshipOcr(body.state),
         });
       return syntheticJevResponse(request);
     },
@@ -1254,8 +1396,16 @@ it("benchmarks fixed relationship prompts against current saved OCR without chan
   });
   const first = await saveCapture();
   const second = await saveCapture();
-  await seedHistoricalOcr(first, "SHOP RECEIPT TOTAL 12.34", "2026-01-01T00:00:00.000Z");
-  await seedHistoricalOcr(second, "OTHER SHOP RECEIPT TOTAL 99.00", "2026-01-01T00:00:01.000Z");
+  await seedHistoricalOcr(
+    first,
+    "SHOP RECEIPT TOTAL 12.34",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    second,
+    "OTHER SHOP RECEIPT TOTAL 99.00",
+    "2026-01-01T00:00:01.000Z",
+  );
   await drainBackfill(processingToken);
   const db = await mf.getD1Database("DB");
   const before = await db
@@ -1291,7 +1441,11 @@ it("benchmarks fixed relationship prompts against current saved OCR without chan
       right_page_ids: [second.id],
     });
   }
-  expect(Object.values(questions).map((choices) => choices.length).sort()).toEqual([3, 4, 4]);
+  expect(
+    Object.values(questions)
+      .map((choices) => choices.length)
+      .sort(),
+  ).toEqual([3, 4, 4, 4]);
   expect(
     await db.prepare("SELECT COUNT(*) AS count FROM jev_assessments").first(),
   ).toEqual(before);
@@ -1301,7 +1455,9 @@ it("benchmarks fixed relationship prompts against current saved OCR without chan
   expect(
     documents.documents
       .filter((document: any) => !document.mergedInto)
-      .map((document: any) => document.pages.map((page: any) => page.captureId)),
+      .map((document: any) =>
+        document.pages.map((page: any) => page.captureId),
+      ),
   ).toEqual([[first.id], [second.id]]);
 });
 
@@ -1318,8 +1474,7 @@ it("pins benchmark answers to the OCR Jev saw even if OCR or the current take ch
       const body = (await request.clone().json()) as any;
       if (body.questions.relationship)
         inputs.push({
-          current: body.state.current.ocr,
-          candidate: body.state.candidate.ocr,
+          ...relationshipOcr(body.state),
         });
       if (body.questions.relationship && change === "ocr") {
         await (
@@ -1336,8 +1491,16 @@ it("pins benchmark answers to the OCR Jev saw even if OCR or the current take ch
   });
   const first = await saveCapture();
   const second = await saveCapture();
-  await seedHistoricalOcr(first, "FIRST RECEIPT TOTAL 12.34", "2026-01-01T00:00:00.000Z");
-  await seedHistoricalOcr(second, "SECOND RECEIPT TOTAL 99.00", "2026-01-01T00:00:01.000Z");
+  await seedHistoricalOcr(
+    first,
+    "FIRST RECEIPT TOTAL 12.34",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await seedHistoricalOcr(
+    second,
+    "SECOND RECEIPT TOTAL 99.00",
+    "2026-01-01T00:00:01.000Z",
+  );
   await drainBackfill(processingToken);
   const priorHead = await (
     await mf.getD1Database("DB")
@@ -1372,9 +1535,7 @@ it("pins benchmark answers to the OCR Jev saw even if OCR or the current take ch
   expect(changedOcr.status).toBe(200);
   const firstResult = await changedOcr.json<any>();
   expect(firstResult.evidence_scope).toBe("request_snapshot");
-  expect(firstResult.ocr_pins.left[0].ocr_sha256).toBe(
-    priorHead!.ocr_sha256,
-  );
+  expect(firstResult.ocr_pins.left[0].ocr_sha256).toBe(priorHead!.ocr_sha256);
   change = "retake";
   const retakeResponse = await benchmark();
   expect(retakeResponse.status).toBe(200);
@@ -1392,7 +1553,9 @@ it("pins benchmark answers to the OCR Jev saw even if OCR or the current take ch
     },
   ]);
   const originalAfterRetake = await (
-    await mf.dispatchFetch(`${origin}/api/captures/${first.id}`, { headers: ownerHeaders })
+    await mf.dispatchFetch(`${origin}/api/captures/${first.id}`, {
+      headers: ownerHeaders,
+    })
   ).json<any>();
   expect(originalAfterRetake.is_current).toBe(false);
 });
@@ -1408,7 +1571,7 @@ it("rejects a group audit when its OCR head changes during Jev assessment", asyn
     outboundService: async (request: Request) => {
       const body = (await request.clone().json()) as any;
       if (body.questions.relationship) {
-        comparisons.push(body.state.current.ocr);
+        comparisons.push(relationshipOcr(body.state).current);
         if (replacementSha)
           await (
             await mf.getD1Database("DB")
@@ -1473,6 +1636,40 @@ it("rejects a group audit when its OCR head changes during Jev assessment", asyn
   expect(comparisons).toEqual(["Page 1:\nORIGINAL RECEIPT SECTION 2"]);
 });
 
+it("waits for an active old step but reclaims an expired one during replay upgrade", async () => {
+  const processingToken = `rsc_${"z".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: unrelatedPaymentJevResponse,
+  });
+  const capture = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  const now = "2030-01-01T00:00:00.000Z";
+  await db
+    .prepare(
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,cursor,step_token,step_started_at,created_at,updated_at) VALUES(?,6,'group',?,?,NULL,?,?,?,?)",
+    )
+    .bind("old-run", now, capture.id, "active-token", now, now, now)
+    .run();
+  expect(await runBackfill(processingToken)).toMatchObject({ busy: true });
+  await db
+    .prepare(
+      "UPDATE jev_pipeline_runs SET step_started_at=? WHERE id='old-run'",
+    )
+    .bind("2020-01-01T00:00:00.000Z")
+    .run();
+  await runBackfill(processingToken);
+  expect(
+    await db
+      .prepare(
+        "SELECT version,step_token FROM jev_pipeline_runs WHERE id='old-run'",
+      )
+      .first(),
+  ).toEqual({ version: 7, step_token: null });
+});
+
 it("replays a saved low-score continuation when upgrading the pipeline", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   await mf.dispose();
@@ -1495,7 +1692,7 @@ it("replays a saved low-score continuation when upgrading the pipeline", async (
   await drainBackfill(processingToken);
   const assessment = await db
     .prepare(
-      "SELECT id,payload FROM jev_assessments WHERE task='document-relationship'",
+      "SELECT id,payload FROM jev_assessments WHERE task='document-relationship-scan-v1'",
     )
     .first<{ id: string; payload: string }>();
   expect(assessment).not.toBeNull();
@@ -1503,7 +1700,12 @@ it("replays a saved low-score continuation when upgrading the pipeline", async (
   payload.response.answers.relationship = {
     type: "choice",
     choice: "continuation",
-    probabilities: { continuation: 0.4, payment_match: 0.22, unrelated: 0.38 },
+    probabilities: {
+      continuation: 0.4,
+      payment_match: 0.22,
+      duplicate: 0,
+      unrelated: 0.38,
+    },
     confidence: 0.09,
   };
   await db
@@ -1528,7 +1730,7 @@ it("replays a saved low-score continuation when upgrading the pipeline", async (
   expect(
     await db
       .prepare(
-        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship'",
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-scan-v1'",
       )
       .first(),
   ).toEqual({ count: 1 });
@@ -1546,8 +1748,7 @@ it("lets Jev attach a second detached payment slip to a receipt that already has
       let relationship: "continuation" | "payment_match" | "unrelated" =
         "unrelated";
       if (body.questions.relationship) {
-        const current = body.state.current.ocr as string;
-        const candidate = body.state.candidate.ocr as string;
+        const { current, candidate } = relationshipOcr(body.state);
         if (
           current.includes("SHOP RECEIPT") &&
           candidate.includes("PAYMENT SLIP ONE")
@@ -1785,6 +1986,7 @@ it("retires classified work when its capture is superseded mid-pipeline", async 
 it("groups forward once per adjacent document and preserves the first boundary", async () => {
   const processingToken = `rsc_${"e".repeat(43)}`;
   const relationshipPairs: { current: string; candidate: string }[] = [];
+  let firstScanRequest: any;
   await mf.dispose();
   mf = await runtime({
     processingTokenSha256: await processingTokenHash(processingToken),
@@ -1793,14 +1995,20 @@ it("groups forward once per adjacent document and preserves the first boundary",
       const body = (await request.clone().json()) as any;
       let relationship: "continuation" | "unrelated" = "unrelated";
       if (body.questions.relationship) {
+        if (typeof body.state.current === "string" && !firstScanRequest)
+          firstScanRequest = body;
+        const { current, candidate } = relationshipOcr(body.state);
+        const indexOf = (text: string) =>
+          text.includes("PAYMENT SLIP")
+            ? 0
+            : Number(text.match(/SHOP RECEIPT (\d)/)?.[1]);
+        const currentIndex = indexOf(current);
+        const candidateIndex = indexOf(candidate);
         relationshipPairs.push({
-          current: body.state.current.document_id,
-          candidate: body.state.candidate.document_id,
+          current: captures[currentIndex].id,
+          candidate: captures[candidateIndex].id,
         });
-        if (
-          body.state.current.document_id === captures[2]?.id &&
-          body.state.candidate.document_id === captures[1]?.id
-        )
+        if (currentIndex === 2 && candidateIndex === 1)
           relationship = "continuation";
       }
       return paymentJevResponse(request, relationship);
@@ -1830,6 +2038,23 @@ it("groups forward once per adjacent document and preserves the first boundary",
     blocked: 0,
     phase: "complete",
   });
+  expect(firstScanRequest.state).toEqual({
+    current: "Page 1:\nPAYMENT SLIP\nTOTAL 12.34",
+    next: "Page 1:\nSHOP RECEIPT 1\nTOTAL 12.34",
+  });
+  expect(firstScanRequest.questions.relationship).toMatchObject({
+    instructions:
+      "The user is scanning receipts. Your job is to determine if the next page is likely a new page, part of the same receipt as current, or the first page of a new receipt.",
+    criteria: {
+      continuation:
+        "The next page is part of the same receipt as the one we currently have",
+      payment_match: "The next page is a payment slip for the current receipt",
+      duplicate:
+        "The next page is a duplicate, containing only the exact same information we already have in the current receipt",
+      unrelated:
+        "The next page is the start of a new receipt, not part of the same transaction as the current one",
+    },
+  });
   expect(relationshipPairs).toEqual([
     { current: captures[1].id, candidate: captures[0].id },
     { current: captures[2].id, candidate: captures[1].id },
@@ -1838,7 +2063,7 @@ it("groups forward once per adjacent document and preserves the first boundary",
   expect(
     await db
       .prepare(
-        "SELECT COUNT(DISTINCT candidate_id) AS count,MIN(candidate_id) AS candidate_id FROM jev_assessments WHERE task='document-relationship' AND subject_id=?",
+        "SELECT COUNT(DISTINCT candidate_id) AS count,MIN(candidate_id) AS candidate_id FROM jev_assessments WHERE task='document-relationship-scan-v1' AND subject_id=?",
       )
       .bind(captures[2].id)
       .first(),
@@ -1863,10 +2088,16 @@ it("persists the forward grouping cursor between requests", async () => {
     typesafeApiKey: "synthetic-key",
     outboundService: async (request: Request) => {
       const body = (await request.clone().json()) as any;
-      if (body.questions.relationship)
-        relationshipPairs.push(
-          `${body.state.current.document_id}|${body.state.candidate.document_id}`,
+      if (body.questions.relationship) {
+        const { current, candidate } = relationshipOcr(body.state);
+        const currentIndex = Number(current.match(/SHOP RECEIPT (\d)/)?.[1]);
+        const candidateIndex = Number(
+          candidate.match(/SHOP RECEIPT (\d)/)?.[1],
         );
+        relationshipPairs.push(
+          `${captures[currentIndex].id}|${captures[candidateIndex].id}`,
+        );
+      }
       return paymentJevResponse(request, "unrelated");
     },
   });
@@ -1948,13 +2179,21 @@ it("leaves the open tail unclassified until the following raw capture has PP OCR
       const body = (await request.clone().json()) as any;
       let relationship: "continuation" | "unrelated" = "unrelated";
       if (body.questions.relationship) {
+        const { current, candidate } = relationshipOcr(body.state);
+        const indexOf = (text: string) =>
+          text.includes("SECOND SHOP RECEIPT PAGE 2")
+            ? 2
+            : text.includes("FIRST SHOP RECEIPT")
+              ? 0
+              : text.includes("SECOND SHOP RECEIPT")
+                ? 1
+                : 2;
+        const currentIndex = indexOf(current);
+        const candidateIndex = indexOf(candidate);
         relationshipPairs.push(
-          `${body.state.current.document_id}|${body.state.candidate.document_id}`,
+          `${captures[currentIndex].id}|${captures[candidateIndex].id}`,
         );
-        if (
-          body.state.current.document_id === captures[2]?.id &&
-          body.state.candidate.document_id === captures[1]?.id
-        )
+        if (currentIndex === 2 && candidateIndex === 1)
           relationship = "continuation";
       }
       return paymentJevResponse(request, relationship);
@@ -2269,14 +2508,14 @@ it("tries shared dates first but lets Jev match apparently conflicting dates", a
           });
         if (
           !reconciling &&
-          body.state.current.ocr.includes("PAYMENT SLIP") &&
-          body.state.candidate.ocr.includes("PAYMENT SLIP")
+          relationshipOcr(body.state).current.includes("PAYMENT SLIP") &&
+          relationshipOcr(body.state).candidate.includes("PAYMENT SLIP")
         )
           relationship = "continuation";
         else if (
           reconciling &&
-          body.state.current.ocr.includes("REFERENCE MATCH") &&
-          body.state.candidate.ocr.includes("REFERENCE MATCH")
+          relationshipOcr(body.state).current.includes("REFERENCE MATCH") &&
+          relationshipOcr(body.state).candidate.includes("REFERENCE MATCH")
         )
           relationship = "payment_match";
       }
@@ -2531,12 +2770,12 @@ it("checkpoints ranked reconciliation without repeating candidate pairs", async 
     if (backfill.remaining === 0) break;
   }
   expect(backfill).toMatchObject({ remaining: 0, blocked: 0 });
-  expect(reconciliationPairs).toHaveLength(3);
-  expect(new Set(reconciliationPairs).size).toBe(3);
+  expect(reconciliationPairs).toHaveLength(4);
+  expect(new Set(reconciliationPairs).size).toBe(4);
   expect(
     await db
       .prepare(
-        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship' AND subject_id IN (?,?) AND candidate_id IN (?,?)",
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-detached-v1' AND subject_id IN (?,?) AND candidate_id IN (?,?)",
       )
       .bind(captures[2].id, captures[3].id, captures[0].id, captures[1].id)
       .first(),
@@ -2633,7 +2872,7 @@ it("retries a saved grouping decision after the merge write fails", async () => 
   expect(
     await db
       .prepare(
-        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship'",
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-scan-v1'",
       )
       .first(),
   ).toEqual({ count: 1 });
@@ -2642,7 +2881,7 @@ it("retries a saved grouping decision after the merge write fails", async () => 
   expect(
     await db
       .prepare(
-        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship'",
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-relationship-scan-v1'",
       )
       .first(),
   ).toEqual({ count: 1 });

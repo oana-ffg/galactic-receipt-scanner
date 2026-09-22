@@ -105,7 +105,19 @@ export async function mountReview(app: HTMLElement) {
       .replaceChildren(categorySetup(categories, action, refresh));
     renderList();
     if (selected) {
-      const d = catalog.documents.find((d) => d.id === selected);
+      let d = catalog.documents.find((d) => d.id === selected);
+      if (d?.mergedInto) {
+        const targetId = d.mergedInto;
+        const merged = catalog.documents.find((item) => item.id === targetId);
+        if (merged) {
+          d = merged;
+          selected = merged.id;
+          const url = new URL(location.href);
+          url.searchParams.set("document", merged.id);
+          history.replaceState(null, "", url);
+          renderList();
+        }
+      }
       if (d) renderDetail(d);
       else {
         disposeDetail();

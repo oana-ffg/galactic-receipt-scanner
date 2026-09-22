@@ -35,7 +35,24 @@ const COMPLETENESS_DECISIONS = {
 } as const;
 const MAX_JEV_TEXT = 24_000;
 const JEV_ELIGIBILITY_VERSION = 3;
-const JEV_PIPELINE_VERSION = 6;
+const JEV_PIPELINE_VERSION = 7;
+
+const scanRelationshipQuestion = {
+  relationship: {
+    type: "choice" as const,
+    instructions:
+      "The user is scanning receipts. Your job is to determine if the next page is likely a new page, part of the same receipt as current, or the first page of a new receipt.",
+    criteria: {
+      continuation:
+        "The next page is part of the same receipt as the one we currently have",
+      payment_match: "The next page is a payment slip for the current receipt",
+      duplicate:
+        "The next page is a duplicate, containing only the exact same information we already have in the current receipt",
+      unrelated:
+        "The next page is the start of a new receipt, not part of the same transaction as the current one",
+    },
+  },
+};
 
 const relationshipPrompts = {
   baseline: {
@@ -83,7 +100,9 @@ const relationshipPrompts = {
 type RelationshipPrompt = keyof typeof relationshipPrompts;
 
 function relationshipQuestion(variant: RelationshipPrompt) {
-  return { relationship: { type: "choice" as const, ...relationshipPrompts[variant] } };
+  return {
+    relationship: { type: "choice" as const, ...relationshipPrompts[variant] },
+  };
 }
 
 export const pageRoles = [
@@ -671,11 +690,12 @@ async function compareDocuments(
   current: ReceiptDocument,
   candidate: ReceiptDocument,
   budget: JevBudget,
-  assessmentTask = "document-relationship",
+  assessmentTask = "document-relationship-scan-v1",
   suppliedEvidence?: {
     current: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>;
     candidate: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>;
   },
+  prompt: "scan" | "detached" = "scan",
 ) {
   const currentEvidence =
     suppliedEvidence?.current ?? (await documentEvidence(env, current));
@@ -705,20 +725,30 @@ async function compareDocuments(
     () =>
       callJev(
         env,
-        input,
-        relationshipQuestion("baseline"),
+        prompt === "scan"
+          ? { current: candidateOcr.text, next: currentOcr.text }
+          : input,
+        prompt === "scan"
+          ? scanRelationshipQuestion
+          : relationshipQuestion("baseline"),
         budget,
       ),
     (result) =>
       validateChoice(result.answers.relationship, [
         "continuation",
         "payment_match",
+        ...(prompt === "scan" ? ["duplicate"] : []),
         "unrelated",
       ]),
   );
   const result = saved.result;
   const answer = result.answers.relationship;
-  validateChoice(answer, ["continuation", "payment_match", "unrelated"]);
+  validateChoice(answer, [
+    "continuation",
+    "payment_match",
+    ...(prompt === "scan" ? ["duplicate"] : []),
+    "unrelated",
+  ]);
   return {
     answer,
     assessment_id: saved.id,
@@ -1895,6 +1925,22 @@ async function groupPipelineStep(
       waiting: true,
     };
   }
+  if (currentEvidence.ocr.truncated || nextEvidence.ocr.truncated) {
+    return {
+      phase: "group" as const,
+      cursor: JSON.stringify({
+        finalize_id: current.id,
+        next_id: next.id,
+      }),
+      result: {
+        status: "ocr-too-long",
+        current_document_id: current.id,
+        next_document_id: next.id,
+        current_characters: currentEvidence.ocr.characters,
+        next_characters: nextEvidence.ocr.characters,
+      },
+    };
+  }
   const relevant = (evidence: Awaited<ReturnType<typeof documentEvidence>>) =>
     evidence?.heads.some(
       (head) => head.role === "receipt" || head.role === "payment_evidence",
@@ -1910,6 +1956,25 @@ async function groupPipelineStep(
     };
   const decision = await compareDocuments(env, next, current, { remaining: 1 });
   if (decision && shouldAutoMerge(decision.answer)) {
+    // Earlier Luna group boundaries remain the source of truth until the owner
+    // reviews Jev's differing answer. Keep the model assessment for the audit.
+    if (current.processing || next.processing)
+      return {
+        phase: "group" as const,
+        cursor: JSON.stringify({
+          finalize_id: current.id,
+          next_id: next.id,
+        }),
+        result: {
+          status: "luna-disagreement",
+          current_document_id: current.id,
+          next_document_id: next.id,
+          relationship: decision.answer.choice,
+          probability: decision.answer.probabilities[decision.answer.choice],
+          confidence: decision.answer.confidence,
+          assessment_id: decision.assessment_id,
+        },
+      };
     if (!(await documentsAreUnlocked(env, [current, next])))
       return {
         phase: "group" as const,
@@ -1948,7 +2013,14 @@ async function groupPipelineStep(
       return {
         phase: "group" as const,
         cursor: JSON.stringify({ active_id: merged.id }),
-        result: { status: "merged" },
+        result: {
+          status: "merged",
+          document_id: merged.id,
+          previous_document_id: current.id,
+          next_document_id: next.id,
+          relationship: decision.answer.choice,
+          assessment_id: decision.assessment_id,
+        },
       };
   }
   return {
@@ -1957,7 +2029,20 @@ async function groupPipelineStep(
       finalize_id: current.id,
       next_id: next.id,
     }),
-    result: { status: "boundary" },
+    result: decision
+      ? {
+          status:
+            decision.answer.choice === "duplicate"
+              ? "duplicate-suggested"
+              : "boundary",
+          current_document_id: current.id,
+          next_document_id: next.id,
+          relationship: decision.answer.choice,
+          probability: decision.answer.probabilities[decision.answer.choice],
+          confidence: decision.answer.confidence,
+          assessment_id: decision.assessment_id,
+        }
+      : { status: "boundary" },
   };
 }
 
@@ -2252,11 +2337,32 @@ async function reconcileDetachedPayments(
           if (pairRank !== dateRank) continue;
           const key = `${dateRank}|${payment.document.id}|${purchase.document.id}`;
           if (after !== null && key <= after) continue;
+          const [purchaseEvidence, paymentEvidence] = await Promise.all([
+            documentEvidence(env, purchase.document),
+            documentEvidence(env, payment.document),
+          ]);
+          if (purchaseEvidence?.ocr.truncated || paymentEvidence?.ocr.truncated)
+            return {
+              result: {
+                status: "ocr-too-long",
+                current_document_id: purchase.document.id,
+                next_document_id: payment.document.id,
+                current_characters: purchaseEvidence?.ocr.characters ?? null,
+                next_characters: paymentEvidence?.ocr.characters ?? null,
+              },
+              remaining: 1,
+              next: key,
+            };
           const decision = await compareDocuments(
             env,
             purchase.document,
             payment.document,
             budget,
+            "document-relationship-detached-v1",
+            purchaseEvidence && paymentEvidence
+              ? { current: purchaseEvidence, candidate: paymentEvidence }
+              : undefined,
+            "detached",
           );
           if (
             decision?.answer.choice !== "payment_match" ||
@@ -2265,6 +2371,21 @@ async function reconcileDetachedPayments(
             cursor = key;
             continue;
           }
+          if (purchase.document.processing || payment.document.processing)
+            return {
+              result: {
+                status: "luna-disagreement",
+                current_document_id: purchase.document.id,
+                next_document_id: payment.document.id,
+                relationship: decision.answer.choice,
+                probability:
+                  decision.answer.probabilities[decision.answer.choice],
+                confidence: decision.answer.confidence,
+                assessment_id: decision.assessment_id,
+              },
+              remaining: 1,
+              next: key,
+            };
           if (
             !(await documentsAreUnlocked(env, [
               purchase.document,
@@ -2443,7 +2564,7 @@ export async function jevRoute(
       next,
       prior,
       { remaining: 1 },
-      "document-relationship-audit",
+      "document-relationship-audit-scan-v1",
       { current: nextEvidence, candidate: priorEvidence },
     );
     requireThat(decision, 503, "Jev group audit could not be assessed.");
@@ -2509,7 +2630,8 @@ export async function jevRoute(
       value.every((id) => typeof id === "string" && UUID.test(id)) &&
       new Set(value).size === value.length;
     requireThat(
-      validIds(input.left_page_ids) && validIds(input.right_page_ids) &&
+      validIds(input.left_page_ids) &&
+        validIds(input.right_page_ids) &&
         new Set([...input.left_page_ids, ...input.right_page_ids]).size ===
           input.left_page_ids.length + input.right_page_ids.length,
       400,
@@ -2517,14 +2639,18 @@ export async function jevRoute(
     );
     const captures = await loadCaptures();
     const currentIds = new Set(
-      captures.filter((capture) => capture.is_current).map((capture) => capture.id),
+      captures
+        .filter((capture) => capture.is_current)
+        .map((capture) => capture.id),
     );
     const documents = records(await storedDocuments(env), captures).filter(
       (document) => !document.mergedInto && !document.duplicateOf,
     );
     const available = new Map(
       documents.flatMap((document) =>
-        document.pages.map((page) => [page.captureId, { document, page }] as const),
+        document.pages.map(
+          (page) => [page.captureId, { document, page }] as const,
+        ),
       ),
     );
     const group = (ids: string[]): ReceiptDocument => {
@@ -2548,9 +2674,12 @@ export async function jevRoute(
       documentEvidence(env, right),
     ]);
     requireThat(
-      leftEvidence && rightEvidence &&
-        !leftEvidence.ocr.truncated && !rightEvidence.ocr.truncated &&
-        !leftEvidence.ocr.blank && !rightEvidence.ocr.blank,
+      leftEvidence &&
+        rightEvidence &&
+        !leftEvidence.ocr.truncated &&
+        !rightEvidence.ocr.truncated &&
+        !leftEvidence.ocr.blank &&
+        !rightEvidence.ocr.blank,
       409,
       "Benchmark requires complete saved OCR for both page groups.",
     );
@@ -2566,12 +2695,9 @@ export async function jevRoute(
         pins: leftEvidence.ocr.pins,
       },
     };
-    const response = await callJev(
-      env,
-      state,
-      relationshipQuestion(variant),
-      { remaining: 1 },
-    );
+    const response = await callJev(env, state, relationshipQuestion(variant), {
+      remaining: 1,
+    });
     const answer = response.answers.relationship;
     validateChoice(answer, Object.keys(relationshipPrompts[variant].criteria));
     // This is an immutable-evidence experiment, not a current-document finding.
@@ -2839,6 +2965,27 @@ export async function jevRoute(
           a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
       );
     let run = await activePipelineRun(env);
+    if (run && run.version !== JEV_PIPELINE_VERSION) {
+      const restarted = await env.DB.prepare(
+        "UPDATE jev_pipeline_runs SET version=?,phase='pages',cursor=NULL,step_token=NULL,step_started_at=NULL,updated_at=? WHERE id=? AND version=? AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
+      )
+        .bind(
+          JEV_PIPELINE_VERSION,
+          new Date().toISOString(),
+          run.id,
+          run.version,
+        )
+        .first<JevPipelineRun>();
+      if (!restarted)
+        return json({
+          result: null,
+          phase: run.phase,
+          remaining: 1,
+          busy: true,
+          blocked: blocked?.count ?? 0,
+        });
+      run = restarted;
+    }
     if (!run) {
       const latest = await latestPipelineRun(env);
       const boundary = current.at(-1);
