@@ -4,6 +4,7 @@ import {
   type ReceiptDocument,
   type DocumentView,
 } from "../web/documents";
+import { legacyHeadMatches, pageFingerprint } from "./jev-head-identity";
 
 export const COMPLETENESS_TASK = "receipt-completeness-v1";
 
@@ -98,11 +99,50 @@ export async function loadCompletenessAudits(
   const pageHeadById = new Map(
     pageHeadRows.map((head) => [head.capture_id, head]),
   );
+  const fingerprints = new Map(
+    await Promise.all(
+      documents.map(
+        async (document) =>
+          [document.id, await pageFingerprint(document)] as const,
+      ),
+    ),
+  );
+  const legacyCandidates = documents.flatMap((document) => {
+    const head = headById.get(document.id);
+    return head &&
+      (head.document_revision !== document.revision ||
+        head.page_fingerprint !== fingerprints.get(document.id))
+      ? [head]
+      : [];
+  });
+  const savedVersions = new Map<string, string>();
+  for (let offset = 0; offset < legacyCandidates.length; offset += 45) {
+    const chunk = legacyCandidates.slice(offset, offset + 45);
+    const rows = await env.DB.prepare(
+      `WITH wanted(document_id,revision) AS (VALUES ${chunk.map(() => "(?,?)").join(",")})
+       SELECT v.document_id,v.payload FROM document_versions v
+       JOIN wanted w ON v.document_id=w.document_id AND v.revision=w.revision`,
+    )
+      .bind(
+        ...chunk.flatMap((head) => [head.document_id, head.document_revision]),
+      )
+      .all<{ document_id: string; payload: string }>();
+    rows.results.forEach((row) =>
+      savedVersions.set(row.document_id, row.payload),
+    );
+  }
+  const validHeads = new Map<string, HeadRow>();
   const roles = new Map<string, string>();
   for (const document of documents) {
     const head = headById.get(document.id);
-    if (head?.document_revision === document.revision)
-      roles.set(document.id, head.role);
+    if (!head) continue;
+    const currentHead =
+      (head.document_revision === document.revision &&
+        head.page_fingerprint === fingerprints.get(document.id)) ||
+      (await legacyHeadMatches(document, head, savedVersions.get(document.id)));
+    if (!currentHead) continue;
+    validHeads.set(document.id, head);
+    roles.set(document.id, head.role);
   }
   const result = new Map<
     string,
@@ -111,7 +151,7 @@ export async function loadCompletenessAudits(
   for (const row of assessmentRows) {
     if (result.has(row.subject_id)) continue;
     const document = current.get(row.subject_id);
-    const head = headById.get(row.subject_id);
+    const head = validHeads.get(row.subject_id);
     if (
       !document ||
       !head ||
@@ -119,12 +159,12 @@ export async function loadCompletenessAudits(
       document.mergedInto ||
       document.duplicateOf ||
       document.revision !== row.subject_revision ||
-      head.document_revision !== document.revision ||
       head.role !== "purchase_document"
     )
       continue;
     const payload = JSON.parse(row.payload);
-    if (payload.input?.page_fingerprint !== head.page_fingerprint) continue;
+    if (payload.input?.page_fingerprint !== fingerprints.get(document.id))
+      continue;
     const pins = payload.input?.pins;
     if (
       !Array.isArray(pins) ||

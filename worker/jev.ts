@@ -24,6 +24,13 @@ import {
 } from "./completeness-state";
 import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
 import { currentTake } from "./capture-selection";
+import {
+  hashJson,
+  legacyHeadMatches,
+  pageFingerprint,
+} from "./jev-head-identity";
+
+export { pageFingerprint } from "./jev-head-identity";
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const JEV_MODEL = "jev-1.13.0";
@@ -295,72 +302,6 @@ function parsedPaymentMatchIndex(value: string | null): PaymentMatchIndex {
   return parsed;
 }
 
-async function sha256(value: unknown) {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
-  return Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-  )
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-export async function pageFingerprint(document: ReceiptDocument) {
-  return sha256(
-    document.pages.map((page) => ({
-      capture_id: page.captureId,
-      source_sha256: page.sha256,
-      rotation: page.rotation,
-    })),
-  );
-}
-
-function pageSources(document: ReceiptDocument) {
-  return document.pages.map((page) => ({
-    captureId: page.captureId,
-    sha256: page.sha256,
-    rotation: page.rotation,
-  }));
-}
-
-async function legacyHeadMatches(
-  document: ReceiptDocument,
-  head: JevDocumentHead,
-  savedPayload: string | undefined,
-) {
-  // Revision zero is the implicit one-page document for a fresh capture; it
-  // has no document_versions row until the owner or worker first saves it.
-  const saved = savedPayload
-    ? (JSON.parse(savedPayload) as ReceiptDocument)
-    : null;
-  if (saved) {
-    if (
-      saved.id !== document.id ||
-      saved.revision !== head.document_revision ||
-      JSON.stringify(pageSources(saved)) !==
-        JSON.stringify(pageSources(document))
-    )
-      return false;
-  } else if (
-    head.document_revision !== 0 ||
-    document.pages.length !== 1 ||
-    document.pages[0].captureId !== document.id ||
-    document.pages[0].rotation !== 0
-  )
-    return false;
-  const legacyPages = saved?.pages ?? document.pages;
-  return (
-    head.page_fingerprint ===
-    (await sha256(
-      legacyPages.map((page) => ({
-        capture_id: page.captureId,
-        source_sha256: page.sha256,
-        crop: saved ? (page as { crop?: unknown }).crop : null,
-        rotation: page.rotation,
-      })),
-    ))
-  );
-}
-
 export function shouldAutoMerge(answer: ChoiceAnswer) {
   return answer.choice === "continuation" || answer.choice === "payment_match";
 }
@@ -492,7 +433,7 @@ async function assess<T extends AssessableResponse>(
   run: () => Promise<T>,
   validate: (result: T) => void,
 ) {
-  const inputHash = await sha256({ input, subject, candidate });
+  const inputHash = await hashJson({ input, subject, candidate });
   const existing = await env.DB.prepare(
     "SELECT id,payload FROM jev_assessments WHERE task=? AND input_sha256=?",
   )
@@ -1242,7 +1183,7 @@ export async function queueJevJob(
   captureId: string,
   ocrSha256: string,
 ) {
-  const id = await sha256({ captureId, ocrSha256 });
+  const id = await hashJson({ captureId, ocrSha256 });
   const now = new Date().toISOString();
   await env.DB.prepare(
     "INSERT OR IGNORE INTO jev_jobs(id,capture_id,ocr_sha256,status,attempts,eligibility_version,ineligible_reason,last_error,created_at,updated_at) VALUES(?,?,?,'pending',0,?,NULL,NULL,?,?)",

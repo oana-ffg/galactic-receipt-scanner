@@ -2923,6 +2923,30 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     )
     .bind(await hashLegacy(legacy.pages), first.id)
     .run();
+  const assessCompleteness = async () => {
+    const response = await mf.dispatchFetch(`${origin}/api/jev/completeness`, {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${processingToken}`,
+      },
+      body: JSON.stringify({ document_id: first.id }),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json<any>()).toMatchObject({ assessed: true });
+    const detail = await mf.dispatchFetch(
+      `${origin}/api/documents/${first.id}`,
+      { headers: ownerHeaders },
+    );
+    expect((await detail.json<any>()).document).toMatchObject({
+      jevRole: "purchase_document",
+      completenessAudit: { result: "yes" },
+    });
+  };
+  await assessCompleteness();
   const updated = {
     ...legacy,
     revision: 1,
@@ -2945,6 +2969,7 @@ it("withholds a previously terminal document as soon as a newer raw capture exis
     .run();
   // A revision-zero Jev head can predate the first saved document version.
   expect((await jevSummary(env, updated)).ready).toBe(true);
+  await assessCompleteness();
   legacy.pages[0].crop = [0, 0, 1, 1];
   await db
     .prepare(
