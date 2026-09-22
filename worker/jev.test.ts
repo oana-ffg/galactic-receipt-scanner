@@ -394,6 +394,12 @@ it("keeps existing page groups intact and carries annotations and review reasons
       ["c", "payment_evidence"],
       ["d", "payment_evidence"],
     ]),
+    new Map([
+      ["a", "2026-09-13T17:52:37.462Z\u0000a"],
+      ["b", "2026-09-13T17:52:57.696Z\u0000b"],
+      ["c", "2026-09-13T17:53:35.601Z\u0000c"],
+      ["d", "2026-09-13T17:54:00.000Z\u0000d"],
+    ]),
   );
   expect(merged.target.pages.map((item) => item.captureId)).toEqual([
     "a",
@@ -409,6 +415,75 @@ it("keeps existing page groups intact and carries annotations and review reasons
   expect(merged.donor.pages).toEqual([]);
   expect(merged.donor.annotations).toEqual([]);
   expect(merged.donor.mergedInto).toBe(receipt.id);
+});
+
+it("places an earlier receipt section before a later receipt and payment slip", () => {
+  const page = (captureId: string) => ({
+    captureId,
+    sha256: captureId.repeat(64).slice(0, 64),
+    rotation: 0 as const,
+  });
+  const later = newDocument({ id: crypto.randomUUID() } as any);
+  later.pages = [page("bottom"), page("slip")];
+  const earlier = newDocument({ id: crypto.randomUUID() } as any);
+  earlier.pages = [page("top")];
+
+  const merged = prepareJevMerge(
+    later,
+    earlier,
+    "payment_match",
+    new Map([
+      ["top", "receipt"],
+      ["bottom", "receipt"],
+      ["slip", "payment_evidence"],
+    ]),
+    new Map([
+      ["top", "2026-09-13T17:52:37.462Z\u0000top"],
+      ["bottom", "2026-09-13T17:52:57.696Z\u0000bottom"],
+      ["slip", "2026-09-13T17:53:35.601Z\u0000slip"],
+    ]),
+  );
+
+  expect(merged.target.id).toBe(later.id);
+  expect(merged.target.pages.map((item) => item.captureId)).toEqual([
+    "top",
+    "bottom",
+    "slip",
+  ]);
+});
+
+it("preserves a reviewed page order when attaching an earlier scanned payment slip", () => {
+  const page = (captureId: string) => ({
+    captureId,
+    sha256: captureId.repeat(64).slice(0, 64),
+    rotation: 0 as const,
+  });
+  const receipt = newDocument({ id: crypto.randomUUID() } as any);
+  receipt.pages = [page("bottom"), page("top")];
+  const payment = newDocument({ id: crypto.randomUUID() } as any);
+  payment.pages = [page("slip")];
+
+  const merged = prepareJevMerge(
+    receipt,
+    payment,
+    "payment_match",
+    new Map([
+      ["top", "receipt"],
+      ["bottom", "receipt"],
+      ["slip", "payment_evidence"],
+    ]),
+    new Map([
+      ["slip", "2026-09-13T17:52:30.000Z\u0000slip"],
+      ["top", "2026-09-13T17:52:37.462Z\u0000top"],
+      ["bottom", "2026-09-13T17:52:57.696Z\u0000bottom"],
+    ]),
+  );
+
+  expect(merged.target.pages.map((item) => item.captureId)).toEqual([
+    "bottom",
+    "top",
+    "slip",
+  ]);
 });
 
 it("retargets persisted merged and duplicate aliases when Jev absorbs their target", async () => {
@@ -475,6 +550,7 @@ it("retargets persisted merged and duplicate aliases when Jev absorbs their targ
     new Request(origin),
     { DB: db, BUCKET: bucket } as any,
     async () => catalog.captures,
+    catalog.captures,
     currentDonor,
     currentTarget,
     "payment_match",

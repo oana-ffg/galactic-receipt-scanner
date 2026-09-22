@@ -807,9 +807,11 @@ export function prepareJevMerge(
   candidate: ReceiptDocument,
   relationship: "continuation" | "payment_match",
   roles: Map<string, PageRole>,
+  captureOrderById: Map<string, string>,
 ) {
   let target = structuredClone(candidate),
     donor = structuredClone(current);
+  let prependDonor = false;
   if (relationship === "payment_match") {
     const currentHasReceipt = current.pages.some(
       (page) => roles.get(page.captureId) === "receipt",
@@ -817,11 +819,30 @@ export function prepareJevMerge(
     if (currentHasReceipt) {
       target = structuredClone(current);
       donor = structuredClone(candidate);
+      const donorHasReceipt = donor.pages.some(
+        (page) => roles.get(page.captureId) === "receipt",
+      );
+      if (donorHasReceipt) {
+        const firstReceiptOrder = (document: ReceiptDocument) => {
+          const orders = document.pages
+            .filter((page) => roles.get(page.captureId) === "receipt")
+            .map((page) => captureOrderById.get(page.captureId));
+          requireThat(
+            orders.every(Boolean),
+            503,
+            "Scan order is unavailable for a Jev merge.",
+          );
+          return orders.sort()[0]!;
+        };
+        prependDonor = firstReceiptOrder(donor) < firstReceiptOrder(target);
+      }
     }
   }
   const donorBeforeMerge = structuredClone(donor);
   const movedCaptureIds = donor.pages.map((page) => page.captureId);
-  target.pages = [...target.pages, ...donor.pages];
+  target.pages = prependDonor
+    ? [...donor.pages, ...target.pages]
+    : [...target.pages, ...donor.pages];
   target.annotations = [...target.annotations, ...donor.annotations];
   target.handwriting =
     target.handwriting === "present" || donor.handwriting === "present"
@@ -862,17 +883,22 @@ export async function mergeDocuments(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
+  captures: Capture[],
   current: ReceiptDocument,
   candidate: ReceiptDocument,
   relationship: "continuation" | "payment_match",
   roles: Map<string, PageRole>,
   allDocuments: ReceiptDocument[],
 ) {
+  const captureOrderById = new Map(
+    captures.map((capture) => [capture.id, captureOrder(capture)]),
+  );
   const { target, donor, movedCaptureIds } = prepareJevMerge(
     current,
     candidate,
     relationship,
     roles,
+    captureOrderById,
   );
   const rejected = (
     await env.DB.prepare(
@@ -1993,6 +2019,7 @@ async function groupPipelineStep(
         request,
         env,
         loadCaptures,
+        captures,
         next,
         current,
         decision.answer.choice as "continuation" | "payment_match",
@@ -2399,6 +2426,7 @@ async function reconcileDetachedPayments(
               request,
               env,
               loadCaptures,
+              captures,
               purchase.document,
               payment.document,
               "payment_match",
