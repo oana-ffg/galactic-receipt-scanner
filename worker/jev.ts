@@ -555,6 +555,7 @@ function records(stored: ReceiptDocument[], captures: Capture[]) {
   const assigned = new Set(
     stored.flatMap((document) => document.pages.map((page) => page.captureId)),
   );
+  const storedIds = new Set(stored.map((document) => document.id));
   return [
     ...stored,
     ...captures
@@ -562,7 +563,7 @@ function records(stored: ReceiptDocument[], captures: Capture[]) {
         (capture) =>
           capture.is_current &&
           !assigned.has(capture.id) &&
-          !stored.some((document) => document.id === capture.id),
+          !storedIds.has(capture.id),
       )
       .map(newDocument),
   ];
@@ -2337,6 +2338,19 @@ async function documentForCapture(
     : newDocument(capture);
 }
 
+async function documentById(
+  env: Env,
+  id: string,
+  loadCapture: (id: string) => Promise<Capture | null>,
+): Promise<ReceiptDocument | null> {
+  const saved = await storedDocumentById(env, id);
+  if (saved) return saved;
+  const capture = await loadCapture(id);
+  if (!capture?.is_current) return null;
+  const document = await documentForCapture(env, capture);
+  return document.id === id ? document : null;
+}
+
 async function activeDocumentForCapture(
   env: Env,
   capture: Capture,
@@ -2758,6 +2772,21 @@ async function groupPipelineStep(
     active_id?: string;
     finalize_id?: string;
   }>(run);
+  if (run.version < PAGE_CONTINUITY_PIPELINE_VERSION) {
+    const completed = await latestCompletedPipelineRun(env);
+    if (
+      completed &&
+      completed.snapshot_created_at === run.snapshot_created_at &&
+      completed.snapshot_capture_id === run.snapshot_capture_id &&
+      !(await nextContinuityCapture(env, { ...run, cursor: null }))
+    )
+      return {
+        phase: "dates" as const,
+        cursor: null,
+        result: { status: "continuity-verified" },
+        busy: false,
+      };
+  }
   if (
     run.version < PAGE_CONTINUITY_PIPELINE_VERSION ||
     cursor?.active_id ||
@@ -2917,11 +2946,9 @@ async function documentPipelineStep(
   };
 }
 
-async function reconcileDetachedPayments(
-  request: Request,
+async function buildDetachedPaymentCandidates(
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
-  after: string | null,
   pipelineRun: JevPipelineRun,
 ) {
   const captures = await loadCaptures();
@@ -2942,59 +2969,12 @@ async function reconcileDetachedPayments(
         );
       }),
   );
-  const currentPages = new Map(
-    allDocuments.flatMap((document) =>
-      document.pages
-        .filter((page) => capturesById.get(page.captureId)?.is_current)
-        .map((page) => [page.captureId, page] as const),
-    ),
-  );
-  const unindexed = (
-    await env.DB.prepare(
-      "SELECT * FROM jev_page_heads WHERE date_candidates IS NULL OR payment_match_index IS NULL ORDER BY updated_at,capture_id",
-    ).all<PageHead>()
-  ).results
-    .filter(
-      (head) =>
-        currentPages.get(head.capture_id)?.sha256 === head.source_sha256,
-    )
-    .slice(0, 25);
-  if (unindexed.length) {
-    for (const head of unindexed) {
-      const page = currentPages.get(head.capture_id)!;
-      const found = await pinnedPpOcr(env, page, head.ocr_sha256);
-      requireThat(
-        found,
-        503,
-        "Pinned PP OCR is unavailable for detached-payment ranking.",
-      );
-      const dates = ocrDateCandidates(found.value.text);
-      const matchIndex = paymentMatchIndex(found.value.text);
-      await env.DB.prepare(
-        "UPDATE jev_page_heads SET date_candidates=COALESCE(date_candidates,?),payment_match_index=COALESCE(payment_match_index,?) WHERE capture_id=? AND source_sha256=? AND ocr_sha256=?",
-      )
-        .bind(
-          JSON.stringify(dates),
-          JSON.stringify(matchIndex),
-          head.capture_id,
-          head.source_sha256,
-          head.ocr_sha256,
-        )
-        .run();
-    }
-    return {
-      result: { status: "indexed", pages: unindexed.length },
-      remaining: 1,
-      next: null,
-    };
-  }
   const pageHeadRows = (
     await env.DB.prepare("SELECT * FROM jev_page_heads").all<PageHead>()
   ).results;
   const pageHeadsByCapture = new Map(
     pageHeadRows.map((row) => [row.capture_id, row]),
   );
-  const roles = new Map(pageHeadRows.map((row) => [row.capture_id, row.role]));
   type RankedDocument = {
     document: ReceiptDocument;
     dates: Set<string>;
@@ -3047,26 +3027,178 @@ async function reconcileDetachedPayments(
   }
   purchases.sort((a, b) => a.document.id.localeCompare(b.document.id));
   payments.sort((a, b) => a.document.id.localeCompare(b.document.id));
+  const index: DetachedPaymentIndex = {
+    documentCount: documents.length,
+    purchases: purchases.map(({ document, dates, amounts, terms }) => ({
+      id: document.id,
+      dates: [...dates],
+      amounts: [...amounts],
+      terms: [...terms],
+    })),
+    payments: payments.map(({ document, dates, amounts, terms }) => ({
+      id: document.id,
+      dates: [...dates],
+      amounts: [...amounts],
+      terms: [...terms],
+    })),
+  };
+  await env.DB.prepare(
+    "DELETE FROM jev_payment_index_chunks WHERE pipeline_run_id=?",
+  )
+    .bind(pipelineRun.id)
+    .run();
+  for (const kind of ["purchases", "payments"] as const) {
+    const items = index[kind];
+    for (let offset = 0; offset < items.length; offset += 50) {
+      await env.DB.prepare(
+        "INSERT INTO jev_payment_index_chunks(pipeline_run_id,kind,chunk_index,payload) VALUES(?,?,?,?)",
+      )
+        .bind(
+          pipelineRun.id,
+          kind,
+          offset / 50,
+          JSON.stringify(items.slice(offset, offset + 50)),
+        )
+        .run();
+    }
+  }
+  await env.DB.prepare(
+    "INSERT INTO jev_payment_candidate_runs(pipeline_run_id,document_count,purchase_count,payment_count,next_payment_index,built_at) VALUES(?,?,?,?,0,NULL)",
+  )
+    .bind(
+      pipelineRun.id,
+      index.documentCount,
+      index.purchases.length,
+      index.payments.length,
+    )
+    .run();
+  return { purchases: index.purchases.length, payments: index.payments.length };
+}
+
+type DetachedPaymentIndex = {
+  documentCount: number;
+  purchases: {
+    id: string;
+    dates: string[];
+    amounts: number[];
+    terms: string[];
+  }[];
+  payments: {
+    id: string;
+    dates: string[];
+    amounts: number[];
+    terms: string[];
+  }[];
+};
+
+type PaymentCandidateRun = {
+  document_count: number;
+  purchase_count: number;
+  payment_count: number;
+  next_payment_index: number;
+  built_at: string | null;
+};
+
+async function loadDetachedPaymentIndex(
+  env: Env,
+  runId: string,
+  saved: PaymentCandidateRun,
+): Promise<DetachedPaymentIndex> {
+  const rows = (
+    await env.DB.prepare(
+      "SELECT kind,chunk_index,payload FROM jev_payment_index_chunks WHERE pipeline_run_id=? ORDER BY kind,chunk_index",
+    )
+      .bind(runId)
+      .all<{ kind: string; chunk_index: number; payload: string }>()
+  ).results;
+  const index: DetachedPaymentIndex = {
+    documentCount: saved.document_count,
+    purchases: [],
+    payments: [],
+  };
+  const expected = { purchases: 0, payments: 0 };
+  for (const row of rows) {
+    requireThat(
+      row.kind === "purchases" || row.kind === "payments",
+      503,
+      "Stored payment index is invalid.",
+    );
+    requireThat(
+      row.chunk_index === expected[row.kind]++,
+      503,
+      "Stored payment index has a missing chunk.",
+    );
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.payload);
+    } catch {
+      throw new HttpError(503, "Stored payment index is invalid.");
+    }
+    requireThat(
+      Array.isArray(parsed) && parsed.length > 0 && parsed.length <= 50,
+      503,
+      "Stored payment index is invalid.",
+    );
+    index[row.kind].push(...(parsed as DetachedPaymentIndex[typeof row.kind]));
+  }
+  requireThat(
+    index.purchases.length === saved.purchase_count &&
+      index.payments.length === saved.payment_count,
+    503,
+    "Stored payment index is incomplete.",
+  );
+  return index;
+}
+
+async function enqueueDetachedPaymentCandidates(
+  env: Env,
+  run: JevPipelineRun,
+  saved: PaymentCandidateRun,
+) {
+  const index = await loadDetachedPaymentIndex(env, run.id, saved);
+  const purchaseCount = index.purchases.length;
+  const paymentCount = index.payments.length;
+  requireThat(
+    Number.isSafeInteger(saved.next_payment_index) &&
+      saved.next_payment_index >= 0 &&
+      saved.next_payment_index <= paymentCount,
+    503,
+    "Stored payment candidate progress is invalid.",
+  );
+  const end = Math.min(paymentCount, saved.next_payment_index + 5);
   const termFrequency = new Map<string, number>();
-  for (const document of [...purchases, ...payments])
+  for (const document of [...index.purchases, ...index.payments])
     for (const term of document.terms)
       termFrequency.set(term, (termFrequency.get(term) ?? 0) + 1);
-  const likelyByPayment = new Map<string, Set<string>>();
-  for (const payment of payments) {
-    const candidates = purchases.flatMap((purchase) => {
+  const candidates: {
+    rank: number;
+    pass: string;
+    paymentId: string;
+    purchaseId: string;
+  }[] = [];
+  for (
+    let paymentIndex = saved.next_payment_index;
+    paymentIndex < end;
+    paymentIndex++
+  ) {
+    const payment = index.payments[paymentIndex];
+    const paymentDates = new Set(payment.dates);
+    const paymentAmounts = new Set(payment.amounts);
+    const paymentTerms = new Set(payment.terms);
+    const likely = index.purchases.flatMap((purchase) => {
       if (
-        [...payment.dates].some((date) => purchase.dates.has(date)) ||
-        [...payment.amounts].some((amount) => purchase.amounts.has(amount))
+        purchase.dates.some((date) => paymentDates.has(date)) ||
+        purchase.amounts.some((amount) => paymentAmounts.has(amount))
       )
         return [];
-      const sharedTerms = [...payment.terms].filter(
+      const sharedTerms = purchase.terms.filter(
         (term) =>
-          purchase.terms.has(term) &&
+          paymentTerms.has(term) &&
           (termFrequency.get(term) ?? 0) <=
-            Math.max(5, Math.ceil(documents.length * 0.1)),
+            Math.max(5, Math.ceil(index.documentCount * 0.1)),
       );
-      const nearbyAmounts = [...payment.amounts].some((amount) =>
-        [...purchase.amounts].some(
+      const nearbyAmounts = payment.amounts.some((amount) =>
+        purchase.amounts.some(
           (other) =>
             Math.abs(amount - other) <=
             Math.max(100, Math.round(amount * 0.05)),
@@ -3075,139 +3207,367 @@ async function reconcileDetachedPayments(
       if (!sharedTerms.length && !nearbyAmounts) return [];
       return [
         {
-          id: purchase.document.id,
+          id: purchase.id,
           score: sharedTerms.length * 2 + Number(nearbyAmounts),
         },
       ];
     });
-    candidates.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-    likelyByPayment.set(
-      payment.document.id,
-      new Set(candidates.slice(0, 12).map((candidate) => candidate.id)),
+    likely.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const likelyIds = new Set(
+      likely.slice(0, 12).map((candidate) => candidate.id),
     );
-  }
-  const budget: JevBudget = { remaining: 1 };
-  let cursor = after;
-  try {
-    for (const matchPass of [0, 1, 2] as const) {
-      for (const payment of payments) {
-        for (const purchase of purchases) {
-          const sharedDate = [...purchase.dates].some((date) =>
-            payment.dates.has(date),
-          );
-          const sharedAmount = [...purchase.amounts].some((amount) =>
-            payment.amounts.has(amount),
-          );
-          const pairPass = sharedDate ? 0 : sharedAmount ? 1 : 2;
-          if (
-            pairPass !== matchPass ||
-            (matchPass === 2 &&
-              !likelyByPayment
-                .get(payment.document.id)
-                ?.has(purchase.document.id))
-          )
-            continue;
-          const key = `${matchPass}|${payment.document.id}|${purchase.document.id}`;
-          if (after !== null && key <= after) continue;
-          const [purchaseEvidence, paymentEvidence] = await Promise.all([
-            documentEvidence(env, purchase.document),
-            documentEvidence(env, payment.document),
-          ]);
-          if (purchaseEvidence?.ocr.truncated || paymentEvidence?.ocr.truncated)
-            return {
-              result: {
-                status: "ocr-too-long",
-                current_document_id: purchase.document.id,
-                next_document_id: payment.document.id,
-                current_characters: purchaseEvidence?.ocr.characters ?? null,
-                next_characters: paymentEvidence?.ocr.characters ?? null,
-              },
-              remaining: 1,
-              next: key,
-            };
-          const decision = await compareDocuments(
-            env,
-            purchase.document,
-            payment.document,
-            budget,
-            `${DETACHED_PAYMENT_TASK}-${["date", "amount", "likely"][matchPass]}`,
-            purchaseEvidence && paymentEvidence
-              ? { current: purchaseEvidence, candidate: paymentEvidence }
-              : undefined,
-            "payment",
-          );
-          if (
-            decision?.answer.choice !== "payment_match" ||
-            !shouldAutoMerge(decision.answer)
-          ) {
-            cursor = key;
-            continue;
-          }
-          if (purchase.document.processing || payment.document.processing)
-            return {
-              result: {
-                status: "needs-review",
-                current_document_id: purchase.document.id,
-                next_document_id: payment.document.id,
-                relationship: decision.answer.choice,
-                probability:
-                  decision.answer.probabilities[decision.answer.choice],
-                confidence: decision.answer.confidence,
-                assessment_id: decision.assessment_id,
-                match_pass: ["date", "amount", "likely"][matchPass],
-              },
-              remaining: 1,
-              next: key,
-            };
-          if (
-            !(await documentsAreUnlocked(env, [
-              purchase.document,
-              payment.document,
-            ]))
-          )
-            return { result: null, remaining: 1, busy: true, next: cursor };
-          let merged: ReceiptDocument | null;
-          try {
-            merged = await mergeDocuments(
-              request,
-              env,
-              loadCaptures,
-              captures,
-              purchase.document,
-              payment.document,
-              "payment_match",
-              roles,
-              allDocuments,
-            );
-          } catch (error) {
-            if (error instanceof JevMutationBusy)
-              return { result: null, remaining: 1, busy: true, next: cursor };
-            throw error;
-          }
-          if (!merged) {
-            cursor = key;
-            continue;
-          }
-          return {
-            result: {
-              status: "merged",
-              document_id: merged.id,
-              payment_document_id: payment.document.id,
-              assessment_id: decision.assessment_id,
-              match_pass: ["date", "amount", "likely"][matchPass],
-            },
-            remaining: 1,
-            next: null,
-          };
-        }
-      }
+    for (
+      let purchaseIndex = 0;
+      purchaseIndex < purchaseCount;
+      purchaseIndex++
+    ) {
+      const purchase = index.purchases[purchaseIndex];
+      const pass = purchase.dates.some((date) => paymentDates.has(date))
+        ? 0
+        : purchase.amounts.some((amount) => paymentAmounts.has(amount))
+          ? 1
+          : 2;
+      if (pass === 2 && !likelyIds.has(purchase.id)) continue;
+      candidates.push({
+        rank:
+          pass * paymentCount * purchaseCount +
+          paymentIndex * purchaseCount +
+          purchaseIndex +
+          1,
+        pass: ["date", "amount", "likely"][pass],
+        paymentId: payment.id,
+        purchaseId: purchase.id,
+      });
     }
+  }
+  let batch: D1PreparedStatement[] = [];
+  for (let offset = 0; offset < candidates.length; offset += 20) {
+    const chunk = candidates.slice(offset, offset + 20);
+    batch.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO jev_payment_candidates(
+        pipeline_run_id,rank,pass,payment_document_id,purchase_document_id
+      ) VALUES ${chunk.map(() => "(?,?,?,?,?)").join(",")}`,
+      ).bind(
+        ...chunk.flatMap((candidate) => [
+          run.id,
+          candidate.rank,
+          candidate.pass,
+          candidate.paymentId,
+          candidate.purchaseId,
+        ]),
+      ),
+    );
+    if (batch.length === 20) {
+      await env.DB.batch(batch);
+      batch = [];
+    }
+  }
+  if (batch.length) await env.DB.batch(batch);
+  await env.DB.prepare(
+    "UPDATE jev_payment_candidate_runs SET next_payment_index=?,built_at=? WHERE pipeline_run_id=? AND next_payment_index=? AND built_at IS NULL",
+  )
+    .bind(
+      end,
+      end === paymentCount ? new Date().toISOString() : null,
+      run.id,
+      saved.next_payment_index,
+    )
+    .run();
+  return {
+    payments: end - saved.next_payment_index,
+    candidates: candidates.length,
+    complete: end === paymentCount,
+  };
+}
+
+export function paymentCandidateRank(
+  after: string | null,
+  index: DetachedPaymentIndex | null,
+): number {
+  if (after === null) return 0;
+  const numeric = Number(after);
+  if (Number.isSafeInteger(numeric) && numeric >= 0) return numeric;
+  const [pass, paymentId, purchaseId] = after.split("|");
+  requireThat(index, 503, "Stored payment candidate index is unavailable.");
+  requireThat(
+    ["0", "1", "2"].includes(pass) &&
+      typeof paymentId === "string" &&
+      UUID.test(paymentId) &&
+      typeof purchaseId === "string" &&
+      UUID.test(purchaseId),
+    503,
+    "Stored payment candidate cursor is invalid.",
+  );
+  const paymentIndex = index.payments.findIndex(
+    (item) => item.id === paymentId,
+  );
+  const purchaseIndex = index.purchases.findIndex(
+    (item) => item.id === purchaseId,
+  );
+  return paymentIndex < 0 || purchaseIndex < 0
+    ? 0
+    : Number(pass) * index.payments.length * index.purchases.length +
+        paymentIndex * index.purchases.length +
+        purchaseIndex +
+        1;
+}
+
+async function activePaymentDocument(
+  env: Env,
+  id: string,
+  run: JevPipelineRun,
+  loadCapture: (id: string) => Promise<Capture | null>,
+): Promise<ReceiptDocument | null> {
+  const saved = await storedDocumentById(env, id);
+  const first = saved ? null : await loadCapture(id);
+  const document = saved ?? (first?.is_current ? newDocument(first) : null);
+  if (!document || document.mergedInto || document.duplicateOf) return null;
+  for (const page of document.pages) {
+    const capture = await loadCapture(page.captureId);
+    if (
+      !capture?.is_current ||
+      !withinPipelineSnapshot(capture, run) ||
+      capture.sha256 !== page.sha256
+    )
+      return null;
+  }
+  return document;
+}
+
+async function reconcileDetachedPayments(
+  request: Request,
+  env: Env,
+  loadCaptures: () => Promise<Capture[]>,
+  loadCapture: (id: string) => Promise<Capture | null>,
+  after: string | null,
+  pipelineRun: JevPipelineRun,
+) {
+  const unindexed = (
+    await env.DB.prepare(
+      `SELECT head.* FROM jev_page_heads head
+       JOIN captures ON captures.id=head.capture_id
+       WHERE (head.date_candidates IS NULL OR head.payment_match_index IS NULL)
+         AND head.source_sha256=captures.sha256
+         AND (${currentTake})
+         AND (captures.created_at,captures.id)<=(?,?)
+       ORDER BY head.updated_at,head.capture_id LIMIT 25`,
+    )
+      .bind(pipelineRun.snapshot_created_at, pipelineRun.snapshot_capture_id)
+      .all<PageHead>()
+  ).results;
+  if (unindexed.length) {
+    for (const head of unindexed) {
+      const capture = await loadCapture(head.capture_id);
+      requireThat(
+        capture?.is_current && capture.sha256 === head.source_sha256,
+        503,
+        "Indexed receipt page changed during payment preparation.",
+      );
+      const document = await documentForCapture(env, capture);
+      const page = document.pages.find(
+        (item) => item.captureId === head.capture_id,
+      );
+      requireThat(page, 503, "Indexed receipt page is unavailable.");
+      const found = await pinnedPpOcr(env, page, head.ocr_sha256);
+      requireThat(
+        found,
+        503,
+        "Pinned PP OCR is unavailable for detached-payment ranking.",
+      );
+      const dates = ocrDateCandidates(found.value.text);
+      const matchIndex = paymentMatchIndex(found.value.text);
+      await env.DB.prepare(
+        "UPDATE jev_page_heads SET date_candidates=COALESCE(date_candidates,?),payment_match_index=COALESCE(payment_match_index,?) WHERE capture_id=? AND source_sha256=? AND ocr_sha256=?",
+      )
+        .bind(
+          JSON.stringify(dates),
+          JSON.stringify(matchIndex),
+          head.capture_id,
+          head.source_sha256,
+          head.ocr_sha256,
+        )
+        .run();
+    }
+    return {
+      result: { status: "indexed", pages: unindexed.length },
+      remaining: 1,
+      next: after,
+    };
+  }
+  const plan = await env.DB.prepare(
+    "SELECT document_count,purchase_count,payment_count,next_payment_index,built_at FROM jev_payment_candidate_runs WHERE pipeline_run_id=?",
+  )
+    .bind(pipelineRun.id)
+    .first<PaymentCandidateRun>();
+  if (!plan) {
+    const counts = await buildDetachedPaymentCandidates(
+      env,
+      loadCaptures,
+      pipelineRun,
+    );
+    return {
+      result: { status: "payment-index-built", ...counts },
+      remaining: 1,
+      next: after,
+    };
+  }
+  if (!plan.built_at) {
+    const progress = await enqueueDetachedPaymentCandidates(
+      env,
+      pipelineRun,
+      plan,
+    );
+    return {
+      result: { status: "payment-candidates-indexed", ...progress },
+      remaining: 1,
+      next: after,
+    };
+  }
+  const legacyCursor = after !== null && !/^(0|[1-9]\d*)$/.test(after);
+  let lastRank = paymentCandidateRank(
+    after,
+    legacyCursor
+      ? await loadDetachedPaymentIndex(env, pipelineRun.id, plan)
+      : null,
+  );
+  type CandidateRow = {
+    rank: number;
+    pass: string;
+    payment_document_id: string;
+    purchase_document_id: string;
+  };
+  let selected: {
+    candidate: CandidateRow;
+    purchase: ReceiptDocument;
+    payment: ReceiptDocument;
+  } | null = null;
+  for (let skipped = 0; skipped < 20; skipped++) {
+    const candidate = await env.DB.prepare(
+      "SELECT rank,pass,payment_document_id,purchase_document_id FROM jev_payment_candidates WHERE pipeline_run_id=? AND rank>? ORDER BY rank LIMIT 1",
+    )
+      .bind(pipelineRun.id, lastRank)
+      .first<CandidateRow>();
+    if (!candidate) return { result: null, remaining: 0, next: null };
+    const [purchase, payment] = await Promise.all([
+      activePaymentDocument(
+        env,
+        candidate.purchase_document_id,
+        pipelineRun,
+        loadCapture,
+      ),
+      activePaymentDocument(
+        env,
+        candidate.payment_document_id,
+        pipelineRun,
+        loadCapture,
+      ),
+    ]);
+    if (purchase && payment) {
+      selected = { candidate, purchase, payment };
+      break;
+    }
+    lastRank = candidate.rank;
+  }
+  if (!selected)
+    return {
+      result: { status: "retired-candidates-skipped" },
+      remaining: 1,
+      next: String(lastRank),
+    };
+  const { candidate, purchase, payment } = selected;
+  const next = String(candidate.rank);
+  const [purchaseEvidence, paymentEvidence] = await Promise.all([
+    documentEvidence(env, purchase),
+    documentEvidence(env, payment),
+  ]);
+  if (
+    purchaseEvidence?.heads.some((head) => head.role === "payment_evidence") ||
+    paymentEvidence?.heads.some((head) => head.role === "receipt")
+  )
+    return { result: { status: "candidate-retired" }, remaining: 1, next };
+  if (purchaseEvidence?.ocr.truncated || paymentEvidence?.ocr.truncated)
+    return {
+      result: {
+        status: "ocr-too-long",
+        current_document_id: purchase.id,
+        next_document_id: payment.id,
+        current_characters: purchaseEvidence?.ocr.characters ?? null,
+        next_characters: paymentEvidence?.ocr.characters ?? null,
+      },
+      remaining: 1,
+      next,
+    };
+  const budget: JevBudget = { remaining: 1 };
+  const decision = await compareDocuments(
+    env,
+    purchase,
+    payment,
+    budget,
+    `${DETACHED_PAYMENT_TASK}-${candidate.pass}`,
+    purchaseEvidence && paymentEvidence
+      ? { current: purchaseEvidence, candidate: paymentEvidence }
+      : undefined,
+    "payment",
+  );
+  if (!decision || !shouldAutoMerge(decision.answer))
+    return { result: null, remaining: 1, next };
+  if (purchase.processing || payment.processing)
+    return {
+      result: {
+        status: "needs-review",
+        current_document_id: purchase.id,
+        next_document_id: payment.id,
+        relationship: decision.answer.choice,
+        probability: decision.answer.probabilities[decision.answer.choice],
+        confidence: decision.answer.confidence,
+        assessment_id: decision.assessment_id,
+        match_pass: candidate.pass,
+      },
+      remaining: 1,
+      next,
+    };
+  if (!(await documentsAreUnlocked(env, [purchase, payment])))
+    return { result: null, remaining: 1, busy: true, next: after };
+  const captures = await loadCaptures();
+  const allDocuments = records(await storedDocuments(env), captures);
+  const roles = new Map(
+    (
+      await env.DB.prepare("SELECT capture_id,role FROM jev_page_heads").all<
+        Pick<PageHead, "capture_id" | "role">
+      >()
+    ).results.map((head) => [head.capture_id, head.role]),
+  );
+  let merged: ReceiptDocument | null;
+  try {
+    merged = await mergeDocuments(
+      request,
+      env,
+      loadCaptures,
+      captures,
+      purchase,
+      payment,
+      "payment_match",
+      roles,
+      allDocuments,
+    );
   } catch (error) {
-    if (error instanceof JevCheckpoint)
-      return { result: null, remaining: 1, next: cursor };
+    if (error instanceof JevMutationBusy)
+      return { result: null, remaining: 1, busy: true, next: after };
     throw error;
   }
-  return { result: null, remaining: 0, next: null };
+  if (!merged) return { result: null, remaining: 1, next };
+  return {
+    result: {
+      status: "merged",
+      document_id: merged.id,
+      payment_document_id: payment.id,
+      assessment_id: decision.assessment_id,
+      match_pass: candidate.pass,
+    },
+    remaining: 1,
+    next,
+  };
 }
 
 export async function jevRoute(
@@ -3358,8 +3718,7 @@ export async function jevRoute(
       400,
       "Provide a document ID for group audit.",
     );
-    const documents = records(await storedDocuments(env), await loadCaptures());
-    const document = documents.find((item) => item.id === input.document_id);
+    const document = await documentById(env, input.document_id, loadCapture);
     requireThat(
       document && !document.mergedInto && !document.duplicateOf,
       404,
@@ -3431,10 +3790,7 @@ export async function jevRoute(
       { current: nextEvidence, candidate: priorEvidence },
     );
     requireThat(decision, 503, "Jev group audit could not be assessed.");
-    const current = records(
-      await storedDocuments(env),
-      await loadCaptures(),
-    ).find((item) => item.id === document.id);
+    const current = await documentById(env, document.id, loadCapture);
     requireThat(
       current &&
         current.revision === document.revision &&
@@ -3670,8 +4026,7 @@ export async function jevRoute(
       400,
       "Provide a document ID for completeness assessment.",
     );
-    const documents = records(await storedDocuments(env), await loadCaptures());
-    const document = documents.find((item) => item.id === input.document_id);
+    const document = await documentById(env, input.document_id, loadCapture);
     requireThat(
       document && !document.mergedInto && !document.duplicateOf,
       404,
@@ -3790,10 +4145,7 @@ export async function jevRoute(
         );
       },
     );
-    const current = records(
-      await storedDocuments(env),
-      await loadCaptures(),
-    ).find((item) => item.id === document.id);
+    const current = await documentById(env, document.id, loadCapture);
     const currentEvidence = current
       ? await documentEvidence(env, current)
       : null;
@@ -3919,6 +4271,7 @@ export async function jevRoute(
           request,
           env,
           capturesForStep,
+          loadCapture,
           after,
           run,
         );

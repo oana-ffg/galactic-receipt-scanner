@@ -140,22 +140,40 @@ export const documentHeads = sqliteTable("document_heads", {
   id: text("id").primaryKey(),
   revision: integer("revision").notNull(),
 });
-export const documentPages = sqliteTable("document_pages", {
-  page_index: integer("page_index"),
-  type: text("type"),
-  capture_id: text("capture_id")
-    .primaryKey()
-    .references(() => captures.id),
-  document_id: text("document_id").notNull(),
-});
-export const documentFiles = sqliteTable("document_files", {
-  key: text("key").primaryKey(),
-  document_id: text("document_id").notNull(),
-  revision: integer("revision").notNull(),
-  sha256: text("sha256").notNull(),
-  filename: text("filename").notNull(),
-  created_at: text("created_at").notNull(),
-});
+export const documentPages = sqliteTable(
+  "document_pages",
+  {
+    page_index: integer("page_index"),
+    type: text("type"),
+    capture_id: text("capture_id")
+      .primaryKey()
+      .references(() => captures.id),
+    document_id: text("document_id").notNull(),
+  },
+  (table) => [
+    index("document_pages_document_id_page_index").on(
+      table.document_id,
+      table.page_index,
+    ),
+  ],
+);
+export const documentFiles = sqliteTable(
+  "document_files",
+  {
+    key: text("key").primaryKey(),
+    document_id: text("document_id").notNull(),
+    revision: integer("revision").notNull(),
+    sha256: text("sha256").notNull(),
+    filename: text("filename").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    index("document_files_document_created").on(
+      table.document_id,
+      table.created_at,
+    ),
+  ],
+);
 export const documentNames = sqliteTable("document_names", {
   filename: text("filename").primaryKey(),
   document_id: text("document_id").notNull(),
@@ -283,21 +301,31 @@ export const jevAssessments = sqliteTable(
     ),
   ],
 );
-export const jevPageHeads = sqliteTable("jev_page_heads", {
-  capture_id: text("capture_id")
-    .primaryKey()
-    .references(() => captures.id),
-  source_sha256: text("source_sha256").notNull(),
-  ocr_sha256: text("ocr_sha256").notNull(),
-  role: text("role").notNull(),
-  probability: integer("probability").notNull(),
-  confidence: integer("confidence").notNull(),
-  model: text("model").notNull(),
-  assessment_id: text("assessment_id").notNull(),
-  date_candidates: text("date_candidates"),
-  payment_match_index: text("payment_match_index"),
-  updated_at: text("updated_at").notNull(),
-});
+export const jevPageHeads = sqliteTable(
+  "jev_page_heads",
+  {
+    capture_id: text("capture_id")
+      .primaryKey()
+      .references(() => captures.id),
+    source_sha256: text("source_sha256").notNull(),
+    ocr_sha256: text("ocr_sha256").notNull(),
+    role: text("role").notNull(),
+    probability: integer("probability").notNull(),
+    confidence: integer("confidence").notNull(),
+    model: text("model").notNull(),
+    assessment_id: text("assessment_id").notNull(),
+    date_candidates: text("date_candidates"),
+    payment_match_index: text("payment_match_index"),
+    updated_at: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("jev_payment_index_pending")
+      .on(table.updated_at, table.capture_id)
+      .where(
+        sql`${table.date_candidates} IS NULL OR ${table.payment_match_index} IS NULL`,
+      ),
+  ],
+);
 export const jevDocumentHeads = sqliteTable("jev_document_heads", {
   document_id: text("document_id").primaryKey(),
   document_revision: integer("document_revision").notNull(),
@@ -380,6 +408,49 @@ export const jevPipelineRuns = sqliteTable(
   },
   (table) => [
     index("jev_pipeline_phase_created").on(table.phase, table.created_at),
+  ],
+);
+export const jevPaymentCandidateRuns = sqliteTable(
+  "jev_payment_candidate_runs",
+  {
+    pipeline_run_id: text("pipeline_run_id").primaryKey(),
+    document_count: integer("document_count").notNull(),
+    purchase_count: integer("purchase_count").notNull(),
+    payment_count: integer("payment_count").notNull(),
+    next_payment_index: integer("next_payment_index").notNull().default(0),
+    built_at: text("built_at"),
+  },
+);
+export const jevPaymentIndexChunks = sqliteTable(
+  "jev_payment_index_chunks",
+  {
+    pipeline_run_id: text("pipeline_run_id").notNull(),
+    kind: text("kind").notNull(),
+    chunk_index: integer("chunk_index").notNull(),
+    payload: text("payload").notNull(),
+  },
+  (table) => [
+    uniqueIndex("jev_payment_index_chunk").on(
+      table.pipeline_run_id,
+      table.kind,
+      table.chunk_index,
+    ),
+  ],
+);
+export const jevPaymentCandidates = sqliteTable(
+  "jev_payment_candidates",
+  {
+    pipeline_run_id: text("pipeline_run_id").notNull(),
+    rank: integer("rank").notNull(),
+    pass: text("pass").notNull(),
+    payment_document_id: text("payment_document_id").notNull(),
+    purchase_document_id: text("purchase_document_id").notNull(),
+  },
+  (table) => [
+    uniqueIndex("jev_payment_candidate_rank").on(
+      table.pipeline_run_id,
+      table.rank,
+    ),
   ],
 );
 // Append-only manual outlines; capture metadata and source bytes stay immutable.

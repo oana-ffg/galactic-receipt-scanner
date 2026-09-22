@@ -299,25 +299,46 @@ export async function documentRoute(
   const assigned = new Set(
     stored.flatMap((d) => d.pages.map((p) => p.captureId)),
   );
+  const storedIds = new Set(stored.map((document) => document.id));
+  const capturesById = new Map(
+    captures.map((capture) => [capture.id, capture]),
+  );
   const docs = [
     ...stored,
     ...captures
       .filter(
-        (c) =>
-          c.is_current &&
-          !assigned.has(c.id) &&
-          !stored.some((d) => d.id === c.id),
+        (c) => c.is_current && !assigned.has(c.id) && !storedIds.has(c.id),
       )
       .map(newDocument),
   ];
-  const { audits: completenessAudits, roles: jevRoles } =
-    await loadCompletenessAudits(env, docs);
+  let completenessAudits = new Map<
+    string,
+    NonNullable<DocumentView["completenessAudit"]>
+  >();
+  let jevRoles = new Map<string, string>();
+  const loadReviewState = async (selected: ReceiptDocument[]) => {
+    const state = await loadCompletenessAudits(env, selected);
+    completenessAudits = state.audits;
+    jevRoles = state.roles;
+  };
   const reserved = await names(env);
-  const fileRows = (
-    await env.DB.prepare(
-      "SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ORDER BY f.created_at DESC,f.sha256 DESC",
-    ).all<FileRow>()
-  ).results;
+  let fileRows: FileRow[] = [];
+  let filesLoaded = false;
+  const loadFileRows = async (documentIds?: string[]) => {
+    if (filesLoaded) return;
+    if (documentIds?.length === 0) {
+      filesLoaded = true;
+      return;
+    }
+    fileRows = (
+      await env.DB.prepare(
+        `SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ${documentIds ? `WHERE f.document_id IN (${documentIds.map(() => "?").join(",")})` : ""} ORDER BY f.created_at DESC,f.sha256 DESC`,
+      )
+        .bind(...(documentIds ?? []))
+        .all<FileRow>()
+    ).results;
+    filesLoaded = true;
+  };
   function view(d: ReceiptDocument): DocumentView {
     const filename = chooseName(d, reserved);
     const file = fileRows.find(
@@ -343,8 +364,7 @@ export async function documentRoute(
     }
     if (!d.checks.visual && !d.mergedInto && !d.duplicateOf) {
       for (const [index, page] of d.pages.entries()) {
-        const blur = captures.find((c) => c.id === page.captureId)?.metadata
-          .quality?.blur;
+        const blur = capturesById.get(page.captureId)?.metadata.quality?.blur;
         if (blur?.category === "uncertain") {
           state.reasons.push(
             `Page ${index + 1}: borderline blur flagged at capture (${blur.score?.toFixed(3)}). Inspect the original text during review.`,
@@ -355,7 +375,7 @@ export async function documentRoute(
     }
     if (!d.mergedInto && !d.duplicateOf) {
       for (const [index, page] of d.pages.entries()) {
-        const source = captures.find((c) => c.id === page.captureId);
+        const source = capturesById.get(page.captureId);
         if (source?.kept) {
           state.reasons.push(
             `Page ${index + 1}: kept by the owner as best available despite failed quality checks. Original warning: ${source.metadata.quality?.reason ?? "Quality check failed."}`,
@@ -379,7 +399,7 @@ export async function documentRoute(
       );
     }
     const stale = d.pages.some(
-      (p) => !captures.find((c) => c.id === p.captureId)?.is_current,
+      (p) => !capturesById.get(p.captureId)?.is_current,
     );
     if (stale && !d.mergedInto && !d.duplicateOf) {
       requireProcessing(
@@ -396,9 +416,7 @@ export async function documentRoute(
       jevRole: jevRoles.get(d.id) ?? null,
       filename,
       pdf: file ? { sha256: file.sha256, revision: file.revision } : null,
-      scannedAt: d.pages.map(
-        (p) => captures.find((c) => c.id === p.captureId)!.created_at,
-      ),
+      scannedAt: d.pages.map((p) => capturesById.get(p.captureId)!.created_at),
     };
   }
   if (request.method === "GET") {
@@ -411,6 +429,8 @@ export async function documentRoute(
           : d.pages.some((p) => p.captureId === sourceId),
       );
       requireThat(doc, 404, "Document not found.");
+      await loadFileRows([doc.id]);
+      await loadReviewState([doc]);
       return json({
         document: view(doc),
         captures: captures.filter((c) =>
@@ -438,6 +458,8 @@ export async function documentRoute(
           )
           .sort((a, b) => a.id.localeCompare(b.id));
         const page = matches.filter((d) => d.id > after).slice(0, limit + 1);
+        await loadFileRows(page.slice(0, limit).map((document) => document.id));
+        await loadReviewState(page.slice(0, limit));
         return json({
           total: matches.length,
           next: page.length > limit ? page[limit - 1].id : null,
@@ -477,6 +499,8 @@ export async function documentRoute(
           }),
         });
       }
+      await loadFileRows();
+      await loadReviewState(docs);
       return json({ documents: docs.map(view), captures });
     }
   }
@@ -502,6 +526,8 @@ export async function documentRoute(
       }
     });
     const changed = changes as ReceiptDocument[];
+    if (changed.some((document) => document.checks.pdf))
+      await loadFileRows(changed.map((document) => document.id));
     for (const d of changed) {
       const previous = stored.find((s) => s.id === d.id);
       if (!commit?.trustedProcessing) {
@@ -750,6 +776,8 @@ export async function documentRoute(
     return json({ sha256: sha, filename, revision: doc.revision });
   }
   if (action === "pdf" && request.method === "GET") {
+    await loadFileRows([doc.id]);
+    await loadReviewState([doc]);
     const hash = url.searchParams.get("version");
     const revision = url.searchParams.get("revision");
     const selected = view(doc).pdf;

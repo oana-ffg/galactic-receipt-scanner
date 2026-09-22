@@ -33,25 +33,70 @@ export async function loadCompletenessAudits(
   audits: Map<string, NonNullable<DocumentView["completenessAudit"]>>;
   roles: Map<string, string>;
 }> {
-  const [assessments, heads, pageHeads] = await Promise.all([
-    env.DB.prepare(
-      "SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
-    )
-      .bind(COMPLETENESS_TASK)
-      .all<AssessmentRow>(),
-    env.DB.prepare(
-      "SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads",
-    ).all<HeadRow>(),
-    env.DB.prepare(
-      "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
-    ).all<PageHeadRow>(),
+  if (!documents.length) return { audits: new Map(), roles: new Map() };
+  const selectChunks = async <T>(
+    query: (placeholders: string) => string,
+    ids: string[],
+  ): Promise<T[]> => {
+    const rows: T[] = [];
+    for (let offset = 0; offset < ids.length; offset += 90) {
+      const chunk = ids.slice(offset, offset + 90);
+      const result = await env.DB.prepare(query(chunk.map(() => "?").join(",")))
+        .bind(...chunk)
+        .all<T>();
+      rows.push(...result.results);
+    }
+    return rows;
+  };
+  const scoped = documents.length <= 100;
+  const documentIds = [...new Set(documents.map((document) => document.id))];
+  const pageIds = [
+    ...new Set(
+      documents.flatMap((document) =>
+        document.pages.map((page) => page.captureId),
+      ),
+    ),
+  ];
+  const [assessmentRows, headRows, pageHeadRows] = await Promise.all([
+    scoped
+      ? selectChunks<AssessmentRow>(
+          (ids) =>
+            `SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
+          documentIds,
+        )
+      : env.DB.prepare(
+          "SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
+        )
+          .bind(COMPLETENESS_TASK)
+          .all<AssessmentRow>()
+          .then((row) => row.results),
+    scoped
+      ? selectChunks<HeadRow>(
+          (ids) =>
+            `SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads WHERE document_id IN (${ids})`,
+          documentIds,
+        )
+      : env.DB.prepare(
+          "SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads",
+        )
+          .all<HeadRow>()
+          .then((row) => row.results),
+    scoped
+      ? selectChunks<PageHeadRow>(
+          (ids) =>
+            `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads WHERE capture_id IN (${ids})`,
+          pageIds,
+        )
+      : env.DB.prepare(
+          "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
+        )
+          .all<PageHeadRow>()
+          .then((row) => row.results),
   ]);
   const current = new Map(documents.map((document) => [document.id, document]));
-  const headById = new Map(
-    heads.results.map((head) => [head.document_id, head]),
-  );
+  const headById = new Map(headRows.map((head) => [head.document_id, head]));
   const pageHeadById = new Map(
-    pageHeads.results.map((head) => [head.capture_id, head]),
+    pageHeadRows.map((head) => [head.capture_id, head]),
   );
   const roles = new Map<string, string>();
   for (const document of documents) {
@@ -63,7 +108,7 @@ export async function loadCompletenessAudits(
     string,
     NonNullable<DocumentView["completenessAudit"]>
   >();
-  for (const row of assessments.results) {
+  for (const row of assessmentRows) {
     if (result.has(row.subject_id)) continue;
     const document = current.get(row.subject_id);
     const head = headById.get(row.subject_id);

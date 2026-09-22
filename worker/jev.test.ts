@@ -8,6 +8,7 @@ import {
   jevSummary,
   mergeDocuments,
   normalizeCompletenessDecision,
+  paymentCandidateRank,
   pageFingerprint,
   prepareJevMerge,
   queueJevJob,
@@ -20,6 +21,22 @@ import {
 } from "../web/ocr-data";
 
 let mf: Awaited<ReturnType<typeof runtime>>;
+
+it("translates an existing detached-payment cursor to its saved candidate rank", () => {
+  const payments = [crypto.randomUUID(), crypto.randomUUID()];
+  const purchases = [crypto.randomUUID(), crypto.randomUUID()];
+  const row = (id: string) => ({ id, dates: [], amounts: [], terms: [] });
+  const index = {
+    documentCount: 4,
+    payments: payments.map(row),
+    purchases: purchases.map(row),
+  };
+  expect(paymentCandidateRank(`1|${payments[1]}|${purchases[0]}`, index)).toBe(
+    7,
+  );
+  expect(paymentCandidateRank("7", index)).toBe(7);
+  expect(paymentCandidateRank(null, index)).toBe(0);
+});
 
 beforeEach(async () => {
   mf = await runtime();
@@ -3397,6 +3414,125 @@ it("does not match a current payment against a receipt capture retired after the
   ).toEqual([expect.objectContaining({ captureId: payment.id })]);
 });
 
+it("advances a legacy group replay when the saved scan snapshot is already verified", async () => {
+  const token = `rsc_${"q".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(token),
+    typesafeApiKey: "synthetic-key",
+    outboundService: unrelatedPaymentJevResponse,
+  });
+  const capture = await saveCapture();
+  await seedHistoricalOcr(
+    capture,
+    "SHOP RECEIPT 21.09.2026 TOTAL 12.34",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await drainBackfill(token);
+  const db = await mf.getD1Database("DB");
+  const completed = await db
+    .prepare(
+      "SELECT snapshot_created_at,snapshot_capture_id FROM jev_pipeline_runs WHERE phase='complete' ORDER BY created_at DESC LIMIT 1",
+    )
+    .first<{ snapshot_created_at: string; snapshot_capture_id: string }>();
+  expect(completed).toBeTruthy();
+  const seed = await mf.dispatchFetch(
+    `${origin}/api/jev/seed-completed-continuity`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Authorization: `Bearer ${token}`,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+      },
+      body: "{}",
+    },
+  );
+  expect(seed.status).toBe(200);
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,cursor,step_token,step_started_at,created_at,updated_at) VALUES(?,8,'group',?,?,NULL,NULL,NULL,?,?)",
+    )
+    .bind(
+      crypto.randomUUID(),
+      completed!.snapshot_created_at,
+      completed!.snapshot_capture_id,
+      now,
+      now,
+    )
+    .run();
+  const step = await runBackfill(token);
+  expect(step).toMatchObject({
+    phase: "dates",
+    result: { status: "continuity-verified" },
+  });
+});
+
+it("plans detached payments in durable bounded batches", async () => {
+  const token = `rsc_${"b".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(token),
+    typesafeApiKey: "synthetic-key",
+    outboundService: unrelatedPaymentJevResponse,
+  });
+  const db = await mf.getD1Database("DB");
+  const captures = [];
+  for (let index = 0; index < 7; index++) {
+    const capture = await saveCapture();
+    captures.push(capture);
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(
+      capture,
+      `${index === 0 ? "SHOP RECEIPT" : "PAYMENT SLIP"} 21.09.2026 TOTAL 12.34`,
+      createdAt,
+    );
+  }
+  let step: any;
+  for (let attempt = 0; attempt < 70; attempt++) {
+    step = await runBackfill(token);
+    if (step.phase === "dates") break;
+  }
+  expect(step.phase).toBe("dates");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    step = await runBackfill(token);
+    if (step.result?.status === "payment-index-built") break;
+  }
+  expect(step.result).toMatchObject({
+    status: "payment-index-built",
+    purchases: 1,
+    payments: 6,
+  });
+  const first = await runBackfill(token);
+  expect(first.result).toMatchObject({
+    status: "payment-candidates-indexed",
+    payments: 5,
+    complete: false,
+  });
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_payment_candidates")
+      .first(),
+  ).toEqual({ count: 5 });
+  const second = await runBackfill(token);
+  expect(second.result).toMatchObject({
+    status: "payment-candidates-indexed",
+    payments: 1,
+    complete: true,
+  });
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_payment_candidates")
+      .first(),
+  ).toEqual({ count: 6 });
+});
+
 it("checkpoints ranked reconciliation without repeating candidate pairs", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   const reconciliationPairs: string[] = [];
@@ -3439,6 +3575,37 @@ it("checkpoints ranked reconciliation without repeating candidate pairs", async 
   expect(backfill).toMatchObject({ remaining: 0, blocked: 0 });
   expect(reconciliationPairs).toHaveLength(4);
   expect(new Set(reconciliationPairs).size).toBe(4);
+  const queue = await db
+    .prepare("SELECT rank,pass FROM jev_payment_candidates ORDER BY rank")
+    .all<{ rank: number; pass: string }>();
+  expect(queue.results).toEqual([
+    { rank: 1, pass: "date" },
+    { rank: 2, pass: "date" },
+    { rank: 3, pass: "date" },
+    { rank: 4, pass: "date" },
+  ]);
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_payment_candidate_runs")
+      .first(),
+  ).toEqual({ count: 1 });
+  const queuePlan = await db
+    .prepare(
+      "EXPLAIN QUERY PLAN SELECT rank FROM jev_payment_candidates WHERE pipeline_run_id=? AND rank>? ORDER BY rank LIMIT 1",
+    )
+    .bind("run", 0)
+    .all<{ detail: string }>();
+  expect(queuePlan.results.map((step) => step.detail).join(" ")).toContain(
+    "jev_payment_candidate_rank",
+  );
+  const pendingPlan = await db
+    .prepare(
+      "EXPLAIN QUERY PLAN SELECT capture_id FROM jev_page_heads WHERE date_candidates IS NULL OR payment_match_index IS NULL ORDER BY updated_at,capture_id LIMIT 25",
+    )
+    .all<{ detail: string }>();
+  expect(pendingPlan.results.map((step) => step.detail).join(" ")).toContain(
+    "jev_payment_index_pending",
+  );
   expect(
     await db
       .prepare(

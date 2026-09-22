@@ -99,14 +99,12 @@ async function records(env: Env, captures: Capture[]) {
   const assigned = new Set(
     stored.flatMap((d) => d.pages.map((p) => p.captureId)),
   );
+  const storedIds = new Set(stored.map((document) => document.id));
   return [
     ...stored,
     ...captures
       .filter(
-        (c) =>
-          c.is_current &&
-          !assigned.has(c.id) &&
-          !stored.some((d) => d.id === c.id),
+        (c) => c.is_current && !assigned.has(c.id) && !storedIds.has(c.id),
       )
       .map(newDocument),
   ];
