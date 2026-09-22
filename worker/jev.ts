@@ -40,6 +40,7 @@ const COMPLETENESS_DECISIONS = {
 } as const;
 const MAX_JEV_TEXT = 24_000;
 const JEV_ELIGIBILITY_VERSION = 3;
+const PAGE_CONTINUITY_PIPELINE_VERSION = 9;
 const JEV_PIPELINE_VERSION = 9;
 const DETACHED_PAYMENT_TASK = "payment-match-detached-v2";
 
@@ -2736,7 +2737,11 @@ async function groupPipelineStep(
     active_id?: string;
     finalize_id?: string;
   }>(run);
-  if (cursor?.active_id || cursor?.finalize_id)
+  if (
+    run.version < PAGE_CONTINUITY_PIPELINE_VERSION ||
+    cursor?.active_id ||
+    cursor?.finalize_id
+  )
     return legacyGroupPipelineStep(
       request,
       env,

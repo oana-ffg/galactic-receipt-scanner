@@ -1864,6 +1864,61 @@ it("waits for an active old step but reclaims an expired one without replaying",
   ).toEqual({ version: 7, step_token: null });
 });
 
+it("finishes a version-eight group run with an empty cursor using its original document order", async () => {
+  const processingToken = `rsc_${"o".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: (request: Request) =>
+      paymentJevResponse(request, "unrelated"),
+  });
+  const db = await mf.getD1Database("DB");
+  const captures = [];
+  for (let index = 0; index < 2; index += 1) {
+    const capture = await saveCapture();
+    captures.push(capture);
+    const createdAt = `2026-01-01T00:00:0${index}.000Z`;
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(createdAt, capture.id)
+      .run();
+    await seedHistoricalOcr(capture, `SHOP RECEIPT ${index}`, createdAt);
+  }
+  await drainBackfill(processingToken);
+  await db.prepare("DELETE FROM jev_continuity_edges").run();
+  await db
+    .prepare(
+      "INSERT INTO jev_pipeline_runs(id,version,phase,snapshot_created_at,snapshot_capture_id,cursor,created_at,updated_at) VALUES(?,8,'group',?,?,NULL,?,?)",
+    )
+    .bind(
+      "old-group-run",
+      "2026-01-01T00:00:01.000Z",
+      captures[1].id,
+      "2030-01-01T00:00:00.000Z",
+      "2030-01-01T00:00:00.000Z",
+    )
+    .run();
+  const step = await runBackfill(processingToken);
+  expect(step).toMatchObject({
+    phase: "group",
+    result: { status: "boundary" },
+  });
+  const saved = await db
+    .prepare("SELECT cursor FROM jev_pipeline_runs WHERE id='old-group-run'")
+    .first<{ cursor: string }>();
+  expect(JSON.parse(saved!.cursor)).toEqual({
+    finalize_id: captures[0].id,
+    next_id: captures[1].id,
+  });
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_continuity_edges")
+      .first(),
+  ).toEqual({ count: 0 });
+  expect((await drainBackfill(processingToken)).result.phase).toBe("complete");
+});
+
 it("does not replay saved continuity just because the pipeline version changed", async () => {
   const processingToken = `rsc_${"v".repeat(43)}`;
   await mf.dispose();
