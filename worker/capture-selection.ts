@@ -1,7 +1,7 @@
 const effectiveStatus = (alias: string) =>
   `(CASE WHEN ${alias}.status='rejected' AND EXISTS(SELECT 1 FROM capture_keeps k WHERE k.capture_id=${alias}.id) THEN 'manual-review' ELSE ${alias}.status END)`;
 
-export const currentStatus = effectiveStatus("captures");
+const currentStatus = effectiveStatus("captures");
 const newerStatus = effectiveStatus("newer");
 const acceptedStatus = effectiveStatus("accepted");
 
