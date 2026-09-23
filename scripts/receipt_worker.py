@@ -1340,7 +1340,9 @@ class Worker:
                 verify(all(status.get(key) is False for key in ("draft_saved", "attempt_saved", "claim_active")),
                        "Failed claim has a saved or active backend checkpoint; preserve it for exact recovery.")
                 current = self.get_document(original["id"])
-                verify(current["revision"] == original["revision"] and current["pages"] == original["pages"],
+                claimed_pages = [{key: value for key, value in page.items() if key != "crop"}
+                                 for page in original["pages"]]
+                verify(current["revision"] == original["revision"] and current["pages"] == claimed_pages,
                        "Claimed document changed; preserve the failed run for review.")
                 self.record("expired-unsubmitted-claim", {
                     "failure": deepcopy(self.state["failed"]), "rationale": rationale,

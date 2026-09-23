@@ -796,6 +796,9 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(self.worker.handle(dict(op="reconcile", rationale=rationale))["ok"])
         self.fake.documents[DID]["pages"].pop()
 
+        self.worker.state["claim"]["document"]["pages"][0]["crop"] = [1, 2, 9, 18]
+        self.worker.checkpoint()
+
         result = self.send("reconcile", rationale=rationale)
         self.assertEqual(result["phase"], "released")
         self.assertNotIn("failed", self.worker.state)
