@@ -312,6 +312,25 @@ export async function mountReview(app: HTMLElement) {
     disposeDetail();
     detail.replaceChildren();
     detail.append(el("h2", doc.filename ?? "Identify this document"));
+    if (doc.duplicateOf) {
+      const primary = catalog.documents.find(
+        (item) => item.id === doc.duplicateOf,
+      );
+      const notice = el("p", undefined, "review-duplicate-notice");
+      const link = el(
+        "a",
+        primary?.filename
+          ? `Open primary document: ${primary.filename}`
+          : "Open primary document",
+      );
+      link.href = `/review?document=${encodeURIComponent(doc.duplicateOf)}`;
+      notice.append(
+        el("strong", "Duplicate scan. "),
+        "This original is preserved but excluded from document output. ",
+        link,
+      );
+      detail.append(notice);
+    }
     if (needsSourceIntervention(doc))
       detail.append(
         el(
