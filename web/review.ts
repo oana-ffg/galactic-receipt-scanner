@@ -16,6 +16,7 @@ import {
   needsSourceIntervention,
   completenessUncertain,
   mergeReviewReasons,
+  retargetAbsorbedAliases,
   type DocumentCatalog,
   type DocumentView,
   type InvoiceCheck,
@@ -872,7 +873,9 @@ export async function mountReview(app: HTMLElement) {
               pdf: false,
             };
             source.mergedInto = destination.id;
-            await saveDocuments([source, destination]);
+            const changes = [source, destination];
+            retargetAbsorbedAliases(changes, fresh.documents, destination.id);
+            await saveDocuments(changes);
             selected = destination.id;
           }
           await refresh();

@@ -10,6 +10,7 @@ import {
   mergeReviewReasons,
   needsSourceIntervention,
   newDocument,
+  retargetAbsorbedAliases,
   validDate,
 } from "./documents";
 import type { Capture } from "./types";
@@ -143,4 +144,30 @@ it("keeps an explicit duplicate out of the processing queue while retaining sour
     status: "duplicate",
     reasons: ["Synthetic unresolved annotation."],
   });
+});
+it("retargets inherited aliases when the review page absorbs a document", () => {
+  const retained = newDocument(source);
+  const absorbed = newDocument(source);
+  absorbed.id = "00000000-0000-4000-8000-000000000002";
+  absorbed.mergedInto = retained.id;
+  absorbed.pages = [];
+  const oldSlip = newDocument(source);
+  oldSlip.id = "00000000-0000-4000-8000-000000000003";
+  oldSlip.mergedInto = absorbed.id;
+  oldSlip.pages = [];
+  oldSlip.uncertainties = ["Synthetic payment needs review."];
+  const oldDuplicate = newDocument(source);
+  oldDuplicate.id = "00000000-0000-4000-8000-000000000004";
+  oldDuplicate.duplicateOf = absorbed.id;
+  const changes = [absorbed, retained];
+  retargetAbsorbedAliases(changes, [oldSlip, oldDuplicate], retained.id);
+  expect(changes).toHaveLength(4);
+  expect(changes.find((d) => d.id === oldSlip.id)?.mergedInto).toBe(
+    retained.id,
+  );
+  expect(changes.find((d) => d.id === oldDuplicate.id)?.duplicateOf).toBe(
+    retained.id,
+  );
+  expect(retained.uncertainties).toContain("Synthetic payment needs review.");
+  expect(oldSlip.mergedInto).toBe(absorbed.id);
 });
