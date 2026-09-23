@@ -1321,58 +1321,80 @@ it("rolls back document and provenance writes when a lease expires after the ini
   ).toBe(0);
   expect((await req(`/api/files/${c.id}/raw`)).status).toBe(200);
 });
-it("detaches atomically, preserves originals and suppresses a rejected reattachment", async () => {
-  const a = await capture(),
-    b = await capture(),
-    cat = await category(),
-    lease = await claim();
-  const target = newDocument(a);
-  target.pages.push(...newDocument(b).pages);
-  await ok(
-    "/api/processing/submit",
-    {
-      token: lease.token,
-      model: "gpt-5.6-luna",
-      extraction: extraction(cat),
-      documents: [target],
-    },
-    true,
-  );
-  const d = (await ok(`/api/documents/${a.id}`)).document;
-  await ok("/api/processing/detach", {
-    document_id: a.id,
-    revision: d.revision,
-    capture_id: b.id,
-    reason: "Synthetic mismatching transaction reference.",
-  });
-  const source = (await ok(`/api/documents?captureId=${b.id}`)).document;
-  expect(source.id).not.toBe(a.id);
-  expect(source.pages[0].captureId).toBe(b.id);
-  expect((await req(`/api/files/${b.id}/raw`)).status).toBe(200);
-  const again = await claim();
-  const fresh = (
-    await ok(`/api/processing/context?token=${again.token}`, undefined, true)
-  ).document;
-  expect(fresh.id).toBe(a.id);
-  fresh.pages.push(...source.pages);
-  source.pages = [];
-  source.mergedInto = fresh.id;
-  source.evidence = "Synthetic attempted rematch.";
-  expect(
-    (
-      await req(
-        "/api/processing/submit",
-        {
-          token: again.token,
-          model: "gpt-5.6-luna",
-          extraction: extraction(cat),
-          documents: [fresh, source],
-        },
-        true,
-      )
-    ).status,
-  ).toBe(409);
-});
+it.each([false, true])(
+  "detaches atomically %s alias, preserves originals and suppresses a rejected reattachment",
+  async (withAlias) => {
+    const a = await capture(),
+      b = await capture(),
+      cat = await category(),
+      lease = await claim();
+    const target = newDocument(a);
+    target.pages.push(...newDocument(b).pages);
+    const alias = withAlias ? newDocument(b) : null;
+    if (alias) {
+      alias.pages = [];
+      alias.mergedInto = target.id;
+      alias.evidence = "Synthetic earlier payment grouping.";
+      alias.uncertainties = ["Synthetic source needs review."];
+      target.uncertainties.push(...alias.uncertainties);
+    }
+    await ok(
+      "/api/processing/submit",
+      {
+        token: lease.token,
+        model: "gpt-5.6-luna",
+        extraction: extraction(cat),
+        documents: alias ? [target, alias] : [target],
+      },
+      true,
+    );
+    const d = (await ok(`/api/documents/${a.id}`)).document;
+    if (alias)
+      expect((await ok(`/api/documents/${b.id}`)).document).toMatchObject({
+        mergedInto: a.id,
+        pages: [],
+      });
+    await ok("/api/processing/detach", {
+      document_id: a.id,
+      revision: d.revision,
+      capture_id: b.id,
+      reason: "Synthetic mismatching transaction reference.",
+    });
+    const source = (await ok(`/api/documents?captureId=${b.id}`)).document;
+    expect(source.id).not.toBe(a.id);
+    expect(source.pages[0].captureId).toBe(b.id);
+    if (alias) {
+      expect((await ok(`/api/documents/${b.id}`)).document.mergedInto).toBe(
+        source.id,
+      );
+      expect(source.uncertainties).toContain("Synthetic source needs review.");
+    }
+    expect((await req(`/api/files/${b.id}/raw`)).status).toBe(200);
+    const again = await claim();
+    const fresh = (
+      await ok(`/api/processing/context?token=${again.token}`, undefined, true)
+    ).document;
+    expect(fresh.id).toBe(a.id);
+    fresh.pages.push(...source.pages);
+    source.pages = [];
+    source.mergedInto = fresh.id;
+    source.evidence = "Synthetic attempted rematch.";
+    expect(
+      (
+        await req(
+          "/api/processing/submit",
+          {
+            token: again.token,
+            model: "gpt-5.6-luna",
+            extraction: extraction(cat),
+            documents: [fresh, source],
+          },
+          true,
+        )
+      ).status,
+    ).toBe(409);
+  },
+);
 it("keeps incomplete pages out of human review and retries them after new scans", async () => {
   const c = await capture(),
     cat = await category(),

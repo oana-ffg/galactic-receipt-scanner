@@ -1330,6 +1330,20 @@ export async function processingRoute(
     const separate = newDocument(detachedCapture);
     separate.id = crypto.randomUUID();
     separate.pages = [p];
+    const originalAlias = await storedDocumentById(env, p.captureId);
+    const detachedAlias =
+      originalAlias?.mergedInto === d.id && !originalAlias.pages.length
+        ? structuredClone(originalAlias)
+        : null;
+    if (detachedAlias) {
+      detachedAlias.mergedInto = separate.id;
+      const reasons = requiredMergeReviewReasons(
+        detachedAlias,
+        originalAlias ?? undefined,
+      );
+      separate.uncertainties.push(...reasons.uncertainties);
+      separate.broken.push(...reasons.broken);
+    }
     d.pages = d.pages.filter((page) => page !== p);
     d.annotations = d.annotations.filter((a) => a.captureId !== p.captureId);
     if (d.processing) {
@@ -1369,7 +1383,7 @@ export async function processingRoute(
       request,
       env,
       load,
-      [d, separate],
+      detachedAlias ? [d, separate, detachedAlias] : [d, separate],
       statements,
       loadCapture,
       loadSelectedCaptures,
