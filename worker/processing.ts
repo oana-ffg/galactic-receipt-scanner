@@ -52,7 +52,14 @@ type ClaimRequestRecord = {
   revision: number | null;
   outcome_reason: string;
 };
-const STAGE_MODEL = { small: "gpt-5.6-luna", large: "gpt-6-astra" } as const;
+const STAGE_MODEL = { small: "gpt-6-luna", large: "gpt-6-astra" } as const;
+const LEGACY_LUNA_MODEL = "gpt-5.6-luna";
+function validStageModel(stage: Lock["stage"], model: unknown): boolean {
+  return (
+    model === STAGE_MODEL[stage] ||
+    (stage === "small" && model === LEGACY_LUNA_MODEL)
+  );
+}
 const LEASE_MS = 20 * 60 * 1000;
 const BATCH_LEASE_MS = 30 * 60 * 1000;
 const BATCH_ID = /^[0-9a-f]{32}$/;
@@ -296,6 +303,24 @@ function state(
           : null,
     has_human_review: stage === "human",
     human_review_revision: stage === "human" ? revision + 1 : null,
+    luna_needs_human_review:
+      stage === "human"
+        ? false
+        : stage === "small"
+          ? e.needs_human_review === true
+          : (previous?.luna_needs_human_review ??
+            previous?.extraction.needs_human_review ??
+            false),
+    luna_human_review_reasons:
+      stage === "human"
+        ? []
+        : stage === "small"
+          ? [...(e.human_review_reasons ?? [])]
+          : [
+              ...(previous?.luna_human_review_reasons ??
+                previous?.extraction.human_review_reasons ??
+                []),
+            ],
     needs_reparse: false,
     seen_capture_count: previous?.seen_capture_count ?? 0,
   };
@@ -1453,16 +1478,15 @@ export async function processingRoute(
       .bind(input.token)
       .first<{ model: string; payload: string }>();
     if (previous) {
-      const proposed =
-        input.model === STAGE_MODEL.small
-          ? {
-              version: 1,
-              extraction: input.extraction,
-              documents: input.documents,
-              pixel_pdf_sha256: input.pixel_pdf_sha256,
-              images: input.images,
-            }
-          : input.extraction;
+      const proposed = validStageModel("small", input.model)
+        ? {
+            version: 1,
+            extraction: input.extraction,
+            documents: input.documents,
+            pixel_pdf_sha256: input.pixel_pdf_sha256,
+            images: input.images,
+          }
+        : input.extraction;
       requireThat(
         previous.model === input.model &&
           previous.payload === JSON.stringify(proposed),
@@ -1539,7 +1563,7 @@ export async function processingRoute(
         : input.extraction;
     const draft = JSON.stringify(frozen);
     requireThat(
-      input.model === STAGE_MODEL[lock.stage],
+      validStageModel(lock.stage, input.model),
       400,
       "Record the actual managed model name.",
     );
@@ -1809,7 +1833,7 @@ export async function processingRoute(
     validateExtraction(input.extraction);
     await categoryCheck(env, input.extraction);
     requireThat(
-      input.model === STAGE_MODEL[lock.stage],
+      validStageModel(lock.stage, input.model),
       400,
       "Record the actual managed model name.",
     );

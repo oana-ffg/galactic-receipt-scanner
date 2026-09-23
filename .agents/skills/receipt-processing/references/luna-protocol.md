@@ -8,8 +8,8 @@ the separate Astra workflow; they are not the normal Luna protocol.
 
 ## Legacy direct-worker recovery setup
 
-The following profile and direct-worker launch details are maintenance-only. Normal Terra
-launches `receipt_batch.py`, which loads the profile and owns the worker internally. Terra
+The following profile and direct-worker launch details are maintenance-only. The coordinator
+launches `receipt_batch.py`, which loads the profile and owns the worker internally. It
 does not read the profile, validate the destination, download an original or pass runtime
 details to Luna.
 
@@ -170,6 +170,9 @@ and `--reason` containing a concrete resolution explanation, keeping `--owner` a
 recovery task ID. This appends a resolution event, checks the worker is closed, and
 permits a future run without changing historical events. A still-running guard remains
 busy; do not kill it or rewrite `batch-state.json` to bypass the lock.
+When resuming an interrupted scheduled batch instead, keep its original
+`--owner receipt-processing-scheduled`, supply the exact saved `--resume-batch` and
+`--resume-run`, and set `--recovery-by` to the interactive recovery task ID.
 If the saved phase is `finishing`, exact owner-directed resolution replays release for only
 that saved batch ID and original owner, preserves its verified proofs and then records
 completion. It never claims replacement work.

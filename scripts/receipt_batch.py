@@ -508,14 +508,19 @@ def main():
     parser.add_argument("--verify", action=Once)
     parser.add_argument("--resume-batch", action=Once)
     parser.add_argument("--resume-run", action=Once)
+    parser.add_argument("--recovery-by", action=Once)
     parser.add_argument("--count", type=int, action=Once)
     parser.add_argument("--workflow", choices=("luna", "astra"), action=Once)
     parser.add_argument("--client-config", required=True, action=Once)
     args = parser.parse_args()
-    # The scheduled owner's standing approval covers processing, never recovery.
-    require(args.owner != "receipt-processing-scheduled"
-            or (args.resolve is None and args.resume_batch is None and args.resume_run is None),
-            "Scheduled processing cannot recover an unfinished batch; use owner-directed recovery.")
+    # Standing scheduled approval covers new work, never recovery. A named
+    # interactive actor can retain the original scheduled owner for exact replay.
+    recovering = args.resolve is not None or args.resume_batch is not None or args.resume_run is not None
+    require(args.recovery_by is None or (recovering and args.recovery_by.strip()
+            and args.recovery_by != "receipt-processing-scheduled"),
+            "Name the interactive task only for owner-directed recovery.")
+    require(args.owner != "receipt-processing-scheduled" or not recovering or args.recovery_by is not None,
+            "Scheduled processing cannot recover an unfinished batch without an interactive recovery task.")
     repo = Path(__file__).resolve().parent.parent
     base = repo / ".local" / "receipt-worker"
     try:

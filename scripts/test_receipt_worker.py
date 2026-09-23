@@ -251,6 +251,7 @@ class WorkerTests(unittest.TestCase):
                 return {"errors": [] if "type" in values["extraction"] else ["Invalid extraction"], "arithmetic": {}}
             if operation == "contract":
                 return {"payment_status": ["approved", "declined", "unknown", "not-applicable"],
+                        "needs_human_review": "boolean",
                         "line_items": {"item": {"description": "nonempty string"}}}
             return [{"uncertainties": d["uncertainties"], "broken": d["broken"]} for d in values["documents"]]
         worker.check = check
@@ -290,6 +291,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(task["images"]), 1)
         self.assertEqual(task["extraction_contract"]["payment_status"], ["approved", "declined", "unknown", "not-applicable"])
         self.assertIn("item", task["extraction_contract"]["line_items"])
+        self.assertFalse(task["extraction"]["needs_human_review"])
+        self.assertEqual(task["extraction"]["human_review_reasons"], [])
+        self.assertIn("needs_human_review", task["extraction_contract"])
         self.assertNotIn(TOKEN, json.dumps(task))
         value = extraction()
         value["has_handwriting"] = None
@@ -303,6 +307,86 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.state["phase"], "complete")
         self.assertEqual(self.fake.pdf_calls, 1)
         self.assertEqual(self.fake.pdf_allow_inference, [False])
+        self.assertEqual(self.fake.initial_draft["model"], "gpt-6-luna")
+        self.assertEqual(json.loads(self.fake.submit_bytes[0])["model"], "gpt-6-luna")
+
+    def test_legacy_prepared_run_keeps_its_original_model(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        self.worker.state.pop("model")
+        prepared = self.worker.prepare_luna_task([])
+        value = extraction()
+        value["has_handwriting"] = None
+        Path(prepared["result_path"]).write_text(json.dumps({
+            "extraction": value,
+            "rationale": "Synthetic legacy result.",
+            "inspected_capture_ids": [],
+        }))
+        self.assertTrue(self.worker.complete_luna_task()["ok"])
+        self.assertEqual(self.fake.initial_draft["model"], "gpt-5.6-luna")
+        self.assertEqual(json.loads(self.fake.submit_bytes[0])["model"], "gpt-5.6-luna")
+
+    def test_unconfirmed_mismatch_becomes_review_without_stopping_extraction(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        value = extraction()
+        value["has_handwriting"] = None
+        value["completeness"] = "uncertain"
+        value["confirmed_arithmetic_mismatch"] = True
+        original_check = self.worker.check
+        def check(operation, **values):
+            if operation == "validate" and values["extraction"].get("confirmed_arithmetic_mismatch"):
+                return {"errors": ["A confirmed mismatch requires a complete financial source with a real arithmetic discrepancy."]}
+            return original_check(operation, **values)
+        self.worker.check = check
+        Path(prepared["result_path"]).write_text(json.dumps({
+            "extraction": value,
+            "rationale": "Synthetic page may have an unreconciled total.",
+            "inspected_capture_ids": [],
+        }))
+        finished = self.worker.complete_luna_task()
+        self.assertTrue(finished["ok"], finished)
+        normalized = json.loads(Path(prepared["result_path"]).read_text())["extraction"]
+        self.assertFalse(normalized["confirmed_arithmetic_mismatch"])
+        self.assertTrue(normalized["needs_human_review"])
+        self.assertTrue(normalized["human_review_reasons"])
+        self.assertEqual(normalized["line_items"], value["line_items"])
+        self.assertEqual(normalized["total_minor"], value["total_minor"])
+        self.assertTrue(list(Path(prepared["result_path"]).parent.glob("*-luna-original-result.json")))
+
+    def test_mismatch_normalization_retries_after_interrupted_file_replace(self):
+        self.fake.jev_ready = True
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        value = extraction()
+        value["has_handwriting"] = None
+        value["completeness"] = "uncertain"
+        value["confirmed_arithmetic_mismatch"] = True
+        result_path = Path(prepared["result_path"])
+        result_path.write_text(json.dumps({
+            "extraction": value, "rationale": "Synthetic uncertain total.",
+            "inspected_capture_ids": [],
+        }))
+        original_check = self.worker.check
+        self.worker.check = lambda operation, **fields: (
+            {"errors": ["A confirmed mismatch requires a complete financial source with a real arithmetic discrepancy."]}
+            if operation == "validate" and fields["extraction"].get("confirmed_arithmetic_mismatch")
+            else original_check(operation, **fields)
+        )
+        original_replace = module.replace_journal_file
+        failed = False
+        def replace(temporary, destination):
+            nonlocal failed
+            if Path(destination) == result_path and not failed:
+                failed = True
+                raise OSError("Synthetic interrupted replacement")
+            return original_replace(temporary, destination)
+        with patch.object(module, "replace_journal_file", side_effect=replace):
+            with self.assertRaisesRegex(OSError, "Synthetic interrupted replacement"):
+                self.worker.complete_luna_task()
+        self.assertTrue(self.worker.complete_luna_task()["ok"])
+        self.assertTrue(json.loads(result_path.read_text())["extraction"]["needs_human_review"])
 
     def test_prepared_luna_task_rejects_legacy_qwen_profile_before_claim(self):
         self.assertEqual(self.worker.confirmation_provider, "qwen")

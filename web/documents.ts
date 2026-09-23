@@ -237,6 +237,9 @@ export function documentReasons(doc: ReceiptDocument): {
     const disposition = processingDisposition(p);
     const reasons = [
       ...new Set([
+        ...(p.luna_human_review_reasons ??
+          p.extraction.human_review_reasons ??
+          []),
         ...doc.broken,
         ...doc.uncertainties,
         ...p.extraction.broken_reasons,
@@ -330,7 +333,12 @@ export function mergeReviewReasons(doc: ReceiptDocument): {
   uncertainties: string[];
 } {
   return {
-    uncertainties: [...doc.uncertainties],
+    uncertainties: [
+      ...doc.uncertainties,
+      ...(doc.processing?.luna_human_review_reasons ??
+        doc.processing?.extraction.human_review_reasons ??
+        []),
+    ],
     broken: [
       ...new Set([
         ...doc.broken,

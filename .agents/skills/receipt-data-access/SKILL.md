@@ -21,7 +21,7 @@ local to its host; do not commit it or ask the owner to supply paths that it alr
 Connection setup establishes the owner-verified Site origin. The deterministic controller
 loads the protected profile, requires its origin and repository to match the prepared host,
 and verifies scoped API capabilities before claiming work. A credential config alone is not
-independent proof of ownership. Terra and delegated Luna repeat none of this: Luna reads only
+independent proof of ownership. The coordinator and delegated Luna repeat none of this: Luna reads only
 its prepared private task and optional verified preview paths; it does not launch Python,
 inspect protected profiles or retrieve keys. The controller receives the fresh batch config
 path and loads it without exposing secrets.
@@ -47,7 +47,7 @@ A 401/403 is an access failure, not a missing original. Do not spoof identity he
    Only this helper decrypts it. It prints the client config path, connection ID and expiry,
    never keys; no plaintext response file is needed.
 4. Pass that config path to the deterministic controller with `--client-config`. The
-   controller performs the real access preflight before claiming work. Terra and Luna do not
+   controller performs the real access preflight before claiming work. The coordinator and delegated Luna do not
    duplicate it. All client commands accept `--config` before the subcommand.
 5. In a `finally` cleanup for every batch outcome, use the signed-in page's
    `revoke_processing_connection` tool for that exact connection ID. Only after it returns

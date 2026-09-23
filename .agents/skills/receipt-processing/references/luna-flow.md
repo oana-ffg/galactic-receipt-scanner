@@ -53,6 +53,13 @@ An intentionally partial financial extraction is not a valid low- or medium-conf
 result. If evidence genuinely cannot resolve a field after inspection, explain that
 specific field and lower confidence accordingly.
 
+If a concrete issue needs a person's attention, set `needs_human_review` to true and
+give specific `human_review_reasons`. Examples include a missing page, pages joined to
+the wrong purchase, or totals that cannot be reconciled. This flag does not replace
+extraction: still fill every field as far as the evidence permits, including all readable
+items and amounts. Never defer readable values to a later pass because certainty is low.
+Otherwise set the flag to false and leave its reasons empty.
+
 Write exactly one UTF-8 JSON object to `result_path` with exactly these keys:
 
 ```json

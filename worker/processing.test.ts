@@ -383,6 +383,77 @@ it("queues an exact zero-item financial result for Luna without changing its sav
     (await ok(`/api/documents/${captureRecord.id}/history`)).length,
   ).toBeGreaterThan(1);
 });
+it("records Luna 6 as the actual model for new small-stage results", async () => {
+  const captureRecord = await capture();
+  const lease = await claim();
+  const e = extraction();
+  e.needs_human_review = true;
+  e.human_review_reasons = ["Synthetic source may be missing a page."];
+  await ok(
+    "/api/processing/submit",
+    { token: lease.token, model: "gpt-6-luna", extraction: e },
+    true,
+  );
+  const saved = (await ok(`/api/documents/${captureRecord.id}`)).document;
+  expect(saved.processing.extraction.needs_human_review).toBe(true);
+  expect(saved.processing.extraction.line_items).toHaveLength(1);
+  expect(saved.status).toBe("model-review");
+});
+it("keeps a Luna human-review request after Astra and clears it on human review", async () => {
+  const c = await capture();
+  const cat = await category();
+  const small = await claim();
+  const request = {
+    ...extraction(cat),
+    needs_human_review: true,
+    human_review_reasons: ["Synthetic source may be missing a page."],
+  };
+  await ok(
+    "/api/processing/submit",
+    {
+      token: small.token,
+      model: "gpt-6-luna",
+      extraction: request,
+    },
+    true,
+  );
+  const large = await claim("large");
+  const resolved = extraction(cat);
+  await ok(
+    "/api/processing/draft",
+    {
+      token: large.token,
+      model: "gpt-6-astra",
+      extraction: resolved,
+    },
+    true,
+  );
+  await ok(
+    "/api/processing/submit",
+    {
+      token: large.token,
+      model: "gpt-6-astra",
+      extraction: resolved,
+    },
+    true,
+  );
+  let saved = (await ok(`/api/documents/${c.id}`)).document;
+  expect(saved.processing.luna_needs_human_review).toBe(true);
+  expect(saved.processing.luna_human_review_reasons).toEqual(
+    request.human_review_reasons,
+  );
+  expect(saved.status).toBe("review");
+  expect(saved.reasons).toContain(request.human_review_reasons[0]);
+  await ok("/api/processing/human-review", {
+    document_id: saved.id,
+    revision: saved.revision,
+    extraction: resolved,
+  });
+  saved = (await ok(`/api/documents/${c.id}`)).document;
+  expect(saved.processing.luna_needs_human_review).toBe(false);
+  expect(saved.processing.luna_human_review_reasons).toEqual([]);
+  expect(saved.reasons).not.toContain(request.human_review_reasons[0]);
+});
 it("does not queue a Luna reparse when a batch starts just before its commit", async () => {
   const captureRecord = await capture();
   const lease = await claim();

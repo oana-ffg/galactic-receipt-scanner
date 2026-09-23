@@ -14,6 +14,7 @@ import {
   validDate,
 } from "./documents";
 import type { Capture } from "./types";
+import { extractionErrors, type Extraction } from "./extraction";
 const source = {
   id: "00000000-0000-4000-8000-000000000001",
   sha256: "a".repeat(64),
@@ -59,6 +60,68 @@ it("separates missing-source findings from uncertain completeness", () => {
   expect(completenessUncertain(audit("no", 1, "evidence_too_long"))).toBe(true);
 });
 describe("source-backed processing", () => {
+  it("keeps a specific Luna human-review request visible without dropping extracted values", () => {
+    const d = newDocument(source);
+    const extraction = {
+      type: "receipt",
+      vendor: "Synthetic Shop",
+      receipt_date: "2026-01-01",
+      reference: null,
+      currency: "DKK",
+      has_handwriting: null,
+      has_payment_slip: false,
+      payment_status: "unknown",
+      card_last_four: null,
+      line_items: [
+        {
+          description: "Synthetic item",
+          quantity: null,
+          unit_price_minor: null,
+          amount_minor: 100,
+        },
+      ],
+      adjustments: [],
+      payment_adjustments: [],
+      total_minor: 100,
+      charged_total_minor: 100,
+      vat_minor: null,
+      tax_basis: "gross",
+      completeness: "complete",
+      category_id: null,
+      certainty: "high",
+      needs_human_review: true,
+      human_review_reasons: ["Another page may belong to this purchase."],
+      uncertainties: [],
+      broken_reasons: [],
+      confirmed_arithmetic_mismatch: false,
+      evidence: "Synthetic source shows the printed item and total.",
+    } satisfies Extraction;
+    expect(extractionErrors(extraction)).toEqual([]);
+    d.processing = {
+      extraction,
+      not_invoice: false,
+      has_handwriting: null,
+      small_model_certainty: "high",
+      large_model_confidence: null,
+      has_human_review: false,
+      human_review_revision: null,
+      needs_reparse: false,
+      seen_capture_count: 1,
+    };
+    const review = documentReasons(d);
+    expect(review.status).toBe("model-review");
+    expect(review.reasons.slice(0, 2)).toEqual([
+      "Queued for an independent full parse by Astra.",
+      "Another page may belong to this purchase.",
+    ]);
+    expect(extraction.line_items).toHaveLength(1);
+    expect(extraction.total_minor).toBe(100);
+    expect(
+      extractionErrors({ ...extraction, human_review_reasons: [] }),
+    ).toContain(
+      "Human review needs a boolean flag and specific reasons when flagged.",
+    );
+  });
   it("retains bounded processing evidence without changing existing notes", () => {
     expect(
       appendProcessingEvidence("Existing check", [

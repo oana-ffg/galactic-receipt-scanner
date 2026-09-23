@@ -280,7 +280,7 @@ export async function mountReview(app: HTMLElement) {
         el("strong", label),
         el(
           "span",
-          `${d.processing?.needs_reparse ? "Needs Luna reparse · " : needsSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}${d.processing?.has_human_review ? " · Human reviewed" : ""}`,
+          `${d.processing?.needs_reparse ? "Needs Luna reparse · " : needsSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}${d.processing?.has_human_review ? " · Human reviewed" : ""}`,
         ),
         el(
           "small",

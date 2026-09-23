@@ -572,6 +572,22 @@ class BatchGuardTests(unittest.TestCase):
                 lease.assert_not_called()
                 guard.assert_not_called()
 
+    def test_interactive_actor_can_resume_the_scheduled_owners_exact_run(self):
+        guard = Mock()
+        guard.resume.return_value = {'phase': 'active', 'batch_id': 'a' * 32,
+                                     'active_run_id': 'b' * 32}
+        guard.handle.return_value = {'phase': 'blocked'}
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+            '--client-config', str(self.client_config), '--resume-batch', 'a' * 32,
+            '--resume-run', 'b' * 32, '--recovery-by', 'interactive-synthetic-task',
+        ]), patch.object(module, 'ProcessingBatchLease', return_value=FakeLease()), \
+             patch.object(module, 'BatchGuard', return_value=guard), \
+             patch.object(module.sys, 'stdin', io.StringIO('{"op":"block","reason":"Synthetic stop"}\n')), \
+             patch.object(module.sys, 'stdout', io.StringIO()):
+            module.main()
+        guard.resume.assert_called_once_with('a' * 32, 'b' * 32)
+
     def test_verify_rejects_recovery_flags_before_opening_guard(self):
         for recovery_args in [
             ['--resume-batch', 'a' * 32],

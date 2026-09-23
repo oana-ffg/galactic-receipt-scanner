@@ -817,6 +817,10 @@ export async function documentRoute(
                     small_model_certainty: v.processing.small_model_certainty,
                     large_model_confidence: v.processing.large_model_confidence,
                     has_human_review: v.processing.has_human_review,
+                    luna_needs_human_review:
+                      v.processing.luna_needs_human_review ??
+                      v.processing.extraction.needs_human_review ??
+                      false,
                     category_id: v.processing.extraction.category_id,
                     total_minor: v.processing.extraction.total_minor,
                     currency: v.processing.extraction.currency,

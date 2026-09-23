@@ -142,7 +142,7 @@ the frozen snapshot. `assessment` contains the saved `confirmation_sha256`, a no
 extraction field exactly once. Submit stores the updated reading in `processing_attempts`;
 initial Luna remains in `processing_drafts`, Qwen/evidence in `processing_confirmations`.
 Legacy no-draft clients remain compatible but are not the new skill flow.
-Use the actual model: gpt-5.6-luna for small, gpt-6-astra for large. **Omit documents when
+Use the actual model: gpt-6-luna for new small-stage runs, gpt-5.6-luna for recovery of older small-stage runs, and gpt-6-astra for large. **Omit documents when
 grouping and page rotation are unchanged**; include copied document records when saving
 new rotation bounds. Extraction is not a legacy document record. Document pages have no
 separate crop field; the capture's scan outline controls cropping.

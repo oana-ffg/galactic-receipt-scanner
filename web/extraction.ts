@@ -38,6 +38,9 @@ export interface Extraction {
   completeness: "complete" | "fragment" | "uncertain";
   category_id: string | null;
   certainty: Certainty;
+  /** Model request for a person to inspect a concrete source or accounting issue. */
+  needs_human_review?: boolean;
+  human_review_reasons?: string[];
   uncertainties: string[];
   broken_reasons: string[];
   /** Only true after rereading every component on a complete original. */
@@ -87,6 +90,10 @@ export const extractionContract = {
   completeness: ["complete", "fragment", "uncertain"],
   category_id: "exact id from the supplied active categories, or null",
   certainty: ["low", "medium", "high"],
+  needs_human_review:
+    "boolean; true for a concrete issue needing human inspection, even when extraction is complete",
+  human_review_reasons:
+    "up to 100 specific nonempty reasons; required when needs_human_review is true",
   uncertainties: "up to 100 nonempty strings",
   broken_reasons: "up to 100 nonempty strings",
   confirmed_arithmetic_mismatch:
@@ -101,6 +108,9 @@ export interface ProcessingState {
   large_model_confidence: Certainty | null;
   has_human_review: boolean;
   human_review_revision: number | null;
+  /** A Luna source/accounting concern survives an independent Astra parse. */
+  luna_needs_human_review?: boolean;
+  luna_human_review_reasons?: string[];
   needs_reparse: boolean;
   seen_capture_count: number;
   jev_assessment?: {
@@ -195,6 +205,19 @@ export function extractionErrors(input: unknown): string[] {
     "Invalid completeness.",
   );
   check(["low", "medium", "high"].includes(e.certainty), "Invalid certainty.");
+  check(
+    (e.needs_human_review === undefined ||
+      typeof e.needs_human_review === "boolean") &&
+      (e.human_review_reasons === undefined ||
+        (Array.isArray(e.human_review_reasons) &&
+          e.human_review_reasons.length <= 100 &&
+          e.human_review_reasons.every(
+            (reason) => string(reason) && reason.trim().length > 0,
+          ))) &&
+      (!e.needs_human_review || Boolean(e.human_review_reasons?.length)) &&
+      (e.needs_human_review || !e.human_review_reasons?.length),
+    "Human review needs a boolean flag and specific reasons when flagged.",
+  );
   check(
     e.category_id === null ||
       (string(e.category_id) && /^[0-9a-f-]{36}$/.test(e.category_id)),
@@ -295,7 +318,7 @@ export function arithmetic(e: Extraction) {
   };
 }
 export function extractionProblems(e: Extraction): string[] {
-  const reasons = [...e.uncertainties];
+  const reasons = [...(e.human_review_reasons ?? []), ...e.uncertainties];
   if (e.type === "unknown") reasons.push("Document type is uncertain.");
   if (e.completeness === "uncertain")
     reasons.push("Page completeness is uncertain.");
@@ -338,6 +361,11 @@ export function processingDisposition(
     return "broken";
   if (e.completeness === "fragment") return "awaiting-pages";
   if (p.has_human_review) return "extracted";
+  if (
+    p.large_model_confidence !== null &&
+    (p.luna_needs_human_review ?? e.needs_human_review)
+  )
+    return "review";
   if (p.large_model_confidence !== null)
     return p.large_model_confidence === "high" && !extractionProblems(e).length
       ? "extracted"

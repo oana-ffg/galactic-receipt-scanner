@@ -156,7 +156,8 @@ def extraction_template():
         currency=None, has_handwriting=None, has_payment_slip=None, confirmed_arithmetic_mismatch=False,
         payment_status="unknown", card_last_four=None, line_items=[], adjustments=[], payment_adjustments=[],
         total_minor=None, charged_total_minor=None, vat_minor=None, tax_basis="unknown",
-        completeness="uncertain", category_id=None, certainty="low", uncertainties=[], broken_reasons=[], evidence="")
+        completeness="uncertain", category_id=None, certainty="low", needs_human_review=False,
+        human_review_reasons=[], uncertainties=[], broken_reasons=[], evidence="")
 
 
 def synthetic_png():
@@ -245,6 +246,7 @@ class Worker:
             require(not self.work.exists(), "Worker run already exists.")
             artifact_directory(self.work)
             self.state = {"run_id": run_id, "batch_id": batch["batch_id"], "origin": self.client.origin, "phase": "ready", "claim": None,
+                          "model": "gpt-6-luna",
                           "confirmation_provider": self.confirmation_provider,
                           "capture_ids": [], "capture_hashes": {}, "document_ids": [], "sources": {}, "prepared": {}, "sequence": 0}
             self.save("viewer-preflight.png", synthetic_png(), binary=True)
@@ -662,7 +664,7 @@ class Worker:
         self.state["draft_file"] = self.record("luna-draft", frozen)
         self.state["draft"] = frozen
         self.checkpoint()
-        return self.database_checkpoint("draft", {"token":claim["token"], "model":"gpt-5.6-luna", "extraction":extraction,
+        return self.database_checkpoint("draft", {"token":claim["token"], "model":self.state.get("model", "gpt-5.6-luna"), "extraction":extraction,
              "documents":deepcopy(documents), "pixel_pdf_sha256":pixel_pdf["sha256"], "images":frozen["images"]})
 
     def check_category(self, extraction, category_name=None):
@@ -719,7 +721,7 @@ class Worker:
         frozen = self.state["draft"]
         require(self.state.get("confirmation") and self.state.get("assessment"), "Complete OCR/math confirmation and Luna reassessment before submission.")
         extraction = deepcopy(self.state["assessment"]["extraction"])
-        body = {"token": claim["token"], "model": "gpt-5.6-luna", "extraction": extraction}
+        body = {"token": claim["token"], "model": self.state.get("model", "gpt-5.6-luna"), "extraction": extraction}
         body["assessment"] = deepcopy(self.state["assessment"]["assessment"])
         if frozen["documents"] is not None:
             body["documents"] = deepcopy(frozen["documents"])
@@ -1083,6 +1085,26 @@ class Worker:
                 result_path,
                 "Use an exact category_id from this prepared task, or null when none fits.",
             )
+        validation = self.check("validate", extraction=value["extraction"])
+        mismatch_error = "A confirmed mismatch requires a complete financial source with a real arithmetic discrepancy."
+        if validation["errors"] == [mismatch_error] and value["extraction"].get("confirmed_arithmetic_mismatch") is True:
+            # A model's concern is useful evidence, but this strict flag would
+            # claim a proved discrepancy. Keep the concern and every extracted
+            # amount while allowing the document to reach review and the next item.
+            self.record("luna-original-result", value)
+            extraction = value["extraction"]
+            extraction["confirmed_arithmetic_mismatch"] = False
+            extraction["needs_human_review"] = True
+            reason = "Luna suspected an arithmetic mismatch, but the available extraction does not prove it; inspect the printed components."
+            extraction["human_review_reasons"] = list(dict.fromkeys([
+                *extraction.get("human_review_reasons", []), reason,
+            ]))
+            replacement = result_path.with_name(result_path.name + ".normalized-" + uuid.uuid4().hex)
+            write_new_file(replacement, json.dumps(value, ensure_ascii=False).encode("utf-8"))
+            replace_journal_file(replacement, result_path)
+            validation = self.check("validate", extraction=extraction)
+        if validation["errors"]:
+            return self.luna_result_correction(result_path, "; ".join(validation["errors"]))
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         result_sha256 = hashlib.sha256(encoded).hexdigest()
         pinned = self.state.get("luna_result_sha256")

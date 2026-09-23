@@ -39,7 +39,7 @@ call APIs. Its private task contains the complete template, evidence and optiona
 
 For the coordinator, read only the repository's ignored regular
 `.local/processing-host.json` to obtain the prepared Python executable. The deterministic
-batch controller reads the protected credential-free worker profile internally. Terra must
+batch controller reads the protected credential-free worker profile internally. The coordinator must
 create one fresh one-day processing connection for this batch through the signed-in
 `/agent-access` page, complete the encrypted handoff into a new private run directory, and
 pass only that client-config path to the controller. It must not open the resulting files,
@@ -148,9 +148,9 @@ but remains unverified there until an actual cloud run is completed.
 
 ## Coordinator
 
-The task running this skill is the Terra coordinator. It launches one deterministic batch
-controller and dispatches fresh Luna workers from the controller's prepared task paths.
-Terra sees only content-free run IDs, paths, page counts, validation errors and completion
+The task running this skill is the coordinator; the hourly task currently uses Luna 6.
+It launches one deterministic batch controller and dispatches fresh Luna workers from the
+controller's prepared task paths. The coordinator sees only content-free run IDs, paths, page counts, validation errors and completion
 proofs. It never loads receipt images, OCR text or extraction payloads into its context.
 Do not delegate coordination or switch models merely to run this skill.
 
@@ -162,9 +162,9 @@ prior batch requires owner-directed investigation. Never launch `receipt_worker.
 separately in the normal Luna flow.
 
 Send `{"op":"next"}` to the same controller. On `next:"spawn-luna"`, spawn exactly one
-fresh `gpt-5.6-luna` with `fork_turns:none` and provide only the returned task/result paths
+fresh `gpt-6-luna` with `fork_turns:none` and provide only the returned task/result paths
 plus [the short flow](references/luna-flow.md). Luna reads the private prepared task and
-writes one semantic result; it never launches a helper or returns receipt contents to Terra.
+writes one semantic result; it never launches a helper or returns receipt contents to the coordinator.
 Then send `{"op":"complete","run_id":"..."}` to the same controller. The controller
 validates, saves, builds/verifies the PDF, verifies live persisted state and updates the
 batch count. On `next:"correct-luna-result"`, give only the bounded errors to that same
@@ -207,7 +207,7 @@ concrete failures to the user.
 **Suspend new document dispatch on a real failure; do not immediately block the batch.**
 Keep the guard and private checkpoint while investigating. Correct ordinary request
 errors in their existing session. Before a non-obvious recovery or a guard block,
-**call a fresh Sol subagent (`gpt-5.6-sol`, `fork_turns: none`) to check your reasoning**.
+**call a fresh Sol subagent (`gpt-6-sol`, `fork_turns: none`) to check your reasoning**.
 Give Sol the observed problem, exact error, expected versus observed behavior, run/batch
 IDs, relevant private journal paths and known claim/save state. If you have a proposed
 next action, state it as something to challenge, not as an instruction. Ask Sol to identify
