@@ -764,6 +764,49 @@ class WorkerTests(unittest.TestCase):
         self.worker = self.make_worker()
         self.assertEqual(self.worker.state["phase"], "ready")
 
+    def test_expired_failed_claim_reconciles_only_without_backend_write_or_change(self):
+        self.claimed()
+        self.worker.state["failed"] = {"operation": "review", "error": "Synthetic failed claim"}
+        self.assertIn("input_error", self.worker.handle(dict(op="reconcile", rationale="Owner-directed recovery.")))
+        self.worker.state["claim"]["expires"] = time.time() * 1000 - 211000
+        self.worker.state["failed"] = {"operation": "release", "error": "Synthetic expired claim"}
+        self.worker.checkpoint()
+        run_id = self.worker.state["run_id"]
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        rationale = "Owner requested retirement of an expired synthetic claim before new work."
+
+        self.assertIn("input_error", self.worker.handle(dict(op="reconcile")))
+        self.worker.state["claim"]["expires"] = time.time() * 1000 - 209000
+        self.assertFalse(self.worker.handle(dict(op="reconcile", rationale=rationale))["ok"])
+        self.worker.state["claim"]["expires"] = time.time() * 1000 - 211000
+        self.worker.state["checkpoint_request"] = "synthetic-write-intent.json"
+        self.assertFalse(self.worker.handle(dict(op="reconcile", rationale=rationale))["ok"])
+        self.worker.state.pop("checkpoint_request")
+
+        for field in ("draft_saved", "attempt_saved", "claim_active"):
+            self.fake.readings[field] = True
+            self.assertFalse(self.worker.handle(dict(op="reconcile", rationale=rationale))["ok"])
+            self.assertEqual(self.worker.state["failed"]["operation"], "release")
+            self.fake.readings[field] = False
+        self.fake.documents[DID]["revision"] += 1
+        self.assertFalse(self.worker.handle(dict(op="reconcile", rationale=rationale))["ok"])
+        self.fake.documents[DID]["revision"] -= 1
+        self.fake.documents[DID]["pages"].append({"captureId": OTHER})
+        self.assertFalse(self.worker.handle(dict(op="reconcile", rationale=rationale))["ok"])
+        self.fake.documents[DID]["pages"].pop()
+
+        result = self.send("reconcile", rationale=rationale)
+        self.assertEqual(result["phase"], "released")
+        self.assertNotIn("failed", self.worker.state)
+        self.assertTrue(list(self.worker.work.glob("*-expired-unsubmitted-claim.json")))
+        self.assertFalse(any(method == "POST" and path != "/api/processing/claim"
+                             for method, path in self.fake.calls))
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        self.assertEqual(self.worker.state["phase"], "released")
+        self.assertNotIn("failed", self.worker.state)
+
     def test_checkpoint_lost_acknowledgements_replay_exactly_without_new_qwen(self):
         self.claimed()
         self.send("previews", capture_ids=[DID])

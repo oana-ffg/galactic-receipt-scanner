@@ -1320,6 +1320,36 @@ class Worker:
             return self.restore_pdf()
         if op == "reconcile":
             require(self.resumed, "Reconciliation requires an explicitly resumed run.")
+            if self.state["phase"] == "claimed" and self.state.get("failed"):
+                rationale = message.get("rationale")
+                require(isinstance(rationale, str) and 0 < len(rationale.strip()) <= 2000,
+                        "Owner-directed abandonment of a failed claim requires a rationale.")
+                claim = self.state["claim"]
+                require(isinstance(claim, dict) and isinstance(claim.get("document"), dict)
+                        and isinstance(claim.get("expires"), (int, float)),
+                        "Failed claim provenance is incomplete.")
+                require(time.time() * 1000 >= claim["expires"] + 210000,
+                        "Failed claim may still be active; preserve it until its lease and request margin have elapsed.")
+                require(not any(key in self.state for key in (
+                    "draft", "draft_file", "draft_saved", "checkpoint_request", "submit_request",
+                    "assessment", "document", "pdf", "pdf_intent")),
+                    "Failed claim has a local write intent; use its exact checkpoint recovery instead.")
+                original = claim["document"]
+                status = self.client.get("/api/processing/readings?document_id=" + original["id"]
+                                         + "&checkpoint_token=" + claim["token"])
+                verify(all(status.get(key) is False for key in ("draft_saved", "attempt_saved", "claim_active")),
+                       "Failed claim has a saved or active backend checkpoint; preserve it for exact recovery.")
+                current = self.get_document(original["id"])
+                verify(current["revision"] == original["revision"] and current["pages"] == original["pages"],
+                       "Claimed document changed; preserve the failed run for review.")
+                self.record("expired-unsubmitted-claim", {
+                    "failure": deepcopy(self.state["failed"]), "rationale": rationale,
+                    "checkpoint_status": status, "document_revision": current["revision"],
+                })
+                self.state["phase"] = "released"
+                self.state.pop("failed")
+                self.checkpoint()
+                return self.summary()
             if self.state["phase"] == "released" and self.state.get("failed"):
                 rationale = message.get("rationale")
                 require(isinstance(rationale, str) and 0 < len(rationale.strip()) <= 2000,
