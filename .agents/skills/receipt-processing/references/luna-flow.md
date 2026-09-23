@@ -21,6 +21,7 @@ The task contains:
 - active category definitions;
 - a complete extraction template and compact field/enum/item contract;
 - prepared preview paths for optional visual inspection.
+- capture IDs with saved handwritten annotations, when any exist.
 
 ## One semantic result
 
@@ -42,6 +43,9 @@ Open a prepared preview only when PP is ambiguous or low-confidence, values conf
 handwriting matters, or layout evidence is necessary. Add a capture ID to
 `inspected_capture_ids` only after actually opening that page's preview. Unless every page
 was inspected, `has_handwriting` must be null. Detect presence only; never transcribe it.
+When `saved_annotation_capture_ids` is nonempty, inspect those previews. Do not report
+`has_handwriting: false` while saved annotations exist. Use true or null and explain any
+disagreement in `human_review_reasons`, while still extracting all readable values.
 
 Confidence:
 

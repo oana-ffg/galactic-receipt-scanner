@@ -341,6 +341,12 @@ class Worker:
             raise ClientError("Prepared extraction validator failed; no model install or fallback attempted.")
         return json.loads(process.stdout)
 
+    def source_extraction_errors(self, extraction):
+        documents = (self.state.get("draft") or {}).get("documents") or [self.state["claim"]["document"]]
+        if any(document.get("annotations") for document in documents) and extraction.get("has_handwriting") is False:
+            return ["Saved handwritten annotations exist on this document. Inspect those pages; set has_handwriting to true or null and flag a disagreement for human review if needed."]
+        return []
+
     def post(self, endpoint, body):
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         require(len(payload) <= MAX_INPUT, "Processing request exceeds 512 KiB.")
@@ -1009,6 +1015,9 @@ class Worker:
                 "id": claim["document"]["id"],
                 "revision": claim["document"]["revision"],
                 "capture_ids": ids,
+                "saved_annotation_capture_ids": sorted({
+                    annotation["captureId"] for annotation in claim["document"].get("annotations", [])
+                }),
             },
             "ocr": started["result"]["claimed_ocr"],
             "jev": started["result"]["jev"],
@@ -1079,6 +1088,9 @@ class Worker:
                 result_path,
                 "Set has_handwriting to null unless every prepared page preview was actually inspected.",
             )
+        source_errors = self.source_extraction_errors(value["extraction"])
+        if source_errors:
+            return self.luna_result_correction(result_path, "; ".join(source_errors))
         category_id = value["extraction"].get("category_id")
         if category_id is not None and category_id not in self.state.get("category_ids", []):
             return self.luna_result_correction(
@@ -1320,6 +1332,49 @@ class Worker:
             return self.restore_pdf()
         if op == "reconcile":
             require(self.resumed, "Reconciliation requires an explicitly resumed run.")
+            if self.state["phase"] == "submit-uncertain" and self.state.get("failed"):
+                rationale = message.get("rationale")
+                require(isinstance(rationale, str) and 0 < len(rationale.strip()) <= 2000,
+                        "Owner-directed retirement of a rejected submit requires a rationale.")
+                base = self.work.parent
+                batch_path, pointer_path = base / "batch-state.json", base / "active-run.json"
+                require(all(path.is_file() and not path.is_symlink() for path in (batch_path, pointer_path)),
+                        "The exact batch and worker pointer must still exist for submit reconciliation.")
+                batch = json.loads(batch_path.read_text(encoding="utf-8"))
+                pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+                require(batch.get("batch_id") == self.state.get("batch_id")
+                        and batch.get("active_run_id") == self.state["run_id"]
+                        and batch.get("phase") in {"active", "blocked"}
+                        and pointer.get("run_id") == self.state["run_id"],
+                        "Batch ownership changed; preserve the uncertain submit for review.")
+                claim = self.state["claim"]
+                require(isinstance(claim.get("expires"), (int, float))
+                        and time.time() * 1000 >= claim["expires"] + 210000,
+                        "Submit claim may still be active; wait until its lease and request margin have elapsed.")
+                status = self.client.get("/api/processing/readings?document_id=" + claim["document"]["id"]
+                                         + "&checkpoint_token=" + claim["token"])
+                verify(status.get("draft_saved") is True and status.get("attempt_saved") is False
+                       and status.get("claim_active") is False,
+                       "Submit may be saved or active; preserve the exact frozen request for recovery.")
+                originals = self.state["draft"].get("documents") or [claim["document"]]
+                for original in originals:
+                    current = self.get_document(original["id"])
+                    original_pages = [{key: value for key, value in page.items() if key != "crop"}
+                                      for page in original["pages"]]
+                    verify(all(current.get(field) == original.get(field) for field in (
+                        "revision", "annotations", "handwriting", "mergedInto", "duplicateOf"))
+                        and current["pages"] == original_pages,
+                        "An affected source document changed; preserve the uncertain submit for review.")
+                self.record("expired-unsaved-submit", {
+                    "failure": deepcopy(self.state["failed"]), "rationale": rationale,
+                    "checkpoint_status": status,
+                    "document_revisions": [{"id": document["id"], "revision": document["revision"]}
+                                           for document in originals],
+                })
+                self.state["phase"] = "released"
+                self.state.pop("failed")
+                self.checkpoint()
+                return self.summary()
             if self.state["phase"] == "claimed" and self.state.get("failed"):
                 rationale = message.get("rationale")
                 require(isinstance(rationale, str) and 0 < len(rationale.strip()) <= 2000,
@@ -1647,6 +1702,7 @@ class Worker:
                 raise ProtocolInputError("Read the actual confirm result and assess its exact confirmation_sha256.")
             extraction=deepcopy(message["extraction"])
             validation=self.check("validate",extraction=extraction)
+            validation["errors"].extend(self.source_extraction_errors(extraction))
             if validation["errors"]: return {"assessed":False,"validation":validation}
             self.check_category(extraction, message.get("category_name"))
             rationale=message["rationale"]

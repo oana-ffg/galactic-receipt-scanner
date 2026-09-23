@@ -310,6 +310,39 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.fake.initial_draft["model"], "gpt-6-luna")
         self.assertEqual(json.loads(self.fake.submit_bytes[0])["model"], "gpt-6-luna")
 
+    def test_saved_annotations_require_a_corrected_luna_result_before_writes(self):
+        self.fake.jev_ready = True
+        self.fake.documents[DID]["annotations"] = [{"captureId": DID, "text": "synthetic mark"}]
+        self.fake.documents[DID]["handwriting"] = "present"
+        self.worker.confirmation_provider = "ppocr"
+        prepared = self.worker.prepare_luna_task([])
+        task = json.loads(Path(prepared["task_path"]).read_text())
+        self.assertEqual(task["document"]["saved_annotation_capture_ids"], [DID])
+        result_path = Path(prepared["result_path"])
+        value = extraction()
+        result_path.write_text(json.dumps({
+            "extraction": value, "rationale": "Synthetic inspected mark.",
+            "inspected_capture_ids": [DID],
+        }))
+        correction = self.worker.complete_luna_task()
+        self.assertTrue(correction["correction_required"])
+        self.assertIn("Saved handwritten annotations", correction["errors"][0])
+        self.assertEqual(self.worker.state["phase"], "claimed")
+        self.assertNotIn("luna_result_sha256", self.worker.state)
+        self.assertFalse(any(path in {"/api/processing/draft", "/api/processing/submit"}
+                             for method, path in self.fake.calls if method == "POST"))
+
+        value["has_handwriting"] = True
+        value["needs_human_review"] = True
+        value["human_review_reasons"] = ["Synthetic saved annotation needs a person to review."]
+        result_path.write_text(json.dumps({
+            "extraction": value, "rationale": "Synthetic inspected mark corrected.",
+            "inspected_capture_ids": [DID],
+        }))
+        finished = self.worker.complete_luna_task()
+        self.assertTrue(finished["ok"], finished)
+        self.assertEqual(self.worker.state["phase"], "complete")
+
     def test_legacy_prepared_run_keeps_its_original_model(self):
         self.fake.jev_ready = True
         self.worker.confirmation_provider = "ppocr"
@@ -1235,6 +1268,68 @@ class WorkerTests(unittest.TestCase):
         self.send("retry-submit")
         self.assertEqual(self.fake.submit_bytes[0], self.fake.submit_bytes[1])
         self.assertEqual(self.fake.documents[DID]["revision"], 3)
+
+    def test_rejected_submit_can_retire_only_after_unsaved_checkpoint_and_unchanged_sources(self):
+        self.fake.documents[DID]["annotations"] = [{"captureId": DID, "text": "synthetic mark"}]
+        self.fake.documents[DID]["handwriting"] = "present"
+        value = extraction()
+        value["has_handwriting"] = True
+        self.prepared(value=value)
+        # Model disagreement occurred after initial draft, in the final reassessment.
+        self.worker.state["assessment"]["extraction"]["has_handwriting"] = False
+        self.batch.save({**self.batch.state, "active_run_id": self.worker.state["run_id"]})
+        real_request = self.fake.request
+
+        def reject_submit(path, data=None, content_type=None):
+            if path == "/api/processing/submit":
+                self.fake.calls.append(("POST", path))
+                raise ClientError("Synthetic rejected submit")
+            return real_request(path, data, content_type)
+
+        with patch.object(self.fake, "request", side_effect=reject_submit):
+            failed = self.worker.handle({"op": "submit"})
+        self.assertTrue(failed["blocking"])
+        self.assertEqual(self.worker.state["phase"], "submit-uncertain")
+        self.fake.readings.update(draft_saved=True, attempt_saved=False, claim_active=False)
+        self.worker.lock.close()
+        self.worker = self.make_worker(self.worker.state["run_id"])
+        rationale = "Owner reviewed the synthetic rejected submit and retired its expired unsaved claim."
+
+        self.assertFalse(self.worker.handle({"op": "reconcile", "rationale": rationale})["ok"])
+        self.worker.state["claim"]["expires"] = time.time() * 1000 - 211000
+        for field in ("attempt_saved", "claim_active"):
+            self.fake.readings[field] = True
+            self.assertFalse(self.worker.handle({"op": "reconcile", "rationale": rationale})["ok"])
+            self.fake.readings[field] = False
+        self.fake.documents[DID]["annotations"].append({"captureId": DID, "text": "new synthetic mark"})
+        self.assertFalse(self.worker.handle({"op": "reconcile", "rationale": rationale})["ok"])
+        self.fake.documents[DID]["annotations"].pop()
+        self.worker.checkpoint()
+        before = sum(path == "/api/processing/submit" for method, path in self.fake.calls if method == "POST")
+        result = self.send("reconcile", rationale=rationale)
+        after = sum(path == "/api/processing/submit" for method, path in self.fake.calls if method == "POST")
+        self.assertEqual(before, after)
+        self.assertEqual(result["phase"], "released")
+        self.assertNotIn("failed", self.worker.state)
+        self.assertTrue(list(self.worker.work.glob("*-expired-unsaved-submit.json")))
+
+    def test_direct_reassessment_rejects_false_handwriting_with_saved_annotation(self):
+        self.fake.documents[DID]["annotations"] = [{"captureId": DID, "text": "synthetic mark"}]
+        self.fake.documents[DID]["handwriting"] = "present"
+        self.claimed()
+        value = extraction()
+        value["has_handwriting"] = True
+        self.send("draft", extraction=value)
+        self.send("prepare", capture_ids=[DID])
+        confirmation = self.send("confirm")
+        value["has_handwriting"] = False
+        result = self.send("assess", confirmation_sha256=confirmation["sha256"],
+                           extraction=value, rationale="Synthetic contradictory reassessment.")
+        self.assertFalse(result["assessed"])
+        self.assertIn("Saved handwritten annotations", result["validation"]["errors"][0])
+        self.assertNotIn("assessment", self.worker.state)
+        self.assertFalse(any(path == "/api/processing/submit"
+                             for method, path in self.fake.calls if method == "POST"))
 
     def test_grouped_retry_submit_retains_complete_guard_verification_acknowledgement(self):
         value = extraction()
