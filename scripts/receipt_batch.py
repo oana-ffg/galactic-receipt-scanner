@@ -62,7 +62,7 @@ class ProcessingBatchLease:
         require(Path(profile["repository"]).resolve() == repo.resolve(), "Prepared profile belongs to another checkout.")
         config_path = regular_path(Path(client_config))
         require(config_path.is_absolute() and config_path.is_file(),
-                "Use the fresh private client configuration for this batch.")
+                "Use the configured private client configuration for this batch.")
         profile = {**profile, "client_config": str(config_path)}
         self.client = ScannerClient(credentials(config_path))
         require(self.client.origin == profile["origin"], "Batch lease destination differs from the prepared profile.")

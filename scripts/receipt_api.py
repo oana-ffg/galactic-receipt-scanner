@@ -95,15 +95,38 @@ def credentials(config_path, from_stdin=False):
     if from_stdin:
         value = json.loads(sys.stdin.read(16384))
     else:
-        config = json.loads(Path(config_path).read_text())
+        config_path = Path(config_path)
+        if (config_path.is_symlink() or not config_path.is_file()
+                or (os.name != 'nt' and config_path.stat().st_mode & 0o077)):
+            raise ClientError("Credential configuration must be a private regular file.")
+        config = json.loads(config_path.read_text())
         filename = config.get("credential_file")
-        if not isinstance(filename, str) or not Path(filename).is_absolute():
-            raise ClientError("Create an agent connection from the signed-in Site; configure its private credential_file.")
-        credential_path = Path(filename)
-        if (credential_path.is_symlink() or not credential_path.is_file()
-                or (os.name != 'nt' and credential_path.stat().st_mode & 0o077)):
-            raise ClientError("Credentials must be stored in a private regular file.")
-        value = json.loads(credential_path.read_text())
+        command = config.get("credential_command")
+        if isinstance(filename, str) and command is None:
+            if not Path(filename).is_absolute():
+                raise ClientError("Credential file must be absolute.")
+            credential_path = Path(filename)
+            if (credential_path.is_symlink() or not credential_path.is_file()
+                    or (os.name != 'nt' and credential_path.stat().st_mode & 0o077)):
+                raise ClientError("Credentials must be stored in a private regular file.")
+            value = json.loads(credential_path.read_text())
+        elif filename is None and isinstance(command, list) and 1 <= len(command) <= 16 \
+                and all(isinstance(part, str) and part and "\x00" not in part for part in command):
+            try:
+                result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, timeout=30, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                raise ClientError("Credential provider is unavailable; check its local access.") from None
+            if result.returncode or not 0 < len(result.stdout) <= 16384:
+                raise ClientError("Credential provider did not return a valid bounded secret.")
+            try:
+                value = json.loads(result.stdout)
+            except (ValueError, UnicodeError):
+                raise ClientError("Credential provider returned invalid JSON.") from None
+        else:
+            raise ClientError("Configure exactly one private credential file or credential provider command.")
+        if not isinstance(value, dict):
+            raise ClientError("Credential provider must return a JSON object.")
         if value.get("origin") != config.get("origin"):
             raise ClientError("Credential origin differs from configured Site.")
     return value

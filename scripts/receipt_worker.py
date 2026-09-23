@@ -1834,7 +1834,7 @@ def main():
         return 1
     config_path = Path(args.client_config)
     require(config_path.is_absolute() and config_path.is_file() and not config_path.is_symlink(),
-            "Use the fresh private client configuration for this run.")
+            "Use the configured private client configuration for this run.")
     profile = {**json.loads(profile_text), "client_config": str(config_path.resolve(strict=True))}
     worker = Worker(profile, args.resume, args.profile)
     disable_console_echo()

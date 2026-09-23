@@ -38,26 +38,23 @@ coordinator/Astra guidance. Luna does not inspect profiles, fetch keys, launch s
 call APIs. Its private task contains the complete template, evidence and optional images.
 
 For the coordinator, read only the repository's ignored regular
-`.local/processing-host.json` to obtain the prepared Python executable. The deterministic
-batch controller reads the protected credential-free worker profile internally. The coordinator must
-create one fresh one-day processing connection for this batch through the signed-in
-`/agent-access` page, complete the encrypted handoff into a new private run directory, and
-pass only that client-config path to the controller. It must not open the resulting files,
-test the credentials, list captures or download an original as a preflight. A real
-profile/access failure returned by the controller is the setup failure.
-If the host descriptor is missing or redirected, follow the existing connection setup;
-never scan secret stores, invent alternate runtimes or print credentials. OCR production
-remains exclusively in `receipt-ocr-nightly`.
+`.local/processing-host.json` to obtain the prepared Python executable and `client_config`
+path. The deterministic batch controller reads the protected credential-free worker
+profile and loads the credential from the configured host secret manager internally.
+Pass only that client-config path to the controller. Do not open the credential entry,
+test it, list captures or download an original as a preflight. A real profile/access
+failure returned by the controller is the setup failure. If the host descriptor or
+client config is missing or redirected, follow [connection setup](../../../PROCESSING_ACCESS.md)
+on this host; never scan secret stores, invent alternate runtimes, copy a credential to
+a plaintext file or print credentials. OCR production remains exclusively in
+`receipt-ocr-nightly`.
 
-Each processing invocation authorizes one fresh processing connection for its batch.
-Complete the `/agent-access` page's **Approve connection** action yourself. Do not ask
-or wait for the owner to approve the connection.
-Never reuse a prior batch's client config. In a `finally` cleanup after success, empty queue,
-busy result or failure, call `revoke_processing_connection` with the returned connection ID,
-confirm `revoked:true`, then run `receipt_connection.mjs destroy` on that batch's private
-connection directory. The server's one-day expiry is only crash containment. If revocation
-cannot be confirmed, preserve the private directory so the owner can identify/revoke the
-connection; do not delete the evidence or start another batch.
+An owner-approved secret-manager connection may be reused across scheduled batches
+until its expiry or revocation. Do not create a new Site connection or revoke the
+standing connection at batch cleanup. Connection provisioning and revocation are
+separate owner-authorized lifecycle operations. A one-off encrypted connection can
+still be used when a host has no configured provider; follow the data-access skill's
+exact create/revoke procedure for that one-off connection.
 
 Do not create a recurring schedule from a bare invocation. Respect actual permission
 failures and the failure check below.

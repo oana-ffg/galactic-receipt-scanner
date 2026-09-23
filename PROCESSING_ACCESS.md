@@ -33,20 +33,52 @@ credential alone does not authorize scanner data access.
    host can decrypt the credential bundle; browser/model-visible results contain ciphertext.
    Repeating the exact request returns the same response, not a second credential.
 4. Complete the handoff with the helper. The Python API client reads its private config,
-   which points to the private credential file. There is **no gopass dependency**. POSIX
-   permissions are checked; on Windows use a user-private directory with an appropriate ACL.
-5. For a scheduled Luna batch, pass this fresh config to the controller, then revoke the
+   which can point to a private credential file or an owner-selected secret manager.
+   There is no required password-manager product.
+5. For a one-off connection, pass the private config to the controller, then revoke the
    exact connection and destroy its private connection directory at the end of the run.
-   Test writes, revocation and wrong credentials only against synthetic isolated storage.
+   For recurring processing, store the approved bundle in the host's secret manager and
+   use the tokenless provider config below. Test writes, revocation and wrong credentials
+   only against synthetic isolated storage.
 
-Credentials can last 1–365 days, as requested when connecting. Scheduled Luna processing
-uses a new one-day connection per batch, revokes it at terminal cleanup, and deletes the
-temporary local plaintext files only after revocation is confirmed; one day is the crash
-fallback, not the expected lifetime. The owner manages named
+Credentials can last 1–365 days, as requested when connecting. A one-off connection uses
+a one-day lifetime, is revoked at terminal cleanup, and has its temporary local files
+destroyed only after revocation is confirmed. A recurring connection lives in the host's
+secret manager until its configured expiry or explicit revocation. The owner manages named
 connections, scope, expiry, last use and revocation on `/agent-access`. The server stores
 only the scanner credential's hash, plus an encrypted handoff response for safe retries.
 Revocation/expiry applies to every subsequent authenticated request. In-flight operations
 already authorized may finish. Last-use timestamps update at most hourly.
+
+## Use the host's secret manager
+
+For unattended processing, choose a secret manager that the execution environment can
+actually read without interactive prompts. On a host with gopass, an agent may use an
+existing owner-approved gopass entry; on another host, use its available secret manager.
+ChatGPT Work setup must select a provider available in that Work environment rather than
+requiring the maintainer's computer. Verify the provider on that host before scheduling.
+
+The secret entry contains the complete JSON credential bundle: exact Site `origin`,
+`sites_token`, and `processing_token`. Never place those values in repository files,
+the automation prompt, command arguments, or a local plaintext credential file. Create
+an ignored private client config containing only the exact `origin` and a
+`credential_command` array. The command must print the complete JSON bundle to stdout;
+the client runs it without a shell, captures it only in process memory, suppresses its
+stderr, and rejects a different origin. For gopass, use its full `show` operation because
+the JSON bundle is multiline. The config contains the real entry reference, not the
+secret. The host descriptor may hold the absolute path to this tokenless config.
+
+For gopass, set `credential_command` to invoke `gopass show` with the owner's actual
+entry name; include the executable's search path if the scheduler does not inherit it.
+Set `client_config` in the ignored `.local/processing-host.json` to the absolute path of
+that tokenless config. Agents should use the secret manager actually available on their
+processing host and configure its equivalent command. An approved recurring connection
+is reused for each batch and is revoked only when the owner retires or rotates it.
+
+Provisioning and rotation still require owner-authorized Site access. An agent must
+verify the actual provider and scoped scanner access before an unattended schedule is
+enabled. If the provider is unavailable or access is revoked, stop the batch without
+claiming work; do not copy credentials into a file as a fallback.
 
 ## Scope
 

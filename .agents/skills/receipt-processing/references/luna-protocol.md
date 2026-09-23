@@ -14,7 +14,7 @@ does not read the profile, validate the destination, download an original or pas
 details to Luna.
 
 For a new chat, first reuse `.local/processing-host.json` in this checkout. It stores
-only `python` and `worker_profile` absolute paths, not credentials. Create/update this
+`python`, `worker_profile`, and `client_config` absolute paths, not credentials. Create/update this
 ignored descriptor when configuring a host so future invocations can reuse its setup.
 Missing configuration is a setup task; an omitted batch range uses the skill default.
 
@@ -22,18 +22,19 @@ Provide the verified absolute Python/helper/profile paths. The private Luna prof
 `repository`, the owner-verified `origin`, `node`, `renderer`, and
 `confirmation_provider: "ppocr"`. It deliberately contains no `ppocr`, model, device,
 inference-Python or credential fields. Create it with `scripts/receipt_processing_setup.py`.
-Create a fresh per-run connection as described in the data-access skill and pass its client
-config explicitly to the controller or exact recovery worker. PP-OCR
+Use the host's configured secret-manager client config for the controller or exact
+recovery worker. If no provider is configured, follow the data-access skill's one-off
+connection procedure. PP-OCR
 production belongs to the dedicated OCR host and its separate `receipt-ocr-host.json`.
 Use prepared runtimes. Keep the profile and its machine-specific approval rule outside
 tracked source. The rule allows
 only the exact Python executable, `-X utf8 -B -I`, absolute `scripts/receipt_worker.py`,
-`--profile`, the exact private profile path, `--client-config`, and the fresh private config
+`--profile`, the exact private profile path, `--client-config`, and the configured private config
 path. The same prefix covers the optional
 validated `--resume RUN_ID`; duplicate profile overrides and option abbreviations are rejected. Never allow arbitrary Python or shells.
 
 Request the exact prepared launch through the normal managed approval boundary. Do not
-create a standing prefix that omits or generalizes the fresh config path. An approval
+create a standing prefix that omits or generalizes the configured config path. An approval
 rejection still stops the denied operation and enters the failure check; changing the
 proposed command does not authorize retrying a denied launch.
 
@@ -43,10 +44,10 @@ non-secret ownership evidence, exact Python/script/profile paths and authorized 
 the coordinator's recovery context, never in Luna's semantic task. Never pass credentials or
 browser tab handles.
 
-Before exact-journal recovery, the coordinator creates one fresh scoped connection using
-the same per-run lifecycle as a normal batch. It then launches the prepared Python script;
-Luna never does. Once that connection is prepared, do not repeat ownership setup, query
-Sites metadata or provision another key inside the recovery. The Python script loads the explicitly supplied fresh credentials and enforces the
+Before exact-journal recovery, the coordinator uses the configured scoped provider,
+or prepares a one-off connection if no provider exists. It then launches the prepared
+Python script; Luna never does. Once the config is selected, do not repeat ownership setup,
+query Sites metadata or provision another key inside the recovery. The Python script loads the explicitly supplied credentials and enforces the
 configured origin, checkout and runtime checks; stdin cannot change destinations, runtimes
 or paths. Actual permission failures enter the failure check without bypassing the denied
 operation.
@@ -59,7 +60,7 @@ absolute paths and exact argument order, `tty: true`, `login: false`, and
 `sandbox_permissions: "require_escalated"` in the shell tool call:
 
 ```text
-PYTHON -X utf8 -B -I WORKER --profile PROFILE --client-config FRESH_CLIENT_CONFIG
+PYTHON -X utf8 -B -I WORKER --profile PROFILE --client-config CLIENT_CONFIG
 ```
 
 On PowerShell, when the prepared Python executable path is a literal path without
@@ -119,7 +120,7 @@ The coordinator uses the prepared Python executable to launch the checkout's abs
 `scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`,
 and the authorized `sandbox_permissions: require_escalated` context for its protected
 profile reads during verification. Scheduled runs use `receipt-processing-scheduled`.
-Pass `--client-config FRESH_CLIENT_CONFIG` for the connection created for this batch.
+Pass `--client-config CLIENT_CONFIG` from the host descriptor.
 Default count is 10; append `--count N` for an explicitly different count. The guard
 loads that config and owns its internal worker without exposing credentials to model output.
 It rejects any legacy Qwen profile before preflight or claim; normal Luna requires the

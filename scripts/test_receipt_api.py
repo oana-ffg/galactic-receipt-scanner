@@ -2,6 +2,7 @@ import hashlib
 import json
 import io
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,10 +10,32 @@ from contextlib import redirect_stdout
 from unittest.mock import Mock, patch, call
 from urllib.error import URLError
 from urllib.request import Request
-from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, main, run_jev_completeness
+from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, credentials, main, run_jev_completeness
 
 
 class ClientTests(unittest.TestCase):
+    def test_private_provider_config_loads_secret_without_a_credential_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "provider.json"
+            config_path.write_text(json.dumps({"origin": "https://scanner.example.test",
+                                               "credential_command": ["secret-tool", "read", "scanner"]}))
+            config_path.chmod(0o600)
+            secret = {"origin": "https://scanner.example.test", "sites_token": "synthetic-sites",
+                      "processing_token": "rsc_" + "s" * 43}
+            response = subprocess.CompletedProcess([], 0, json.dumps(secret).encode(), b"")
+            with patch("receipt_api.subprocess.run", return_value=response) as run:
+                self.assertEqual(credentials(config_path), secret)
+            self.assertEqual(run.call_args.args[0], ["secret-tool", "read", "scanner"])
+            self.assertNotIn("credential_file", json.loads(config_path.read_text()))
+            with patch("receipt_api.subprocess.run", return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps({**secret, "origin": "https://other.example"}).encode(), b"")):
+                with self.assertRaisesRegex(ClientError, "origin differs"):
+                    credentials(config_path)
+            with patch("receipt_api.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", b"private error")):
+                with self.assertRaisesRegex(ClientError, "did not return") as failure:
+                    credentials(config_path)
+            self.assertNotIn("private error", str(failure.exception))
+
     def test_completeness_race_does_not_count_an_unready_receipt_as_not_receipt(self):
         document = {"document_id": self.id, "kind": "receipt", "ready": True,
                     "jev": {"role": "purchase_document"},

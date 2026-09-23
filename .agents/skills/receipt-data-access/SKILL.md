@@ -11,7 +11,7 @@ Load credentials through the private connection config; never paste them into pr
 command arguments, logs or source.
 
 Reuse coordinator-supplied paths or the repository's ignored
-`.local/processing-host.json` (`python`, `worker_profile`) for the deterministic Luna
+`.local/processing-host.json` (`python`, `worker_profile`, `client_config`) for the deterministic Luna
 controller and Astra processing. The referenced saved-PP consumer profile contains the
 owner-verified origin, Node and renderer, but no credential config or OCR engine/models.
 OCR production separately uses
@@ -23,15 +23,16 @@ loads the protected profile, requires its origin and repository to match the pre
 and verifies scoped API capabilities before claiming work. A credential config alone is not
 independent proof of ownership. The coordinator and delegated Luna repeat none of this: Luna reads only
 its prepared private task and optional verified preview paths; it does not launch Python,
-inspect protected profiles or retrieve keys. The controller receives the fresh batch config
+inspect protected profiles or retrieve keys. The controller receives the configured client config
 path and loads it without exposing secrets.
 The connection helper creates a private config referring to its protected credential file.
-There is no gopass dependency. `--credentials-stdin` supports an explicitly authorized
-secret provider for optional personal integrations; browser password storage is not
-proof of shell credential access.
+For recurring work, the client also accepts a tokenless config whose `credential_command`
+reads an owner-approved secret-manager entry. A host with gopass can use an approved
+entry; another host may use its available secret manager. Browser password storage is
+not proof of shell access.
 A 401/403 is an access failure, not a missing original. Do not spoof identity headers.
 
-## Authorize a connection
+## Authorize a one-off connection
 
 1. Resolve the Site's exact HTTPS origin. Create a new ignored private directory with
    `node scripts/receipt_connection.mjs init PRIVATE_DIRECTORY SITE_ORIGIN CONNECTION_NAME processing 1`.
@@ -49,7 +50,7 @@ A 401/403 is an access failure, not a missing original. Do not spoof identity he
 4. Pass that config path to the deterministic controller with `--client-config`. The
    controller performs the real access preflight before claiming work. The coordinator and delegated Luna do not
    duplicate it. All client commands accept `--config` before the subcommand.
-5. In a `finally` cleanup for every batch outcome, use the signed-in page's
+5. In a `finally` cleanup for every one-off batch outcome, use the signed-in page's
    `revoke_processing_connection` tool for that exact connection ID. Only after it returns
    `revoked:true`, run `node scripts/receipt_connection.mjs destroy PRIVATE_DIRECTORY`.
    This removes the temporary plaintext credential/config and key material. If revocation
