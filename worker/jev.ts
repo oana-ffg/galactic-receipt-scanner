@@ -1058,6 +1058,7 @@ async function classifyDocument(
   env: Env,
   document: ReceiptDocument,
   budget: JevBudget,
+  expectedSavedRevision: number | null = null,
 ) {
   const evidence = await documentEvidence(env, document);
   if (!evidence) return null;
@@ -1147,8 +1148,18 @@ async function classifyDocument(
       ? (categoryChoices.ids.get(category.choice) ?? null)
       : null;
   const now = new Date().toISOString();
-  await env.DB.prepare(
-    "INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,category_id,category_probability,category_confidence,model,assessment_id,category_assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET document_revision=excluded.document_revision,page_fingerprint=excluded.page_fingerprint,role=excluded.role,role_probability=excluded.role_probability,role_confidence=excluded.role_confidence,category_id=excluded.category_id,category_probability=excluded.category_probability,category_confidence=excluded.category_confidence,model=excluded.model,assessment_id=excluded.assessment_id,category_assessment_id=excluded.category_assessment_id,updated_at=excluded.updated_at",
+  const guard =
+    expectedSavedRevision === null
+      ? "WHERE 1=1"
+      : `WHERE EXISTS (SELECT 1 FROM document_heads WHERE id=? AND revision=?)
+         AND NOT EXISTS (
+           SELECT 1 FROM document_pages p JOIN captures ON captures.id=p.capture_id
+           WHERE p.document_id=? AND NOT (${currentTake})
+         )`;
+  const published = await env.DB.prepare(
+    `INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,category_id,category_probability,category_confidence,model,assessment_id,category_assessment_id,updated_at)
+     SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? ${guard}
+     ON CONFLICT(document_id) DO UPDATE SET document_revision=excluded.document_revision,page_fingerprint=excluded.page_fingerprint,role=excluded.role,role_probability=excluded.role_probability,role_confidence=excluded.role_confidence,category_id=excluded.category_id,category_probability=excluded.category_probability,category_confidence=excluded.category_confidence,model=excluded.model,assessment_id=excluded.assessment_id,category_assessment_id=excluded.category_assessment_id,updated_at=excluded.updated_at`,
   )
     .bind(
       document.id,
@@ -1164,8 +1175,17 @@ async function classifyDocument(
       roleSaved.id,
       categoryAssessmentId,
       now,
+      ...(expectedSavedRevision === null
+        ? []
+        : [document.id, expectedSavedRevision, document.id]),
     )
     .run();
+  if (expectedSavedRevision !== null)
+    requireThat(
+      published.meta.changes === 1,
+      409,
+      "Document changed during Jev classification.",
+    );
   return {
     document_id: document.id,
     role: role.choice as DocumentRole,
@@ -2741,21 +2761,12 @@ async function markDocumentsWaitingForOcr(
   return true;
 }
 
-async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
-  const evidence = await documentEvidence(env, document);
-  if (!evidence) {
-    for (const page of document.pages)
-      await env.DB.prepare(
-        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
-      )
-        .bind(new Date().toISOString(), page.captureId)
-        .run();
-    return {
-      status: "ineligible",
-      document_id: document.id,
-      reason: "document_evidence_incomplete",
-    };
-  }
+async function ensureDocumentClassification(
+  env: Env,
+  document: ReceiptDocument,
+  evidence: NonNullable<Awaited<ReturnType<typeof documentEvidence>>>,
+  expectedSavedRevision: number | null = null,
+) {
   const head =
     (await env.DB.prepare(
       "SELECT * FROM jev_document_heads WHERE document_id=?",
@@ -2772,15 +2783,37 @@ async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
     assessment?.task === "document-classification" &&
     (await documentHeadReady(env, document, head, evidence.heads, artifacts));
   if (!alreadyCurrent) {
-    const classification = await classifyDocument(env, document, {
-      remaining: 1,
-    });
+    const classification = await classifyDocument(
+      env,
+      document,
+      { remaining: 1 },
+      expectedSavedRevision,
+    );
     requireThat(
       classification,
       503,
       "Final Jev document evidence is unavailable.",
     );
   }
+  return alreadyCurrent ? "verified" : "classified";
+}
+
+async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
+  const evidence = await documentEvidence(env, document);
+  if (!evidence) {
+    for (const page of document.pages)
+      await env.DB.prepare(
+        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
+      )
+        .bind(new Date().toISOString(), page.captureId)
+        .run();
+    return {
+      status: "ineligible",
+      document_id: document.id,
+      reason: "document_evidence_incomplete",
+    };
+  }
+  const status = await ensureDocumentClassification(env, document, evidence);
   for (const page of document.pages)
     await env.DB.prepare(
       "UPDATE jev_jobs SET status='complete',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
@@ -2788,7 +2821,7 @@ async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
       .bind(new Date().toISOString(), page.captureId)
       .run();
   return {
-    status: alreadyCurrent ? "verified" : "classified",
+    status,
     document_id: document.id,
   };
 }
@@ -4116,6 +4149,62 @@ export async function jevRoute(
       assessment_id: saved.id,
       assessed: true,
     });
+  }
+  const refreshDocument =
+    request.method === "POST"
+      ? url.pathname.match(/^\/api\/jev\/documents\/([0-9a-f-]{36})\/refresh$/)
+      : null;
+  if (refreshDocument) {
+    requireThat(UUID.test(refreshDocument[1]), 400, "Invalid document ID.");
+    requireThat(
+      !(await activePipelineRun(env)),
+      409,
+      "Jev pipeline is active.",
+    );
+    const document = await storedDocumentById(env, refreshDocument[1]);
+    requireThat(
+      document &&
+        !document.mergedInto &&
+        !document.duplicateOf &&
+        document.pages.length > 0,
+      404,
+      "Current document not found.",
+    );
+    const currentSources = async () => {
+      for (const page of document.pages) {
+        const capture = await loadCapture(page.captureId);
+        if (!capture?.is_current || capture.sha256 !== page.sha256)
+          return false;
+      }
+      return true;
+    };
+    requireThat(
+      await currentSources(),
+      409,
+      "Document contains a superseded scan.",
+    );
+    const evidence = await documentEvidence(env, document);
+    requireThat(evidence, 409, "Current PP OCR evidence is incomplete.");
+    requireThat(
+      await documentsAreUnlocked(env, [document]),
+      409,
+      "Document is being edited or processed.",
+    );
+    const status = await ensureDocumentClassification(
+      env,
+      document,
+      evidence,
+      document.revision,
+    );
+    const current = await storedDocumentById(env, document.id);
+    requireThat(
+      current?.revision === document.revision &&
+        (await currentSources()) &&
+        (await jevSummary(env, current)).ready,
+      409,
+      "Document changed during Jev classification.",
+    );
+    return json({ status, document_id: document.id });
   }
   if (url.pathname === "/api/jev/backfill" && request.method === "POST") {
     const blocked = await env.DB.prepare(

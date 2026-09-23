@@ -901,6 +901,78 @@ it("completes each page job without starving a multi-page document and binds the
     result: "yes",
     issue: "none",
   });
+  const refresh = () =>
+    mf.dispatchFetch(`${origin}/api/jev/documents/${document.id}/refresh`, {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        Authorization: `Bearer ${processingToken}`,
+      },
+    });
+  await db
+    .prepare(
+      "UPDATE jev_document_heads SET page_fingerprint=? WHERE document_id=?",
+    )
+    .bind("f".repeat(64), document.id)
+    .run();
+  await db
+    .prepare("UPDATE jev_jobs SET status='classified' WHERE capture_id=?")
+    .bind(captures[0].id)
+    .run();
+  await db
+    .prepare("UPDATE jev_jobs SET status='waiting' WHERE capture_id=?")
+    .bind(captures[1].id)
+    .run();
+  await db
+    .prepare(
+      "INSERT INTO processing_lock(id,token,stage,document_id,revision,expires) VALUES(1,'synthetic','review',?,?,?)",
+    )
+    .bind(document.id, document.revision, Date.now() + 60_000)
+    .run();
+  expect((await refresh()).status).toBe(409);
+  await db.prepare("DELETE FROM processing_lock WHERE id=1").run();
+  const jobStatuses = async () =>
+    (
+      await db
+        .prepare(
+          "SELECT status FROM jev_jobs WHERE capture_id IN (?,?) ORDER BY capture_id",
+        )
+        .bind(captures[0].id, captures[1].id)
+        .all<{ status: string }>()
+    ).results.map((row) => row.status);
+  const statusesBeforeRefresh = await jobStatuses();
+  expect([...statusesBeforeRefresh].sort()).toEqual(["classified", "waiting"]);
+  const refreshed = await refresh();
+  expect(refreshed.status, await refreshed.clone().text()).toBe(200);
+  expect(await refreshed.json<any>()).toMatchObject({ status: "classified" });
+  expect(await jobStatuses()).toEqual(statusesBeforeRefresh);
+  await db
+    .prepare("DELETE FROM jev_document_heads WHERE document_id=?")
+    .bind(document.id)
+    .run();
+  const recreated = await refresh();
+  expect(recreated.status, await recreated.clone().text()).toBe(200);
+  expect(await recreated.json<any>()).toMatchObject({ status: "classified" });
+  expect(await jobStatuses()).toEqual(statusesBeforeRefresh);
+  const repeatedRefresh = await refresh();
+  expect(repeatedRefresh.status).toBe(200);
+  expect(await repeatedRefresh.json<any>()).toMatchObject({
+    status: "verified",
+  });
+  const restoredDocument = await mf.dispatchFetch(
+    `${origin}/api/documents/${document.id}`,
+    { headers: ownerHeaders },
+  );
+  expect((await restoredDocument.json<any>()).document).toMatchObject({
+    jevRole: "purchase_document",
+    completenessAudit: { result: "yes" },
+  });
+  await db
+    .prepare("UPDATE jev_jobs SET status='complete' WHERE capture_id IN (?,?)")
+    .bind(captures[0].id, captures[1].id)
+    .run();
   const now = new Date().toISOString();
   await db
     .prepare(
@@ -916,6 +988,106 @@ it("completes each page job without starving a multi-page document and binds the
       )
     ).ready,
   ).toBe(true);
+});
+
+it("does not publish a targeted Jev classification after a concurrent document edit", async () => {
+  const processingToken = `rsc_${"z".repeat(43)}`;
+  let holdClassification = false;
+  let markClassificationStarted!: () => void;
+  const classificationStarted = new Promise<void>((resolve) => {
+    markClassificationStarted = resolve;
+  });
+  let releaseClassification!: () => void;
+  const classificationReleased = new Promise<void>((resolve) => {
+    releaseClassification = resolve;
+  });
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: async (request: Request) => {
+      const body = (await request.clone().json()) as any;
+      if (holdClassification && body.questions.document_role) {
+        holdClassification = false;
+        markClassificationStarted();
+        await classificationReleased;
+      }
+      return syntheticJevResponse(request);
+    },
+  });
+  const capture = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(createdAt, capture.id)
+    .run();
+  const document = newDocument(capture);
+  const grouped = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [document] }),
+  });
+  expect(grouped.status, await grouped.clone().text()).toBe(200);
+  await seedHistoricalOcr(capture, "SYNTHETIC SHOP TOTAL 12.34", createdAt);
+  await drainBackfill(processingToken);
+  await db
+    .prepare("DELETE FROM jev_document_heads WHERE document_id=?")
+    .bind(document.id)
+    .run();
+  await db
+    .prepare(
+      "DELETE FROM jev_assessments WHERE task='document-classification' AND subject_id=?",
+    )
+    .bind(document.id)
+    .run();
+  holdClassification = true;
+  const pending = mf.dispatchFetch(
+    `${origin}/api/jev/documents/${document.id}/refresh`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+        Authorization: `Bearer ${processingToken}`,
+      },
+    },
+  );
+  await classificationStarted;
+  const saved = await db
+    .prepare(
+      "SELECT v.revision,v.payload FROM document_heads h JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision WHERE h.id=?",
+    )
+    .bind(document.id)
+    .first<{ revision: number; payload: string }>();
+  expect(saved).toBeTruthy();
+  const changed = JSON.parse(saved!.payload);
+  changed.revision = saved!.revision + 1;
+  changed.vendor = "Synthetic corrected vendor";
+  await db
+    .prepare(
+      "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+    )
+    .bind(document.id, changed.revision, JSON.stringify(changed), createdAt)
+    .run();
+  await db
+    .prepare("UPDATE document_heads SET revision=? WHERE id=?")
+    .bind(changed.revision, document.id)
+    .run();
+  releaseClassification();
+  expect((await pending).status).toBe(409);
+  expect(
+    await db
+      .prepare("SELECT document_id FROM jev_document_heads WHERE document_id=?")
+      .bind(document.id)
+      .first(),
+  ).toBeNull();
 });
 
 it("discovers and processes only one historical OCR artifact per backfill request", async () => {

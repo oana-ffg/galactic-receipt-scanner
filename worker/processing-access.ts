@@ -41,6 +41,7 @@ export function processingRouteAllowed(method: string, path: string): boolean {
       "/api/jev/group-audit",
       "/api/jev/relationship-benchmark",
     ].includes(path) ||
+      new RegExp(`^/api/jev/documents/${id}/refresh$`).test(path) ||
       new RegExp(`^/api/documents/${id}/pdf$`).test(path) ||
       new RegExp(`^/api/captures/${id}/artifacts/ocr$`).test(path))
   );
