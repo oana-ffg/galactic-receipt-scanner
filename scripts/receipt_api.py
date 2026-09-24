@@ -235,17 +235,28 @@ class ScannerClient:
             "Content-Type": content_type,
         }
         req = Request(self.origin + path, data=data, headers=headers)
-        try:
-            with self.opener.open(req, timeout=90) as response:
-                body = response.read(LIMIT + 1)
-                if len(body) > LIMIT:
-                    raise ClientError("Response exceeds the client size limit.")
-                return body
-        except HTTPError as exc:
-            # Do not echo proxy HTML, URLs, request headers, or financial payloads.
-            raise ClientError(f"Scanner returned HTTP {exc.code}; 401/403 means access denied, 409 requires rereading the current revision.") from None
-        except (URLError, TimeoutError):
-            raise ScannerConnectionError("Scanner connection failed; check connectivity and retry.") from None
+        # Reads can safely recover from a brief gateway failure. Never replay a
+        # write here: its outcome may be unknown and the caller owns recovery.
+        attempts = 3 if data is None else 1
+        for attempt in range(attempts):
+            try:
+                with self.opener.open(req, timeout=90) as response:
+                    body = response.read(LIMIT + 1)
+                    if len(body) > LIMIT:
+                        raise ClientError("Response exceeds the client size limit.")
+                    return body
+            except HTTPError as exc:
+                if data is None and exc.code in {500, 502, 503, 504} and attempt < attempts - 1:
+                    exc.close()
+                    time.sleep(0.25 * (2 ** attempt))
+                    continue
+                # Do not echo proxy HTML, URLs, request headers, or financial payloads.
+                raise ClientError(f"Scanner returned HTTP {exc.code}; 401/403 means access denied, 409 requires rereading the current revision.") from None
+            except (URLError, TimeoutError):
+                if data is None and attempt < attempts - 1:
+                    time.sleep(0.25 * (2 ** attempt))
+                    continue
+                raise ScannerConnectionError("Scanner connection failed; check connectivity and retry.") from None
 
     def get(self, path):
         try:

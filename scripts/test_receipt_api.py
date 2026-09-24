@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch, call
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, credentials, main, run_jev_completeness
 
@@ -328,6 +328,50 @@ class ClientTests(unittest.TestCase):
         self.client.opener.open = Mock(side_effect=URLError("synthetic outage"))
         with self.assertRaises(ScannerConnectionError):
             self.client.request("/api/processing/claim", b"{}")
+
+    def test_read_retries_transient_server_error_without_replaying_writes(self):
+        error = lambda code: HTTPError(self.client.origin + "/api/captures", code,
+                                       "synthetic gateway error", {}, io.BytesIO(b"private response"))
+        self.client.opener.open = Mock(side_effect=[error(500), error(503), io.BytesIO(b'{"ok":true}')])
+        with patch("receipt_api.time.sleep") as sleep:
+            self.assertEqual(self.client.request("/api/captures"), b'{"ok":true}')
+        self.assertEqual(self.client.opener.open.call_count, 3)
+        self.assertEqual([entry.args[0] for entry in sleep.call_args_list], [0.25, 0.5])
+
+        self.client.opener.open = Mock(side_effect=error(500))
+        with patch("receipt_api.time.sleep") as sleep:
+            with self.assertRaisesRegex(ClientError, "HTTP 500"):
+                self.client.request("/api/processing/claim", b"{}")
+        self.client.opener.open.assert_called_once()
+        sleep.assert_not_called()
+
+        self.client.opener.open = Mock(side_effect=[error(500), error(500), error(500)])
+        with patch("receipt_api.time.sleep") as sleep:
+            with self.assertRaisesRegex(ClientError, "HTTP 500"):
+                self.client.request("/api/captures")
+        self.assertEqual(self.client.opener.open.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+        self.client.opener.open = Mock(side_effect=error(403))
+        with patch("receipt_api.time.sleep") as sleep:
+            with self.assertRaisesRegex(ClientError, "HTTP 403"):
+                self.client.request("/api/captures")
+        self.client.opener.open.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_read_connection_recovery_is_bounded(self):
+        self.client.opener.open = Mock(side_effect=[URLError("synthetic outage"), io.BytesIO(b"recovered")])
+        with patch("receipt_api.time.sleep") as sleep:
+            self.assertEqual(self.client.request("/api/captures"), b"recovered")
+        self.assertEqual(self.client.opener.open.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+        self.client.opener.open = Mock(side_effect=URLError("synthetic outage"))
+        with patch("receipt_api.time.sleep") as sleep:
+            with self.assertRaises(ScannerConnectionError):
+                self.client.request("/api/captures")
+        self.assertEqual(self.client.opener.open.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_metadata_identity_and_symlinks_are_checked(self):
         self.client.get = Mock(return_value={**self.meta, "id": "wrong"})
