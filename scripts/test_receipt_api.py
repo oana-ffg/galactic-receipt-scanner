@@ -345,6 +345,13 @@ class ClientTests(unittest.TestCase):
         self.client.opener.open.assert_called_once()
         sleep.assert_not_called()
 
+        ray_error = HTTPError(self.client.origin + "/api/processing/claim", 503,
+                              "synthetic gateway error", {"cf-ray": "1234567890abcdef-CPH"},
+                              io.BytesIO(b"private response"))
+        self.client.opener.open = Mock(side_effect=ray_error)
+        with self.assertRaisesRegex(ClientError, r"HTTP 503 \(Ray 1234567890abcdef-CPH\)"):
+            self.client.request("/api/processing/claim", b"{}")
+
         self.client.opener.open = Mock(side_effect=[error(500), error(500), error(500)])
         with patch("receipt_api.time.sleep") as sleep:
             with self.assertRaisesRegex(ClientError, "HTTP 500"):

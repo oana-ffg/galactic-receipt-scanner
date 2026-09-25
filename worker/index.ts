@@ -924,21 +924,21 @@ async function route(
       return json({ ok: true });
     }
     if (method === "GET") {
-      requireThat(
+      // A missing frame is normal while the phone is idle or direct video is
+      // active. Keep it out of the production error log's bounded result set.
+      if (!(
         row.preview_key &&
-          row.expires > Date.now() &&
-          row.updated > Date.now() - 5000,
-        404,
-        "No live preview.",
-      );
+        row.expires > Date.now() &&
+        row.updated > Date.now() - 5000
+      ))
+        return new Response(null, { status: 204 });
       const image = await env.BUCKET.get(row.preview_key);
-      requireThat(
+      if (!(
         image &&
-          image.customMetadata?.camera === row.camera &&
-          Number(image.customMetadata?.capturedAt) > Date.now() - 3000,
-        404,
-        "Waiting for a fresh preview.",
-      );
+        image.customMetadata?.camera === row.camera &&
+        Number(image.customMetadata?.capturedAt) > Date.now() - 3000
+      ))
+        return new Response(null, { status: 204 });
       return new Response(image.body, {
         headers: {
           "Content-Type": "image/jpeg",
@@ -1056,6 +1056,19 @@ export default {
         ),
       );
     } catch (error) {
+      const status = error instanceof HttpError ? error.status : 503;
+      if (status >= 500)
+        console.error(
+          JSON.stringify({
+            event: "scanner_request_failure",
+            method: request.method,
+            path: new URL(request.url).pathname,
+            status,
+            error_type: error instanceof Error ? error.name : typeof error,
+            reason: error instanceof HttpError ? error.message : undefined,
+            ray_id: request.headers.get("cf-ray"),
+          }),
+        );
       if (
         error instanceof HttpError &&
         [401, 403].includes(error.status) &&
@@ -1088,7 +1101,7 @@ export default {
                   ? error.message
                   : "Storage temporarily unavailable. Your pending capture is retained; retry.",
             },
-            error instanceof HttpError ? error.status : 503,
+            status,
           ),
         ),
       );

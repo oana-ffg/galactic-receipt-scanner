@@ -746,7 +746,9 @@ class BatchGuardTests(unittest.TestCase):
         self.assertFalse(module.lock_held(self.base / 'batch.lock'))
         output = stdout.getvalue()
         self.assertNotIn('SENTINEL', output)
-        self.assertEqual(json.loads(output), {
+        reported = json.loads(output)
+        self.assertRegex(reported.pop('batch_id'), r'^[0-9a-f]{32}$')
+        self.assertEqual(reported, {
             'blocking': True,
             'batch_started': False,
             'stage': 'batch-lease-acquire',

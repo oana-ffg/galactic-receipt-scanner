@@ -549,6 +549,8 @@ function mountDashboard(): void {
           signal: AbortSignal.timeout(4000),
         });
         status = response.status;
+        if (status === 204)
+          throw new Error("Waiting for a fresh phone preview.");
         if (!response.ok) throw new Error("Waiting for a fresh phone preview.");
         const blob = await response.blob();
         let newFrame = false;

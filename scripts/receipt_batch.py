@@ -23,17 +23,20 @@ BATCH_LEASE_FAILURE_MESSAGES = {
 }
 
 
-def batch_lease_failure(stage, error):
+def batch_lease_failure(stage, error, batch_id=None):
     """Return a content-free startup error without exposing paths or malformed values."""
     require(stage in BATCH_LEASE_FAILURE_MESSAGES, "Unknown batch lease startup stage.")
     message = str(error) if isinstance(error, ClientError) else BATCH_LEASE_FAILURE_MESSAGES[stage]
-    return dict(
+    result = dict(
         blocking=True,
         batch_started=False,
         stage=stage,
         error=message,
         error_type=type(error).__name__,
     )
+    if batch_id is not None:
+        result["batch_id"] = batch_id
+    return result
 
 
 def controller_response(result):
@@ -45,8 +48,8 @@ def controller_response(result):
 class BatchLeaseStartError(Exception):
     """A lease request failed before this controller persisted a new batch."""
 
-    def __init__(self, error):
-        self.payload = batch_lease_failure("batch-lease-acquire", error)
+    def __init__(self, error, batch_id):
+        self.payload = batch_lease_failure("batch-lease-acquire", error, batch_id)
         super().__init__(self.payload["error"])
 
 
@@ -193,7 +196,7 @@ class BatchGuard:
                 # No active batch has been persisted yet. Keep the last terminal
                 # batch authoritative and report the startup stage instead of
                 # mislabelling it as damaged guard state.
-                raise BatchLeaseStartError(error) from None
+                raise BatchLeaseStartError(error, batch_id) from None
         try:
             return self.save(dict(batch_id=batch_id, owner=self.owner, phase="active", started_at=time.time(),
                                   requested_count=count, workflow=workflow, verified_runs={}, completed_count=0))

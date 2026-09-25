@@ -1,5 +1,5 @@
 import worker, { authorize } from "./index";
-import { beforeAll, afterAll, expect, it } from "vitest";
+import { beforeAll, afterAll, expect, it, vi } from "vitest";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 let mf: Awaited<ReturnType<typeof runtime>>;
 beforeAll(async () => {
@@ -323,6 +323,9 @@ it("cannot accept an original with missing quality or a failed original write", 
 });
 
 it("identifies fresh HTTP preview frames and rejects stale ones", async () => {
+  const missing = await request("/api/station/preview");
+  expect(missing.status).toBe(204);
+  expect(await missing.text()).toBe("");
   const db = await mf.getD1Database("DB");
   const row = await db
     .prepare("SELECT camera FROM station WHERE id=1")
@@ -356,7 +359,39 @@ it("identifies fresh HTTP preview frames and rejects stale ones", async () => {
   await bucket.put("preview/latest", new Uint8Array([255, 216, 255, 1]), {
     customMetadata: { camera, capturedAt: String(Date.now() - 4000) },
   });
-  expect((await request("/api/station/preview")).status).toBe(404);
+  const stale = await request("/api/station/preview");
+  expect(stale.status).toBe(204);
+  expect(await stale.text()).toBe("");
+  for (const metadata of [{ camera }, { camera, capturedAt: "invalid" }]) {
+    await bucket.put("preview/latest", new Uint8Array([255, 216, 255, 1]), {
+      customMetadata: metadata,
+    });
+    expect((await request("/api/station/preview")).status).toBe(204);
+  }
+});
+
+it("logs server failures with routing context but no response or request payload", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const response = await worker.fetch(
+      new Request(origin + "/api/me", {
+        headers: { ...ownerHeaders, "cf-ray": "1234567890abcdef" },
+      }),
+      { APP_ORIGIN: origin, OWNER_EMAIL: "" } as never,
+    );
+    expect(response.status).toBe(503);
+    expect(JSON.parse(String(logged.mock.lastCall?.[0]))).toEqual({
+      event: "scanner_request_failure",
+      method: "GET",
+      path: "/api/me",
+      status: 503,
+      error_type: "Error",
+      reason: "Instance is not configured.",
+      ray_id: "1234567890abcdef",
+    });
+  } finally {
+    logged.mockRestore();
+  }
 });
 
 it("binds direct preview signalling to the active camera and one viewer session", async () => {

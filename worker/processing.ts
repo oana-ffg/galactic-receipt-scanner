@@ -1199,15 +1199,43 @@ export async function processingRoute(
           : { lease: null, reason: "expired-or-replaced" },
       );
     }
-    const acquired = await env.DB.prepare(
-      `INSERT INTO processing_batch_lease(id,batch_id,owner,expires,created_at,updated_at)
+    let acquired: { expires: number } | null;
+    try {
+      acquired = await env.DB.prepare(
+        `INSERT INTO processing_batch_lease(id,batch_id,owner,expires,created_at,updated_at)
        SELECT 1,?,?,unixepoch()*1000+?,?,? WHERE NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
        ON CONFLICT(id) DO UPDATE SET batch_id=excluded.batch_id,owner=excluded.owner,expires=excluded.expires,created_at=excluded.created_at,updated_at=excluded.updated_at
        WHERE processing_batch_lease.expires<=unixepoch()*1000 OR (processing_batch_lease.batch_id=excluded.batch_id AND processing_batch_lease.owner=excluded.owner)
        RETURNING expires`,
-    )
-      .bind(input.batch_id, input.owner, BATCH_LEASE_MS, now, now)
-      .first<{ expires: number }>();
+      )
+        .bind(input.batch_id, input.owner, BATCH_LEASE_MS, now, now)
+        .first<{ expires: number }>();
+    } catch (error) {
+      // This statement has no receipt fields or text. Preserve its database
+      // error so a failed write can be distinguished from a failed response.
+      console.error(
+        JSON.stringify({
+          event: "processing_batch_lease_acquire",
+          batch_id: input.batch_id,
+          outcome: "database-error",
+          reason:
+            error instanceof Error ? error.message : "Unknown database error",
+          ray_id: request.headers.get("cf-ray"),
+        }),
+      );
+      throw error;
+    }
+    // This is the backend commit marker for a lease attempt. It lets an
+    // operator distinguish a failed response from a failed database write.
+    console.info(
+      JSON.stringify({
+        event: "processing_batch_lease_acquire",
+        batch_id: input.batch_id,
+        outcome: acquired ? "acquired" : "busy",
+        expires: acquired?.expires ?? null,
+        ray_id: request.headers.get("cf-ray"),
+      }),
+    );
     return json(
       acquired
         ? { lease: { batch_id: input.batch_id, expires: acquired.expires } }

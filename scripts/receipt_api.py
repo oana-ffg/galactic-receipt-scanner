@@ -251,7 +251,9 @@ class ScannerClient:
                     time.sleep(0.25 * (2 ** attempt))
                     continue
                 # Do not echo proxy HTML, URLs, request headers, or financial payloads.
-                raise ClientError(f"Scanner returned HTTP {exc.code}; 401/403 means access denied, 409 requires rereading the current revision.") from None
+                ray = exc.headers.get("cf-ray", "")
+                reference = f" (Ray {ray})" if re.fullmatch(r"[0-9a-f]{16}(?:-[A-Z]{3})?", ray) else ""
+                raise ClientError(f"Scanner returned HTTP {exc.code}{reference}; 401/403 means access denied, 409 requires rereading the current revision.") from None
             except (URLError, TimeoutError):
                 if data is None and attempt < attempts - 1:
                     time.sleep(0.25 * (2 ** attempt))

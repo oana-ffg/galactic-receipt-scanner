@@ -1,5 +1,5 @@
 import { compareOcrNumbers } from "./ocr-comparison";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { processingRoute } from "./processing";
 import {
@@ -344,6 +344,46 @@ it("coordinates a renewable batch lease without exposing it to owner-only calls"
       true,
     ),
   ).toEqual({ released: true });
+});
+it("records the database stage when a batch lease write fails", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const batchId = "c".repeat(32);
+  try {
+    await expect(
+      processingRoute(
+        new Request(origin + "/api/processing/batch-lease", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "cf-ray": "1234567890abcdef",
+          },
+          body: JSON.stringify({
+            op: "acquire",
+            batch_id: batchId,
+            owner: "synthetic-coordinator",
+          }),
+        }),
+        {
+          DB: {
+            prepare: () => {
+              throw new Error("synthetic D1 outage");
+            },
+          },
+        } as unknown as Env,
+        async () => [],
+        async () => null,
+      ),
+    ).rejects.toThrow("synthetic D1 outage");
+    expect(JSON.parse(String(logged.mock.lastCall?.[0]))).toEqual({
+      event: "processing_batch_lease_acquire",
+      batch_id: batchId,
+      outcome: "database-error",
+      reason: "synthetic D1 outage",
+      ray_id: "1234567890abcdef",
+    });
+  } finally {
+    logged.mockRestore();
+  }
 });
 it("queues an exact zero-item financial result for Luna without changing its saved reading", async () => {
   const captureRecord = await capture();
