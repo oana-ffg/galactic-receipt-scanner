@@ -1835,12 +1835,14 @@ class Worker:
         except ProtocolInputError as error:
             return {"ok": False, "input_error": str(error), "op": op}
         except OCRRequired as error:
-            return self.failure(
+            # Name the exact source and layout so the owner can see which scan the
+            # OCR host still has to process; this host never runs OCR itself.
+            return {**self.failure(
                 op,
                 "Required saved PP-OCR is missing for the frozen layout. Release this claim and stop the batch; "
                 "the dedicated OCR host must complete it before Luna retries. Do not run OCR on this host.",
                 prior_failure,
-            )
+            ), "missing_ocr": error.request}
         except InputError as error:
             if isinstance(error, WorkerStopped):
                 # A background renewal failure is terminal, even while waiting for OCR.
@@ -1873,8 +1875,10 @@ class Worker:
                 if self.state["phase"] in {"claimed", "drafted"} and not self.state.get("failed"):
                     try:
                         self.renew_if_needed()
-                    except (ClientError, OSError, ValueError, KeyError, InputError):
-                        self.failure("renew", "Automatic claim renewal failed; stop this worker and preserve its state.")
+                    except (ClientError, OSError, ValueError, KeyError, InputError) as error:
+                        self.failure("renew", "Automatic claim renewal failed "
+                                     f"({type(error).__name__}: {diagnostic_text(str(error))}); "
+                                     "stop this worker and preserve its state.")
 
 
 def main():

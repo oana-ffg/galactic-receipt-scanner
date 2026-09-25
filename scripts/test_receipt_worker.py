@@ -43,7 +43,8 @@ def extraction():
         payment_status="approved", card_last_four=None,
         line_items=[dict(description="Synthetic item", quantity=None, unit_price_minor=None, amount_minor=100)],
         adjustments=[], payment_adjustments=[], total_minor=100, charged_total_minor=100, vat_minor=None,
-        tax_basis="gross", completeness="complete", category_id=None, certainty="high", uncertainties=[],
+        tax_basis="gross", completeness="complete", category_id=None, certainty="high",
+        needs_human_review=False, human_review_reasons=[], uncertainties=[],
         broken_reasons=[], evidence="Synthetic fixture only.")
 
 
@@ -1171,6 +1172,8 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(result["blocking"])
         self.assertIn("dedicated OCR host", result["error"])
         self.assertIn("Do not run OCR on this host", result["error"])
+        self.assertEqual(result["missing_ocr"], dict(origin=self.fake.origin, capture_id=DID,
+                                                     source_sha256=request["sha256"], crop=[1, 2, 9, 18], rotation=0))
         self.assertNotIn("Sol", json.dumps(result))
         self.assertTrue(self.send("release")["released"])
 
@@ -1246,6 +1249,17 @@ class WorkerTests(unittest.TestCase):
         self.worker.renew_if_needed()
         self.assertIn(("POST", "/api/processing/renew"), self.fake.calls)
         self.assertGreater(self.worker.state["claim"]["expires"], time.time()*1000+300000)
+
+    def test_background_renewal_failure_states_its_cause(self):
+        self.claimed()
+        self.worker.stop_heartbeat = Mock()
+        self.worker.stop_heartbeat.wait.side_effect = [False, True]
+        with patch.object(self.worker, "renew_if_needed",
+                          side_effect=module.ClientError("Scanner returned HTTP 409: Claim expired.")):
+            self.worker.heartbeat()
+        self.assertEqual(self.worker.state["failed"]["operation"], "renew")
+        self.assertIn("(ClientError: Scanner returned HTTP 409: Claim expired.)",
+                      self.worker.state["failed"]["error"])
 
     def test_integrity_failure_stops_and_releases_only_unsubmitted_claim(self):
         self.claimed()

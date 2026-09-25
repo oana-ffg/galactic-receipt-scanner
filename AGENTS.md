@@ -64,16 +64,19 @@ until verified, and report specific untested capabilities without treating the w
 project as blocked. Local development tooling is acceptable; requiring the maintainer's
 machine or personal credentials for another user's deployed instance is not.
 
-**No gopass dependency.** Do not require or introduce gopass for this project. Provide
-owner-accessible credential provisioning, connection and revocation suitable for cloud
-Work. Existing machine-specific credential setup is migration debt, not the product's
+**No dependency on a particular secret manager.** The project never requires gopass or
+any other specific product. Provide owner-accessible credential provisioning, connection
+and revocation suitable for cloud Work. Recurring processing reads its credential through
+the generic `credential_command` provider in [PROCESSING_ACCESS.md](PROCESSING_ACCESS.md);
+each host points it at a secret store that host can read unattended (the maintainer's
+host uses gopass). That choice is host configuration outside Git, not the product's
 onboarding contract. Do not assume a browser password manager is accessible to a Work
 shell without verifying the supported integration. An optional PC processing worker may
 supplement the cloud workflow, but must not become a prerequisite for cloud setup.
 
-An explicitly requested personal backup integration may use the owner's chosen secret
-store (including gopass) outside the repository, supplying credentials through the generic
-client's stdin. This exception does not change the product's portable onboarding contract.
+An explicitly requested personal backup integration may likewise use the owner's chosen
+secret store outside the repository, supplying credentials through the generic client's
+stdin.
 
 This project is participating in an **OpenAI hackathon**. Use the user's ChatGPT
 subscription through Work/Codex and managed model agents as much as possible. Avoid
@@ -256,8 +259,13 @@ row counts for queue and backfill paths.
    audio. Avoid decorative features that compete with the receipt preview.
 
 Test persistence failures, retry conflicts, disconnections, stale frames, hand obstruction,
-capture/removal transitions and clipping. Run typechecks, build, unit/integration tests,
-browser tests and dependency audit. Distinguish synthetic checks from physical calibration.
+capture/removal transitions and clipping. Distinguish synthetic checks from physical calibration.
+
+Before every push, `npm run check` must pass. It runs both typechecks, the format check and
+`npm test`, which builds the current source and then runs every TypeScript, Node and Python
+unit/integration suite. Install `scripts/requirements-test.txt` into the `python3` it uses.
+A failure is a failure even if it looks unrelated: fix it or report it, never push past it.
+Browser tests (`npm run test:e2e`) and `npm audit` remain separate required checks.
 
 Changes to camera-frame scheduling must pass the complete capture loop in both Chromium
 and WebKit: live synthetic camera stream, real vision worker, saved original acknowledgement,

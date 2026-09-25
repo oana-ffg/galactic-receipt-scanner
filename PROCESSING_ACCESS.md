@@ -93,8 +93,9 @@ claiming work; do not copy credentials into a file as a fallback.
 
 The old `PROCESSING_TOKEN_SHA256` setting remains temporarily supported for existing
 clients during migration. Remove it only after its users have migrated and new access is
-verified. Legacy clients need the new private-file config or an explicitly authorized
-stdin provider; there is no implicit personal secret-store lookup.
+verified. Legacy clients need a private-file config, an explicitly configured
+`credential_command` provider, or an explicitly authorized stdin provider; the client
+never searches secret stores on its own.
 
 Rotating Sites' gateway token requires updating this runtime secret and reconnecting
 clients. Existing encrypted responses contain the old gateway token; they cannot repair
