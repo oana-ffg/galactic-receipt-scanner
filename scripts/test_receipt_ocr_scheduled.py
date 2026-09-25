@@ -80,6 +80,23 @@ class ScheduledOcrTests(unittest.TestCase):
         self.assertTrue(process.waited)
         self.assertEqual(state["phase"], "finished")
         self.assertEqual(state["status_error_type"], "OSError")
+        self.assertEqual(state["status_error"], "synthetic status failure")
+
+    def test_launcher_failure_states_its_cause_and_keeps_the_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            root = repo / ".local" / "receipt-ocr-scheduler"
+            try:
+                raise FileNotFoundError(2, "No such file or directory", "/synthetic/python3.13")
+            except FileNotFoundError as error:
+                scheduled.record_launcher_failure(error, root)
+            state = json.loads((root / "last-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["phase"], "launcher-failed")
+            self.assertEqual(state["error_type"], "FileNotFoundError")
+            self.assertEqual(state["error"], "[Errno 2] No such file or directory: '/synthetic/python3.13'")
+            self.assertEqual(Path(state["diagnostic_file"]).parent, root / "diagnostics")
+            evidence = json.loads(Path(state["diagnostic_file"]).read_text(encoding="utf-8"))
+            self.assertIn("test_launcher_failure_states_its_cause", evidence["traceback"])
 
 
 if __name__ == "__main__":

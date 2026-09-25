@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from receipt_api import artifact_directory, write_new_file
+from receipt_api import artifact_directory, diagnostic_text, failure_report, write_new_file
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -58,12 +58,13 @@ def run_command(command, root=STATE_ROOT, *, popen=subprocess.Popen, now=utc_now
             save(state_path, state)
         except OSError as error:
             # Diagnostics must never detach a live OCR producer from its scheduler owner.
-            status_error = type(error).__name__
+            status_error = error
         exit_code = process.wait()
     outcome = "success" if exit_code == 0 else "lock-busy" if exit_code == 2 else "failure"
     state.update(phase="finished", outcome=outcome, exit_code=exit_code, finished_at=now())
     if status_error:
-        state["status_error_type"] = status_error
+        state["status_error_type"] = type(status_error).__name__
+        state["status_error"] = diagnostic_text(str(status_error))
     save(state_path, state)
     return exit_code
 
@@ -88,16 +89,20 @@ def main():
     return run_command(command)
 
 
+def record_launcher_failure(error, root=STATE_ROOT):
+    """Leave the scheduler's status file stating why the launcher itself failed."""
+    artifact_directory(root)
+    save_state(root / "last-run.json", {
+        "schemaVersion": 1,
+        "phase": "launcher-failed",
+        **failure_report(error, root / "diagnostics", "launcher"),
+        "finished_at": utc_now(),
+    })
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:
-        artifact_directory(STATE_ROOT)
-        state = {
-            "schemaVersion": 1,
-            "phase": "launcher-failed",
-            "error_type": type(error).__name__,
-            "finished_at": utc_now(),
-        }
-        save_state(STATE_ROOT / "last-run.json", state)
+        record_launcher_failure(error)
         sys.exit(70)

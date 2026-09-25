@@ -20,7 +20,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
 from receipt_locks import LockBusy, acquire_lock, lock_held
-from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, write_new_file
+from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, diagnostic_text, failure_report, write_new_file
 
 MAX_INPUT = 512 * 1024
 WINDOWS_REPLACE_ATTEMPTS = 7
@@ -97,10 +97,12 @@ class JournalCheckpointError(OSError):
     def __init__(self, error):
         self.error_type = type(error).__name__
         self.errno = error.errno
-        super().__init__(error.errno, "journal checkpoint failed")
+        self.reason = error.strerror or str(error)
+        super().__init__(error.errno, "journal checkpoint failed", error.filename)
 
     def diagnostic(self):
-        return f"Journal checkpoint failed ({self.error_type}, errno={self.errno})."
+        target = f" for {self.filename}" if self.filename else ""
+        return f"Journal checkpoint failed ({self.error_type}, errno={self.errno}: {self.reason}){target}."
 
 
 class Once(argparse.Action):
@@ -1925,14 +1927,18 @@ def main():
         if worker.state["phase"] in {"claimed", "drafted"}:
             try:
                 worker.release()
-            except (ClientError, OSError, ValueError, InputError):
-                worker.failure("release", "Unsubmitted claim could not be released; wait for expiry before resuming.")
+            except (ClientError, OSError, ValueError, InputError) as error:
+                worker.failure("release", "Unsubmitted claim could not be released "
+                               f"({type(error).__name__}: {diagnostic_text(str(error))}); "
+                               "wait for expiry before resuming.")
         worker.lock.close()
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (InputError, ClientError, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
-        print(json.dumps({"ok": False, "blocking": True, "error": "Worker startup or persistence failed; inspect the private profile and journal."}), flush=True)
+    except (InputError, ClientError, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
+        print(json.dumps({"ok": False, "blocking": True, "stage": "worker-startup-or-persistence",
+                          **failure_report(error, Path(__file__).resolve().parent.parent / ".local"
+                                           / "receipt-worker" / "diagnostics", "worker")}), flush=True)
         sys.exit(1)

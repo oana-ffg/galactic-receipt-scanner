@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Private scanner API client. No model calls; credentials never enter command arguments."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -18,6 +20,20 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 LIMIT = 32 * 1024 * 1024
 AUTO_CROP = object()
+CREDENTIAL_PROVIDER_TIMEOUT = 30
+# Credentials only: scanner tokens, bearer values and values of *token fields. IDs,
+# hashes and paths stay readable because diagnosing a failure depends on them.
+SECRETS = (
+    (re.compile(r"rsc_[A-Za-z0-9_-]+"), "[redacted]"),
+    (re.compile(r"(?i)(bearer\s+)\S+"), r"\1[redacted]"),
+    (re.compile(r"""(?i)(["']?[a-z_]*token["']?\s*[:=]\s*["']?)[^\s"',}]+"""), r"\1[redacted]"),
+)
+
+
+def redact_secrets(text):
+    for pattern, replacement in SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 class ClientError(Exception):
@@ -26,6 +42,14 @@ class ClientError(Exception):
 
 class ScannerConnectionError(ClientError):
     """The request outcome is unknown because the scanner connection failed."""
+
+
+class ScannerHTTPError(ClientError):
+    """The scanner answered with an HTTP error status."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
 
 
 class OCRRequired(ClientError):
@@ -67,6 +91,21 @@ def matches_ocr_region(value, crop):
             and region['top'] + region['height'] >= crop[3])
 
 
+def scanner_error_detail(response):
+    """Return the scanner Worker's own error message, never a proxy page or payload."""
+    content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if content_type != "application/json":
+        return ""
+    try:
+        body = json.loads(response.read(16384))
+    except (OSError, ValueError, UnicodeError):
+        return ""
+    finally:
+        response.close()
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return diagnostic_text(detail, 300) if isinstance(detail, str) else ""
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ClientError("Redirect refused; check the Site address and credentials.")
@@ -91,6 +130,89 @@ def write_new_file(target, body):
         os.unlink(temporary)
 
 
+def diagnostic_text(value, limit=600):
+    """Bound external diagnostic text for reports, with credentials removed."""
+    if isinstance(value, bytes):
+        value = value[-4 * limit:].decode("utf-8", "replace")
+    return " ".join(redact_secrets(value).split())[-limit:]
+
+
+def failure_report(error, directory, label):
+    """Describe a failure completely enough to fix it without reproducing it.
+
+    The report states the actual exception message, with only credentials removed.
+    The full traceback is written to a diagnostic file in DIRECTORY, an ignored `.local/`
+    location owned by the caller, to keep reports short; the report names that file.
+    """
+    directory = Path(directory)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = directory / f"{stamp}-{label}-{os.urandom(4).hex()}.json"
+    message = diagnostic_text(str(error)) or type(error).__name__
+    report = {"error": message, "error_type": type(error).__name__}
+    evidence = {
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "label": label,
+        **report,
+        "traceback": redact_secrets("".join(
+            traceback.format_exception(type(error), error, error.__traceback__))),
+    }
+    try:
+        artifact_directory(directory)
+        write_new_file(target, json.dumps(evidence, indent=2).encode())
+    except OSError as failure:
+        # Report the lost traceback alongside the original failure instead of replacing it.
+        return {**report, "diagnostic_unavailable": f"{type(failure).__name__}: {failure}"}
+    return {**report, "diagnostic_file": str(target)}
+
+
+def provider_credentials(command):
+    """Run a secret-manager command and explain exactly why it failed.
+
+    Only the provider's stdout carries the secret and it never appears in an error.
+    Its stderr is diagnostic output, reported bounded with credentials removed.
+    """
+    name = Path(command[0]).name
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=CREDENTIAL_PROVIDER_TIMEOUT, check=False)
+    except FileNotFoundError:
+        raise ClientError(f"Credential provider executable was not found: {command[0]}. Configure its absolute "
+                          "path; scheduled tasks often run without the login shell's PATH.") from None
+    except subprocess.TimeoutExpired as error:
+        stderr = diagnostic_text(error.stderr or b"")
+        raise ClientError(f"Credential provider {name} did not finish within {CREDENTIAL_PROVIDER_TIMEOUT} seconds; "
+                          "it may be waiting for an interactive passphrase or unlock prompt."
+                          + (f" Its error output: {stderr}" if stderr else "")) from None
+    except OSError as error:
+        raise ClientError(f"Credential provider {name} could not start: "
+                          f"{error.strerror or type(error).__name__} (errno {error.errno}).") from None
+    stderr = diagnostic_text(result.stderr)
+    if result.returncode:
+        raise ClientError(f"Credential provider {name} exited with status {result.returncode}: "
+                          + (stderr or "it wrote no error output."))
+    if not result.stdout.strip():
+        raise ClientError(f"Credential provider {name} returned no secret."
+                          + (f" Its error output: {stderr}" if stderr else ""))
+    if len(result.stdout) > 16384:
+        raise ClientError(f"Credential provider {name} returned {len(result.stdout)} bytes; "
+                          "the credential bundle must be at most 16384 bytes.")
+    try:
+        text = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ClientError(f"Credential provider {name} returned output that is not UTF-8 text.") from None
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        # JSONDecodeError positions identify the problem without quoting the secret.
+        raise ClientError(f"Credential provider {name} returned output that is not JSON "
+                          f"({error.msg} at line {error.lineno}, column {error.colno}). It must print "
+                          "the complete stored JSON bundle unchanged.") from None
+    if not isinstance(value, dict):
+        raise ClientError(f"Credential provider {name} returned a JSON {type(value).__name__}; "
+                          "the credential bundle must be a JSON object.")
+    return value
+
+
 def credentials(config_path, from_stdin=False):
     if from_stdin:
         value = json.loads(sys.stdin.read(16384))
@@ -112,23 +234,14 @@ def credentials(config_path, from_stdin=False):
             value = json.loads(credential_path.read_text())
         elif filename is None and isinstance(command, list) and 1 <= len(command) <= 16 \
                 and all(isinstance(part, str) and part and "\x00" not in part for part in command):
-            try:
-                result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, timeout=30, check=False)
-            except (OSError, subprocess.TimeoutExpired):
-                raise ClientError("Credential provider is unavailable; check its local access.") from None
-            if result.returncode or not 0 < len(result.stdout) <= 16384:
-                raise ClientError("Credential provider did not return a valid bounded secret.")
-            try:
-                value = json.loads(result.stdout)
-            except (ValueError, UnicodeError):
-                raise ClientError("Credential provider returned invalid JSON.") from None
+            value = provider_credentials(command)
         else:
             raise ClientError("Configure exactly one private credential file or credential provider command.")
         if not isinstance(value, dict):
-            raise ClientError("Credential provider must return a JSON object.")
+            raise ClientError("Credential file must contain a JSON object.")
         if value.get("origin") != config.get("origin"):
-            raise ClientError("Credential origin differs from configured Site.")
+            raise ClientError(f"Credential origin {value.get('origin')!r} differs from the configured Site "
+                              f"{config.get('origin')!r}.")
     return value
 
 
@@ -253,12 +366,16 @@ class ScannerClient:
                 # Do not echo proxy HTML, URLs, request headers, or financial payloads.
                 ray = exc.headers.get("cf-ray", "")
                 reference = f" (Ray {ray})" if re.fullmatch(r"[0-9a-f]{16}(?:-[A-Z]{3})?", ray) else ""
-                raise ClientError(f"Scanner returned HTTP {exc.code}{reference}; 401/403 means access denied, 409 requires rereading the current revision.") from None
-            except (URLError, TimeoutError):
+                detail = scanner_error_detail(exc)
+                raise ScannerHTTPError(exc.code, f"Scanner returned HTTP {exc.code}{reference}"
+                                  + (f": {detail}" if detail else "")
+                                  + "; 401/403 means access denied, 409 requires rereading the current revision.") from None
+            except (URLError, TimeoutError) as exc:
                 if data is None and attempt < attempts - 1:
                     time.sleep(0.25 * (2 ** attempt))
                     continue
-                raise ScannerConnectionError("Scanner connection failed; check connectivity and retry.") from None
+                reason = diagnostic_text(str(exc.reason if isinstance(exc, URLError) else exc) or type(exc).__name__, 200)
+                raise ScannerConnectionError(f"Scanner connection failed; check connectivity and retry ({reason}).") from None
 
     def get(self, path):
         try:
@@ -592,8 +709,8 @@ def run_jev_completeness(client, *, sleep=time.sleep):
                 try:
                     result = json.loads(client.request("/api/jev/completeness", payload))
                     break
-                except ClientError as error:
-                    if "HTTP 503" not in str(error) or attempt == 2:
+                except ScannerHTTPError as error:
+                    if error.status != 503 or attempt == 2:
                         raise
                     sleep(2 ** attempt)
             if not result.get("assessed"):

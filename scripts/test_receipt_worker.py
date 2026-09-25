@@ -1493,8 +1493,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["phase"], "ready")
         self.assertEqual(result["claim_state"], "closed")
         self.assertNotIn(("POST", "/api/processing/claim"), self.fake.calls)
-        self.assertIn("PermissionError, errno=13", result["error"])
-        self.assertNotIn("synthetic access denied", result["error"])
+        self.assertIn("PermissionError, errno=13: synthetic access denied", result["error"])
         self.assertFalse(self.worker.handle({"op": "claim", "viewer_checked": True})["ok"])
         self.assertTrue(self.send("quit")["released"] is False)
 

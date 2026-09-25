@@ -14,7 +14,7 @@ import tarfile
 from urllib.request import urlopen
 import venv
 
-from receipt_api import ClientError, ScannerClient, artifact_directory, credentials, write_new_file
+from receipt_api import ClientError, ScannerClient, artifact_directory, credentials, diagnostic_text, write_new_file
 
 REPO = Path(__file__).resolve().parent.parent
 PACKAGES = ['paddlepaddle==3.3.1', 'paddleocr==3.7.0', 'paddlex[ocr]==3.7.2',
@@ -143,7 +143,8 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
             return str(Path(profile).resolve())
         except (ClientError, OSError, subprocess.SubprocessError) as error:
             print(json.dumps({'event': 'prepared_runtime_unavailable', 'error_type': type(error).__name__,
-                              'next': 'install isolated CPU runtime'}), flush=True)
+                              'error': diagnostic_text(str(error)), 'next': 'install isolated CPU runtime'}),
+                  flush=True)
     prepared = root / 'profile.json'
     if prepared.exists():
         try:
@@ -152,8 +153,11 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
             check_layout(client, root)
             client.ocr_backend.preflight()
             return str(prepared)
-        except (ClientError, OSError, subprocess.SubprocessError):
-            pass  # Repair packages/models below; preserve the previous profile.
+        except (ClientError, OSError, subprocess.SubprocessError) as error:
+            # Repair packages/models below; preserve the previous profile.
+            print(json.dumps({'event': 'isolated_runtime_needs_repair', 'error_type': type(error).__name__,
+                              'error': diagnostic_text(str(error)), 'next': 'repair isolated CPU runtime'}),
+                  flush=True)
     if not (3, 12) <= sys.version_info[:2] <= (3, 13):
         raise ClientError('Run setup with Python 3.12 or 3.13, supported by the pinned Paddle wheels.')
     environment = root / 'cpu-venv'

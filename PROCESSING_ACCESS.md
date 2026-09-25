@@ -63,8 +63,10 @@ The secret entry contains the complete JSON credential bundle: exact Site `origi
 the automation prompt, command arguments, or a local plaintext credential file. Create
 an ignored private client config containing only the exact `origin` and a
 `credential_command` array. The command must print the complete JSON bundle to stdout;
-the client runs it without a shell, captures it only in process memory, suppresses its
-stderr, and rejects a different origin. For gopass, use its full `show` operation because
+the client runs it without a shell, captures it only in process memory, and rejects a
+different origin. When the command fails, the error states the cause: a missing
+executable, a timeout (usually a waiting passphrase prompt), or its exit status and error
+output with credentials removed. For gopass, use its full `show` operation because
 the JSON bundle is multiline. The config contains the real entry reference, not the
 secret. The host descriptor may hold the absolute path to this tokenless config.
 

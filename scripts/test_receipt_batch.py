@@ -353,7 +353,7 @@ class BatchGuardTests(unittest.TestCase):
             self.assertEqual(result["retry_request"], {"op": "complete", "run_id": "a" * 32})
             self.assertEqual(result["completion"]["error_type"], "TypeError")
             self.assertTrue(result["completion"]["blocking"])
-            self.assertNotIn("private implementation detail", str(result))
+            self.assertIn("TypeError: private implementation detail", result["completion"]["error"])
             self.assertNotIn("failed", worker.state)
             self.assertFalse(worker.stop_heartbeat.is_set())
             self.assertTrue(guard.worker_thread.is_alive())
@@ -653,19 +653,24 @@ class BatchGuardTests(unittest.TestCase):
 
     def test_lease_client_setup_failure_reports_cause_before_opening_guard(self):
         stdout = io.StringIO()
-        with patch.object(module.sys, 'argv', [
-            'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
-            '--client-config', str(self.client_config),
-        ]), patch.object(
-            module,
-            'ProcessingBatchLease',
-            side_effect=module.ClientError('Scanner returned HTTP 403; access denied.'),
-        ), patch.object(module, 'BatchGuard') as guard, patch.object(module.sys, 'stdout', stdout):
+        repo = Path(self.tmp.name)
+        with patch.object(module, '__file__', str(repo / 'scripts' / 'receipt_batch.py')), \
+             patch.object(module.sys, 'argv', [
+                 'receipt_batch.py', '--owner', 'receipt-processing-scheduled',
+                 '--client-config', str(self.client_config),
+             ]), patch.object(
+                 module,
+                 'ProcessingBatchLease',
+                 side_effect=module.ClientError('Scanner returned HTTP 403; access denied.'),
+             ), patch.object(module, 'BatchGuard') as guard, patch.object(module.sys, 'stdout', stdout):
             with self.assertRaises(SystemExit) as error:
                 module.main()
         self.assertEqual(error.exception.code, 1)
         guard.assert_not_called()
-        self.assertEqual(json.loads(stdout.getvalue()), {
+        reported = json.loads(stdout.getvalue())
+        self.assertEqual(Path(reported.pop('diagnostic_file')).parent,
+                         (repo / '.local' / 'receipt-worker' / 'diagnostics').resolve())
+        self.assertEqual(reported, {
             'blocking': True,
             'batch_started': False,
             'stage': 'batch-lease-setup',
@@ -673,7 +678,7 @@ class BatchGuardTests(unittest.TestCase):
             'error_type': 'ClientError',
         })
 
-    def test_missing_lease_setup_file_does_not_leak_its_private_path(self):
+    def test_missing_lease_setup_file_reports_the_missing_path(self):
         private_repo = Path(self.tmp.name) / 'SENTINEL-private-checkout'
         private_base = private_repo / '.local' / 'receipt-worker'
         private_base.mkdir(parents=True)
@@ -701,17 +706,16 @@ class BatchGuardTests(unittest.TestCase):
         self.assertEqual(state_path.read_bytes(), previous)
         self.assertEqual(event_path.read_bytes(), previous)
         self.assertFalse(module.lock_held(private_base / 'batch.lock'))
-        output = stdout.getvalue()
-        self.assertNotIn('SENTINEL', output)
-        self.assertEqual(json.loads(output), {
-            'blocking': True,
-            'batch_started': False,
-            'stage': 'batch-lease-setup',
-            'error': 'Batch lease setup failed before a new batch started.',
-            'error_type': 'FileNotFoundError',
-        })
+        reported = json.loads(stdout.getvalue())
+        diagnostic = Path(reported.pop('diagnostic_file'))
+        self.assertEqual(diagnostic.parent, (private_base / 'diagnostics').resolve())
+        self.assertIn('FileNotFoundError', json.loads(diagnostic.read_text())['traceback'])
+        self.assertEqual(reported['error_type'], 'FileNotFoundError')
+        self.assertIn(str(private_base.parent / 'processing-host.json'), reported['error'])
+        self.assertEqual(reported['stage'], 'batch-lease-setup')
+        self.assertFalse(reported['batch_started'])
 
-    def test_invalid_lease_response_preserves_previous_completed_batch_without_leaking(self):
+    def test_invalid_lease_response_preserves_previous_completed_batch_and_reports_the_parse_error(self):
         self.base.mkdir()
         previous = json.dumps({
             'batch_id': 'a' * 32,
@@ -744,15 +748,14 @@ class BatchGuardTests(unittest.TestCase):
         self.assertEqual(state_path.read_bytes(), previous)
         self.assertEqual(list(self.base.glob('batch-event-*.json')), [])
         self.assertFalse(module.lock_held(self.base / 'batch.lock'))
-        output = stdout.getvalue()
-        self.assertNotIn('SENTINEL', output)
-        reported = json.loads(output)
+        reported = json.loads(stdout.getvalue())
         self.assertRegex(reported.pop('batch_id'), r'^[0-9a-f]{32}$')
+        self.assertEqual(Path(reported.pop('diagnostic_file')).parent, (self.base / 'diagnostics').resolve())
         self.assertEqual(reported, {
             'blocking': True,
             'batch_started': False,
             'stage': 'batch-lease-acquire',
-            'error': 'Batch lease acquisition failed before a new batch started.',
+            'error': 'Expecting value: line 1 column 1 (char 0)',
             'error_type': 'JSONDecodeError',
         })
 
