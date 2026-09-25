@@ -333,6 +333,26 @@ it("coordinates a renewable batch lease without exposing it to owner-only calls"
       )
     ).lease,
   ).toBeNull();
+  const db = await mf.getD1Database("DB");
+  const events = await db
+    .prepare(
+      "SELECT batch_id,outcome,expires FROM processing_batch_lease_events ORDER BY created_at,id",
+    )
+    .all();
+  expect(events.results).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        batch_id: request.batch_id,
+        outcome: "acquired",
+        expires: expect.any(Number),
+      }),
+      expect.objectContaining({
+        batch_id: "b".repeat(32),
+        outcome: "busy",
+        expires: null,
+      }),
+    ]),
+  );
   expect(
     (await ok("/api/processing/batch-lease", { ...request, op: "renew" }, true))
       .lease,
@@ -380,6 +400,53 @@ it("records the database stage when a batch lease write fails", async () => {
       outcome: "database-error",
       reason: "synthetic D1 outage",
       ray_id: "1234567890abcdef",
+    });
+  } finally {
+    logged.mockRestore();
+  }
+});
+it("keeps an acquired lease when its diagnostic insert fails", async () => {
+  const db = await mf.getD1Database("DB");
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const batchId = "d".repeat(32);
+  try {
+    const response = await processingRoute(
+      new Request(origin + "/api/processing/batch-lease", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "cf-ray": "1234567890abcdef",
+        },
+        body: JSON.stringify({
+          op: "acquire",
+          batch_id: batchId,
+          owner: "synthetic-coordinator",
+        }),
+      }),
+      {
+        DB: {
+          prepare: (sql: string) => {
+            if (sql.includes("INSERT INTO processing_batch_lease_events"))
+              throw new Error("synthetic audit outage");
+            return db.prepare(sql);
+          },
+        },
+      } as unknown as Env,
+      async () => [],
+      async () => null,
+    );
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toMatchObject({
+      lease: { batch_id: batchId },
+    });
+    expect(
+      await db
+        .prepare("SELECT batch_id FROM processing_batch_lease WHERE id=1")
+        .first(),
+    ).toMatchObject({ batch_id: batchId });
+    expect(JSON.parse(String(logged.mock.lastCall?.[0]))).toMatchObject({
+      event: "processing_batch_lease_audit_failure",
+      batch_id: batchId,
     });
   } finally {
     logged.mockRestore();

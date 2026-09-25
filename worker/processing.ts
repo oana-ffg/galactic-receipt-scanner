@@ -1225,22 +1225,52 @@ export async function processingRoute(
       );
       throw error;
     }
-    // This is the backend commit marker for a lease attempt. It lets an
-    // operator distinguish a failed response from a failed database write.
-    console.info(
-      JSON.stringify({
-        event: "processing_batch_lease_acquire",
-        batch_id: input.batch_id,
-        outcome: acquired ? "acquired" : "busy",
-        expires: acquired?.expires ?? null,
-        ray_id: request.headers.get("cf-ray"),
-      }),
-    );
-    return json(
+    const outcome = acquired ? "acquired" : "busy";
+    const response = json(
       acquired
         ? { lease: { batch_id: input.batch_id, expires: acquired.expires } }
         : { lease: null, reason: "busy" },
     );
+    // Persist the lease outcome and prepared response as a checkpoint. If the
+    // client receives a different result, later investigation has this marker.
+    let auditPersisted = false;
+    try {
+      await env.DB.prepare(
+        "INSERT INTO processing_batch_lease_events(id,batch_id,outcome,expires,ray_id,created_at) VALUES(?,?,?,?,?,?)",
+      )
+        .bind(
+          crypto.randomUUID(),
+          input.batch_id,
+          outcome,
+          acquired?.expires ?? null,
+          request.headers.get("cf-ray"),
+          now,
+        )
+        .run();
+      auditPersisted = true;
+    } catch (error) {
+      // Diagnostics must never change the lease result or invite a write retry.
+      console.error(
+        JSON.stringify({
+          event: "processing_batch_lease_audit_failure",
+          batch_id: input.batch_id,
+          error_type: error instanceof Error ? error.name : typeof error,
+          ray_id: request.headers.get("cf-ray"),
+        }),
+      );
+    }
+    console.info(
+      JSON.stringify({
+        event: "processing_batch_lease_acquire",
+        batch_id: input.batch_id,
+        outcome,
+        expires: acquired?.expires ?? null,
+        response_status: response.status,
+        audit_persisted: auditPersisted,
+        ray_id: request.headers.get("cf-ray"),
+      }),
+    );
+    return response;
   }
   if (path === "/api/processing/pdf-review" && method === "POST") {
     requireThat(

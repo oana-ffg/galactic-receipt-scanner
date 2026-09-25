@@ -234,6 +234,23 @@ export const processingBatchLease = sqliteTable("processing_batch_lease", {
   created_at: text("created_at").notNull(),
   updated_at: text("updated_at").notNull(),
 });
+export const processingBatchLeaseEvents = sqliteTable(
+  "processing_batch_lease_events",
+  {
+    id: text("id").primaryKey(),
+    batch_id: text("batch_id").notNull(),
+    outcome: text("outcome").notNull(),
+    expires: integer("expires"),
+    ray_id: text("ray_id"),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    index("processing_batch_lease_events_batch_created").on(
+      table.batch_id,
+      table.created_at,
+    ),
+  ],
+);
 export const processingAttempts = sqliteTable("processing_attempts", {
   token: text("token").primaryKey(),
   document_id: text("document_id").notNull(),

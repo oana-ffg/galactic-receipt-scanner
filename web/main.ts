@@ -5,7 +5,7 @@ import { api } from "./api";
 import { StateOrder } from "./state-order";
 import { PhoneCamera } from "./camera";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
-import { messageOf } from "./errors";
+import { messageOf, RequestError } from "./errors";
 // Reporting must stay available when a deployment replaces lazy asset URLs.
 import { mountIssues, reportIssue } from "./issues";
 import type { ScanState } from "./types";
@@ -362,8 +362,11 @@ function mountDashboard(): void {
       performance.now() - lastVideoFrame < 2000
     );
   };
+  let accessDenied = false;
   const direct = new DirectPreview(
-    (state, sentAt) => acceptState(state, "direct", sentAt),
+    (state, sentAt) => {
+      if (!accessDenied) acceptState(state, "direct", sentAt);
+    },
     () => {},
     (stream) => {
       previewOverlay?.setMedia(null);
@@ -482,6 +485,12 @@ function mountDashboard(): void {
   }
   let fallbackRequestedAt = -Infinity;
   let fallbackRequestPending = false;
+  function denyAccess(problem: RequestError): void {
+    if (accessDenied) return;
+    accessDenied = true;
+    direct.close();
+    disconnected(messageOf(problem));
+  }
   async function requestFallback(camera: string) {
     if (
       fallbackRequestPending ||
@@ -503,6 +512,7 @@ function mountDashboard(): void {
     }
   }
   async function poll() {
+    if (accessDenied) return;
     try {
       const result = await api<{
         state: ScanState | null;
@@ -511,6 +521,7 @@ function mountDashboard(): void {
         count: number;
         fresh: boolean;
       }>("/api/station", { signal: AbortSignal.timeout(4000) });
+      if (accessDenied) return;
       stateOrder.setCamera(result.camera);
       void direct.sync(result.camera, result.previewSession);
       if (
@@ -531,12 +542,18 @@ function mountDashboard(): void {
         renderCount(result.count);
       }
     } catch (problem) {
-      if (!direct.fresh) disconnected(messageOf(problem));
+      if (
+        problem instanceof RequestError &&
+        [401, 403].includes(problem.status)
+      )
+        denyAccess(problem);
+      else if (!direct.fresh) disconnected(messageOf(problem));
     }
-    setTimeout(() => void poll(), 700);
+    if (!accessDenied) setTimeout(() => void poll(), 700);
   }
   void poll();
   async function preview() {
+    if (accessDenied) return;
     const started = performance.now();
     if (!videoFresh()) {
       live.hidden = true;
@@ -548,16 +565,27 @@ function mountDashboard(): void {
           redirect: "error",
           signal: AbortSignal.timeout(4000),
         });
+        if (accessDenied) return;
         status = response.status;
+        if ([401, 403].includes(status)) {
+          throw new RequestError(
+            "Access could not be verified. Reopen the scanner and sign in with the owner account.",
+            status,
+          );
+        }
         if (status === 204)
           throw new Error("Waiting for a fresh phone preview.");
         if (!response.ok) throw new Error("Waiting for a fresh phone preview.");
         const blob = await response.blob();
+        if (accessDenied) return;
         let newFrame = false;
         if (!videoFresh()) {
-          await drawPreview(blob);
+          const drawn = await drawPreview(
+            blob,
+            () => !accessDenied && !videoFresh(),
+          );
           const frame = response.headers.get("X-Preview-Received-At");
-          if (frame && frame !== lastHttpFrame) {
+          if (drawn && frame && frame !== lastHttpFrame) {
             lastHttpFrame = frame;
             httpFrames++;
             newFrame = true;
@@ -577,13 +605,18 @@ function mountDashboard(): void {
           "success",
         );
       } catch (problem) {
+        if (
+          problem instanceof RequestError &&
+          [401, 403].includes(problem.status)
+        )
+          denyAccess(problem);
         diagnostics.record(
           "preview.http",
           { ok: false, status, ms: performance.now() - started },
           2000,
           `failure-${status}`,
         );
-        if (!videoFresh()) {
+        if (!accessDenied && !videoFresh()) {
           element("feed").hidden = true;
           previewOverlay?.setMedia(null);
           element("empty-preview").hidden = false;
@@ -624,10 +657,11 @@ function mountDashboard(): void {
         // Telemetry failure must not affect the preview loop.
       }
     }
-    setTimeout(
-      () => void preview(),
-      Math.max(50, 250 - (performance.now() - started)),
-    );
+    if (!accessDenied)
+      setTimeout(
+        () => void preview(),
+        Math.max(50, 250 - (performance.now() - started)),
+      );
   }
   void preview();
   for (const id of [
@@ -666,17 +700,25 @@ function mountDashboard(): void {
   void refreshLibrary();
 }
 
-async function drawPreview(blob: Blob): Promise<void> {
+async function drawPreview(
+  blob: Blob,
+  shouldDraw: () => boolean,
+): Promise<boolean> {
   const bitmap = await createImageBitmap(blob);
-  const canvas = element<HTMLCanvasElement>("feed");
-  canvas.hidden = false;
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
-  element("empty-preview").hidden = true;
-  previewOverlay?.setMedia(canvas);
+  try {
+    if (!shouldDraw()) return false;
+    const canvas = element<HTMLCanvasElement>("feed");
+    canvas.hidden = false;
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(bitmap, 0, 0);
+    element("empty-preview").hidden = true;
+    previewOverlay?.setMedia(canvas);
+    return true;
+  } finally {
+    bitmap.close();
+  }
 }
 
 async function refreshLibrary(): Promise<void> {
