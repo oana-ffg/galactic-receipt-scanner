@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
 
-from receipt_api import ClientError, OCRRequired, ScannerClient
+from receipt_api import ClientError, OCRRequired, ScannerClient, ScannerConnectionError, ScannerHTTPError
 import receipt_ocr_nightly as nightly
 from receipt_ocr_nightly import CachedBackend, baseline_scan_fingerprints, current_page_layouts, day_window, drain, fingerprint, inventory, needs_layout_recheck, needs_ocr, read_requirement, prepare_requirement, scan_window
 from receipt_ppocr_setup import install_models, MODELS, check_node
@@ -331,14 +331,14 @@ class NightlyTests(unittest.TestCase):
         self.assertEqual(self.state['completed']['one']['scan_fingerprint'], fingerprint(changed))
 
     def test_auth_failure_stops_requests_and_reports_unattempted_scans(self):
-        self.client.get.side_effect = ClientError('Scanner returned HTTP 403; access denied.')
+        self.client.get.side_effect = ScannerHTTPError(403, 'Scanner returned HTTP 403; access denied.')
         outcome = self.run_drain([capture('one'), capture('two')])
         self.assertEqual(outcome['blocked'], 'authorization')
         self.assertEqual(outcome['remaining'], 2)
         self.client.get.assert_called_once()
 
     def test_global_connectivity_failure_is_bounded_instead_of_retrying_thousands(self):
-        self.client.get.side_effect = ClientError('Scanner connection failed; check connectivity and retry.')
+        self.client.get.side_effect = ScannerConnectionError('Scanner connection failed; check connectivity and retry.')
         outcome = self.run_drain([capture(str(i)) for i in range(1000)])
         self.assertEqual(outcome['blocked'], 'connectivity')
         self.assertEqual(outcome['remaining'], 1000)

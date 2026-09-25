@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from unittest.mock import Mock, patch, call
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
-from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, NoRedirect, credentials, main, run_jev_completeness
+from receipt_api import ScannerClient, ScannerConnectionError, ScannerHTTPError, ClientError, OCRRequired, NoRedirect, credentials, failure_report, main, run_jev_completeness
 
 
 class ClientTests(unittest.TestCase):
@@ -29,12 +29,75 @@ class ClientTests(unittest.TestCase):
             self.assertNotIn("credential_file", json.loads(config_path.read_text()))
             with patch("receipt_api.subprocess.run", return_value=subprocess.CompletedProcess(
                     [], 0, json.dumps({**secret, "origin": "https://other.example"}).encode(), b"")):
-                with self.assertRaisesRegex(ClientError, "origin differs"):
+                with self.assertRaisesRegex(ClientError, "'https://other.example' differs from the configured Site"):
                     credentials(config_path)
-            with patch("receipt_api.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", b"private error")):
-                with self.assertRaisesRegex(ClientError, "did not return") as failure:
-                    credentials(config_path)
-            self.assertNotIn("private error", str(failure.exception))
+
+    def test_credential_provider_failures_state_their_cause_without_the_secret(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "provider.json"
+            config_path.write_text(json.dumps({"origin": "https://scanner.example.test",
+                                               "credential_command": ["/opt/tools/gopass", "show", "scanner"]}))
+            config_path.chmod(0o600)
+            token = "rsc_" + "s" * 43
+
+            def failing(**result):
+                return patch("receipt_api.subprocess.run", **result)
+
+            cases = [
+                (dict(side_effect=FileNotFoundError(2, "No such file")),
+                 r"executable was not found: /opt/tools/gopass\. Configure its absolute path"),
+                (dict(side_effect=subprocess.TimeoutExpired(["gopass"], 30, stderr=b"pinentry: waiting")),
+                 r"did not finish within 30 seconds.*passphrase.*pinentry: waiting"),
+                (dict(side_effect=PermissionError(13, "Permission denied")),
+                 r"gopass could not start: Permission denied \(errno 13\)"),
+                (dict(return_value=subprocess.CompletedProcess(
+                    [], 2, token.encode(), b"gpg: decryption failed: No secret key " + token.encode())),
+                 r"exited with status 2: gpg: decryption failed: No secret key \[redacted\]$"),
+                (dict(return_value=subprocess.CompletedProcess([], 1, b"", b"")),
+                 r"exited with status 1: it wrote no error output"),
+                (dict(return_value=subprocess.CompletedProcess([], 0, b"\n", b"entry is empty")),
+                 r"returned no secret\. Its error output: entry is empty"),
+                (dict(return_value=subprocess.CompletedProcess([], 0, b"x" * 16385, b"")),
+                 r"returned 16385 bytes"),
+                (dict(return_value=subprocess.CompletedProcess([], 0, b"\xff" + token.encode(), b"")),
+                 r"not UTF-8 text"),
+                (dict(return_value=subprocess.CompletedProcess([], 0, b"Password: " + token.encode(), b"")),
+                 r"not JSON \(Expecting value at line 1, column 1\)"),
+                (dict(return_value=subprocess.CompletedProcess([], 0, b"[]", b"")),
+                 r"returned a JSON list"),
+            ]
+            for result, expected in cases:
+                with self.subTest(expected=expected), failing(**result):
+                    with self.assertRaisesRegex(ClientError, expected) as failure:
+                        credentials(config_path)
+                    self.assertNotIn(token, str(failure.exception))
+
+    def test_failure_report_states_the_error_and_keeps_the_traceback_privately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            token = "rsc_" + "t" * 43
+            try:
+                raise KeyError(f"phase missing for capture {self.id} near {token}")
+            except KeyError as error:
+                report = failure_report(error, repository / "diagnostics", "synthetic")
+            self.assertEqual(report["error_type"], "KeyError")
+            self.assertIn(f"phase missing for capture {self.id} near [redacted]", report["error"])
+            path = Path(report["diagnostic_file"])
+            self.assertEqual(path.parent, repository / "diagnostics")
+            self.assertRegex(path.name, r"^\d{8}T\d{6}\d+Z-synthetic-[0-9a-f]{8}\.json$")
+            evidence = json.loads(path.read_text())
+            self.assertIn("test_failure_report_states_the_error", evidence["traceback"])
+            self.assertNotIn(token, path.read_text())
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
+            self.assertEqual(path.parent.stat().st_mode & 0o077, 0)
+
+    def test_failure_report_names_a_lost_diagnostic_instead_of_masking_the_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("receipt_api.write_new_file", side_effect=OSError(28, "No space left on device")):
+                report = failure_report(ValueError("bad revision"), Path(directory), "synthetic")
+        self.assertEqual(report["error"], "bad revision")
+        self.assertEqual(report["diagnostic_unavailable"], "OSError: [Errno 28] No space left on device")
+        self.assertNotIn("diagnostic_file", report)
 
     def test_completeness_race_does_not_count_an_unready_receipt_as_not_receipt(self):
         document = {"document_id": self.id, "kind": "receipt", "ready": True,
@@ -55,7 +118,7 @@ class ClientTests(unittest.TestCase):
                     "completeness_audit": None, "ocr_characters": 1000,
                     "ocr_truncated": False}
         self.client.get = Mock(return_value={"documents": [document], "next": None})
-        self.client.request = Mock(side_effect=[ClientError("Scanner returned HTTP 503"),
+        self.client.request = Mock(side_effect=[ScannerHTTPError(503, "Scanner returned HTTP 503"),
                                                 json.dumps({"assessed": True, "result": "yes",
                                                             "confidence": 0.9}).encode()])
         sleep = Mock()
@@ -375,10 +438,30 @@ class ClientTests(unittest.TestCase):
 
         self.client.opener.open = Mock(side_effect=URLError("synthetic outage"))
         with patch("receipt_api.time.sleep") as sleep:
-            with self.assertRaises(ScannerConnectionError):
+            with self.assertRaisesRegex(ScannerConnectionError, r"^Scanner connection failed;.*\(synthetic outage\)\.$"):
                 self.client.request("/api/captures")
         self.assertEqual(self.client.opener.open.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
+
+    def test_http_errors_carry_status_and_the_scanner_reason_but_never_proxy_pages(self):
+        def error(code, content_type, body):
+            return HTTPError(self.client.origin + "/api/processing/claim", code, "synthetic",
+                             {"Content-Type": content_type}, io.BytesIO(body))
+
+        self.client.opener.open = Mock(side_effect=error(
+            409, "application/json; charset=utf-8", b'{"detail":"Claim expired; reread the assignment."}'))
+        with self.assertRaisesRegex(ScannerHTTPError, r"HTTP 409: Claim expired; reread the assignment\.;") as failure:
+            self.client.request("/api/processing/claim", b"{}")
+        self.assertEqual(failure.exception.status, 409)
+
+        for content_type, body in (("text/html", b"<html>SENTINEL proxy page</html>"),
+                                   ("application/json", b"SENTINEL not json"),
+                                   ("application/json", b'{"detail": ["SENTINEL"]}')):
+            self.client.opener.open = Mock(side_effect=error(403, content_type, body))
+            with self.subTest(content_type=content_type, body=body):
+                with self.assertRaisesRegex(ScannerHTTPError, r"^Scanner returned HTTP 403; 401/403") as failure:
+                    self.client.request("/api/processing/claim", b"{}")
+                self.assertNotIn("SENTINEL", str(failure.exception))
 
     def test_metadata_identity_and_symlinks_are_checked(self):
         self.client.get = Mock(return_value={**self.meta, "id": "wrong"})

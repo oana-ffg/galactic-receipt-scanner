@@ -75,10 +75,11 @@ Give ChatGPT Work or Codex the public repository URL and ask:
    files. Do not replace this full-tree synchronization with cherry-picks or by switching
    the public checkout to a deployment branch.
 
-   Give the resulting private checkout back to the Sites hosting workflow, using its
-   temporary credential only through stdin/per-command authorization. Never put credentials
-   in Git URLs or files. Use Sites' build/package helpers and privately deploy the exact
-   saved version. Wait for success, re-read the owner-only access policy, and verify the
+   Give the resulting private checkout back to the Sites hosting workflow. Using its
+   temporary credential only through stdin/per-command authorization, push the exact merge
+   commit to the credential's Sites branch with a normal non-force push. Never put
+   credentials in Git URLs or files. Use Sites' build/package helpers and privately deploy
+   that same commit. Wait for success, re-read the owner-only access policy, and verify the
    public checkout is still on `main` before handoff.
 
 9. Verify the deployed root, camera, metadata, previews and file endpoints without

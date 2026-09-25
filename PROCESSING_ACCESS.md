@@ -63,8 +63,10 @@ The secret entry contains the complete JSON credential bundle: exact Site `origi
 the automation prompt, command arguments, or a local plaintext credential file. Create
 an ignored private client config containing only the exact `origin` and a
 `credential_command` array. The command must print the complete JSON bundle to stdout;
-the client runs it without a shell, captures it only in process memory, suppresses its
-stderr, and rejects a different origin. For gopass, use its full `show` operation because
+the client runs it without a shell, captures it only in process memory, and rejects a
+different origin. When the command fails, the error states the cause: a missing
+executable, a timeout (usually a waiting passphrase prompt), or its exit status and error
+output with credentials removed. For gopass, use its full `show` operation because
 the JSON bundle is multiline. The config contains the real entry reference, not the
 secret. The host descriptor may hold the absolute path to this tokenless config.
 
@@ -91,8 +93,9 @@ claiming work; do not copy credentials into a file as a fallback.
 
 The old `PROCESSING_TOKEN_SHA256` setting remains temporarily supported for existing
 clients during migration. Remove it only after its users have migrated and new access is
-verified. Legacy clients need the new private-file config or an explicitly authorized
-stdin provider; there is no implicit personal secret-store lookup.
+verified. Legacy clients need a private-file config, an explicitly configured
+`credential_command` provider, or an explicitly authorized stdin provider; the client
+never searches secret stores on its own.
 
 Rotating Sites' gateway token requires updating this runtime secret and reconnecting
 clients. Existing encrypted responses contain the old gateway token; they cannot repair

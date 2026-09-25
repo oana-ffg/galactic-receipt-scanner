@@ -10,29 +10,24 @@ import traceback
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from receipt_api import ClientError, ScannerClient, credentials
+from receipt_api import ClientError, ScannerClient, credentials, diagnostic_text, failure_report
 from receipt_locks import LockBusy as BatchBusy, acquire_lock, lock_held
 from receipt_batch_verify import regular_path, verify_run
 from receipt_worker import InputError, Once, Worker, artifact_directory, replace_journal_file, require, write_new_file
 
 
 EXPECTED_BATCH_LEASE_ERRORS = (ClientError, InputError, OSError, KeyError, TypeError, ValueError)
-BATCH_LEASE_FAILURE_MESSAGES = {
-    "batch-lease-setup": "Batch lease setup failed before a new batch started.",
-    "batch-lease-acquire": "Batch lease acquisition failed before a new batch started.",
-}
+BATCH_LEASE_STAGES = {"batch-lease-setup", "batch-lease-acquire"}
 
 
-def batch_lease_failure(stage, error, batch_id=None):
-    """Return a content-free startup error without exposing paths or malformed values."""
-    require(stage in BATCH_LEASE_FAILURE_MESSAGES, "Unknown batch lease startup stage.")
-    message = str(error) if isinstance(error, ClientError) else BATCH_LEASE_FAILURE_MESSAGES[stage]
+def batch_lease_failure(stage, error, repo, batch_id=None):
+    """Report why a batch could not start, before any new batch state was persisted."""
+    require(stage in BATCH_LEASE_STAGES, "Unknown batch lease startup stage.")
     result = dict(
         blocking=True,
         batch_started=False,
         stage=stage,
-        error=message,
-        error_type=type(error).__name__,
+        **failure_report(error, repo / ".local" / "receipt-worker" / "diagnostics", stage),
     )
     if batch_id is not None:
         result["batch_id"] = batch_id
@@ -48,8 +43,8 @@ def controller_response(result):
 class BatchLeaseStartError(Exception):
     """A lease request failed before this controller persisted a new batch."""
 
-    def __init__(self, error, batch_id):
-        self.payload = batch_lease_failure("batch-lease-acquire", error, batch_id)
+    def __init__(self, error, repo, batch_id):
+        self.payload = batch_lease_failure("batch-lease-acquire", error, repo, batch_id)
         super().__init__(self.payload["error"])
 
 
@@ -196,7 +191,7 @@ class BatchGuard:
                 # No active batch has been persisted yet. Keep the last terminal
                 # batch authoritative and report the startup stage instead of
                 # mislabelling it as damaged guard state.
-                raise BatchLeaseStartError(error, batch_id) from None
+                raise BatchLeaseStartError(error, self.base.parent.parent, batch_id) from None
         try:
             return self.save(dict(batch_id=batch_id, owner=self.owner, phase="active", started_at=time.time(),
                                   requested_count=count, workflow=workflow, verified_runs={}, completed_count=0))
@@ -318,14 +313,16 @@ class BatchGuard:
                     # main() would exit and its finalizer could otherwise release a
                     # still-recoverable, unsubmitted claim. Keep Worker.failed clear
                     # so its heartbeat and exact idempotent completion retry remain
-                    # usable after the implementation is repaired. The traceback is
-                    # private journal evidence and is never returned to the coordinator.
+                    # usable after the implementation is repaired. The full traceback
+                    # stays in the run journal; the report states the actual error.
                     diagnostic_name = self.worker.record("controller-completion-error", {
                         "operation": "complete",
                         "error_type": type(error).__name__,
                         "traceback": traceback.format_exc(),
                     })
-                    message = "Deterministic completion failed; private journal retained. Retry this exact controller operation after repair."
+                    message = (f"Deterministic completion failed ({type(error).__name__}: "
+                               f"{diagnostic_text(str(error))}); journal retained. "
+                               "Retry this exact controller operation after repair.")
                     state = self.save({**self.state, "controller_failure": {
                         "operation": "complete",
                         "error": message,
@@ -529,7 +526,7 @@ def main():
     try:
         lease = ProcessingBatchLease(repo, args.client_config)
     except EXPECTED_BATCH_LEASE_ERRORS as error:
-        print(json.dumps(batch_lease_failure("batch-lease-setup", error)), flush=True)
+        print(json.dumps(batch_lease_failure("batch-lease-setup", error, repo)), flush=True)
         raise SystemExit(1) from None
     if args.verify is not None:
         require(args.resolve is None and args.reason is None
@@ -583,5 +580,7 @@ if __name__ == "__main__":
     try:
         main()
     except (InputError, ClientError, OSError, KeyError, TypeError, ValueError) as error:
-        print(json.dumps(dict(blocking=True, error="Batch guard failed; preserve its state for inspection.", error_type=type(error).__name__)), flush=True)
+        print(json.dumps(dict(blocking=True, guard_state="preserved for inspection",
+                              **failure_report(error, Path(__file__).resolve().parent.parent / ".local"
+                                               / "receipt-worker" / "diagnostics", "batch-guard"))), flush=True)
         sys.exit(1)

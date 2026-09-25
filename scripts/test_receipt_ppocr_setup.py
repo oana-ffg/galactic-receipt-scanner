@@ -1,4 +1,6 @@
 """Synthetic setup tests; no production access, package installation, or model downloads."""
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -55,6 +57,42 @@ class PPSetupTests(unittest.TestCase):
                                    'client_config': str(config.resolve())})
         if os.name != 'nt':
             self.assertEqual(stat.S_IMODE(Path(descriptor).stat().st_mode), 0o600)
+
+    def test_unusable_prepared_runtime_reports_why_before_repairing(self):
+        config = self.repo / 'client.json'
+        config.write_text('{}', encoding='utf-8')
+        runtime = self.repo / '.local' / 'receipt-ppocr-runtime'
+        pp_python = runtime / 'cpu-venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+        pp_python.parent.mkdir(parents=True)
+        pp_python.write_bytes(b'prepared synthetic executable')
+        pp_python.chmod(pp_python.stat().st_mode | stat.S_IXUSR)
+        (runtime / 'profile.json').write_text('{}', encoding='utf-8')
+        gpu_profile = self.repo / 'gpu-profile.json'
+        gpu_profile.write_text('{}', encoding='utf-8')
+        client = Mock(origin='https://synthetic.example')
+        client.configure_ppocr.side_effect = [
+            ClientError('Configured PP GPU runtime is unavailable; no CPU fallback attempted.'),
+            ClientError('PP model files are missing; no downloads attempted.'),
+            None,
+        ]
+        output = io.StringIO()
+        with patch.object(setup, 'REPO', self.repo), \
+                patch.object(setup, 'credentials', return_value={}), \
+                patch.object(setup, 'ScannerClient', return_value=client), \
+                patch.object(setup, 'run_logged'), patch.object(setup, 'install_models'), \
+                patch.object(setup, 'check_node'), patch.object(setup, 'check_layout'), \
+                redirect_stdout(output):
+            setup.ensure_profile(str(config), str(gpu_profile), node=str(self.executable('node')))
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[:2], [
+            {'event': 'prepared_runtime_unavailable', 'error_type': 'ClientError',
+             'error': 'Configured PP GPU runtime is unavailable; no CPU fallback attempted.',
+             'next': 'install isolated CPU runtime'},
+            {'event': 'isolated_runtime_needs_repair', 'error_type': 'ClientError',
+             'error': 'PP model files are missing; no downloads attempted.',
+             'next': 'repair isolated CPU runtime'},
+        ])
 
     def test_descriptor_rejects_redirected_profile_and_descriptor(self):
         profile = self.repo / 'profile.json'

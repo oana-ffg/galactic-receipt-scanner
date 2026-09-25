@@ -64,16 +64,19 @@ until verified, and report specific untested capabilities without treating the w
 project as blocked. Local development tooling is acceptable; requiring the maintainer's
 machine or personal credentials for another user's deployed instance is not.
 
-**No gopass dependency.** Do not require or introduce gopass for this project. Provide
-owner-accessible credential provisioning, connection and revocation suitable for cloud
-Work. Existing machine-specific credential setup is migration debt, not the product's
+**No dependency on a particular secret manager.** The project never requires gopass or
+any other specific product. Provide owner-accessible credential provisioning, connection
+and revocation suitable for cloud Work. Recurring processing reads its credential through
+the generic `credential_command` provider in [PROCESSING_ACCESS.md](PROCESSING_ACCESS.md);
+each host points it at a secret store that host can read unattended (the maintainer's
+host uses gopass). That choice is host configuration outside Git, not the product's
 onboarding contract. Do not assume a browser password manager is accessible to a Work
 shell without verifying the supported integration. An optional PC processing worker may
 supplement the cloud workflow, but must not become a prerequisite for cloud setup.
 
-An explicitly requested personal backup integration may use the owner's chosen secret
-store (including gopass) outside the repository, supplying credentials through the generic
-client's stdin. This exception does not change the product's portable onboarding contract.
+An explicitly requested personal backup integration may likewise use the owner's chosen
+secret store outside the repository, supplying credentials through the generic client's
+stdin.
 
 This project is participating in an **OpenAI hackathon**. Use the user's ChatGPT
 subscription through Work/Codex and managed model agents as much as possible. Avoid
@@ -116,13 +119,16 @@ in progress while you work. This is not a disposable development instance.**
   owner-private directory. Never push that private branch or manifest to the public origin.
 - After the reviewed public change is pushed and local `main` exactly matches
   `origin/main`, run the repository's `site:sync-source` command with the distinct public
-  and private checkout paths and `origin/main`. The repository helper constructs the
-  private source from the **complete** public commit plus the existing private manifest,
-  preserves both histories, and refuses the shared checkout, dirty trees, unpushed public
-  changes and a public manifest. `HOW_TO_SET_UP.md` contains the exact invocation.
-- Publish with the official Sites workflow from the returned private checkout. Never
-  selectively cherry-pick a release into private Site source; that silently omits other
-  reviewed `main` changes. Never merge private Site history back into public `main`.
+  and private checkout paths. The helper is hard-pinned to `origin/main`; it constructs
+  the private source from that **complete** public commit plus the existing private
+  manifest, preserves both histories, and refuses the shared checkout, dirty trees,
+  unpushed public changes and a public manifest. `HOW_TO_SET_UP.md` contains the exact
+  invocation.
+- Publish with the official Sites workflow from the returned private checkout. It must
+  push that exact merge commit to the credential's Sites branch with a normal non-force
+  push, then package and deploy that same commit. Never selectively cherry-pick a release
+  into private Site source; that silently omits other reviewed `main` changes. Never merge
+  private Site history back into public `main`.
 - A deployment task must finish with the shared checkout still on clean `main`, except
   for explicitly identified pre-existing user changes. A private checkout may remain for
   later Sites updates, but it is not an automation or development checkout.
@@ -279,8 +285,13 @@ row counts for queue and backfill paths.
    audio. Avoid decorative features that compete with the receipt preview.
 
 Test persistence failures, retry conflicts, disconnections, stale frames, hand obstruction,
-capture/removal transitions and clipping. Run typechecks, build, unit/integration tests,
-browser tests and dependency audit. Distinguish synthetic checks from physical calibration.
+capture/removal transitions and clipping. Distinguish synthetic checks from physical calibration.
+
+Before every push, `npm run check` must pass. It runs both typechecks, the format check and
+`npm test`, which builds the current source and then runs every TypeScript, Node and Python
+unit/integration suite. Install `scripts/requirements-test.txt` into the `python3` it uses.
+A failure is a failure even if it looks unrelated: fix it or report it, never push past it.
+Browser tests (`npm run test:e2e`) and `npm audit` remain separate required checks.
 
 Changes to camera-frame scheduling must pass the complete capture loop in both Chromium
 and WebKit: live synthetic camera stream, real vision worker, saved original acknowledgement,

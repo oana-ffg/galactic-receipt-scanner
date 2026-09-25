@@ -12,8 +12,9 @@ import time
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from receipt_api import (ClientError, OCRRequired, ScannerClient, SHA, UUID, artifact_directory,
-                         credentials, matches_prepared_ocr, run_jev_backfill, write_new_file)
+from receipt_api import (ClientError, OCRRequired, ScannerClient, ScannerConnectionError, ScannerHTTPError, SHA,
+                         UUID, artifact_directory, credentials, diagnostic_text, failure_report,
+                         matches_prepared_ocr, run_jev_backfill, write_new_file)
 from receipt_locks import acquire_lock, LockBusy
 from receipt_ppocr_setup import REPO, discover, ensure_profile
 
@@ -164,7 +165,7 @@ class CachedBackend:
 
 
 def is_access_failure(error):
-    return isinstance(error, ClientError) and ('HTTP 401' in str(error) or 'HTTP 403' in str(error))
+    return isinstance(error, ScannerHTTPError) and error.status in {401, 403}
 
 
 def read_requirement(path, origin):
@@ -203,6 +204,13 @@ def finish_jev(client):
     result = run_jev_backfill(client)
     fields = ('complete', 'deferred', 'waiting', 'processed', 'remaining', 'phase', 'blocked')
     return {key: result[key] for key in fields if key in result}
+
+
+def ocr_failure(error, root, label):
+    """Report an OCR failure's actual cause; unexpected errors also keep their traceback."""
+    if isinstance(error, ClientError):
+        return dict(error=diagnostic_text(str(error)), error_type=type(error).__name__)
+    return failure_report(error, root / 'diagnostics', label)
 
 
 def drain(client, captures, root, state, *, layouts=None, attempts=3, sleep=time.sleep, emit=print):
@@ -253,13 +261,12 @@ def drain(client, captures, root, state, *, layouts=None, attempts=3, sleep=time
                 emit(json.dumps(dict(event='ocr_verified', capture_id=cid, attempt=attempt,
                                      ocr_sha256=prepared['ocr_sha256'])), flush=True)
             except (ClientError, OSError, ValueError, subprocess.SubprocessError) as error:
-                # Neither receipt content nor a subprocess's potentially sensitive stderr goes to chat.
-                message = str(error) if isinstance(error, ClientError) else type(error).__name__
-                errors[cid] = dict(attempt=attempt, error=message)
-                network_failure = isinstance(error, ClientError) and str(error).startswith('Scanner connection failed;')
+                failure = ocr_failure(error, root, cid)
+                errors[cid] = dict(attempt=attempt, **failure)
+                network_failure = isinstance(error, ScannerConnectionError)
                 consecutive_network_failures = consecutive_network_failures + 1 if network_failure else 0
                 save_json(root / 'failures.json', errors)
-                emit(json.dumps(dict(event='ocr_failed', capture_id=cid, attempt=attempt, error=message)), flush=True)
+                emit(json.dumps(dict(event='ocr_failed', capture_id=cid, attempt=attempt, **failure)), flush=True)
                 if is_access_failure(error) or consecutive_network_failures >= 3:
                     return dict(complete=False, blocked='authorization' if is_access_failure(error) else 'connectivity', selected=len(captures),
                                 verified=len(verified), reused=len(reused), retired=len(retired), failures=errors,
@@ -347,7 +354,7 @@ def main():
                 try:
                     result['required_ocr'] = prepare_requirement(client, requirement, root)
                 except (ClientError, OSError, ValueError, subprocess.SubprocessError) as error:
-                    result['required_ocr']['error'] = str(error) if isinstance(error, ClientError) else type(error).__name__
+                    result['required_ocr'].update(ocr_failure(error, root, 'required-ocr'))
             if not result['required_ocr']['verified']:
                 result['complete'] = False
         result.update(summary)
