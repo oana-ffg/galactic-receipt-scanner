@@ -104,6 +104,29 @@ in progress while you work. This is not a disposable development instance.**
 
 ## Astra review, direct pushes and live deployment
 
+### Keep public development and private Sites source separate
+
+- `/Users/oana/Projects/receipt-scanner` is the shared public development and automation
+  checkout. Keep it on `main`. Never open an existing Site into this checkout, switch it
+  to a `site-deploy*`/Sites-source branch, or leave it on any deployment branch. Scheduled
+  processing reads this working tree and must never inherit private-source history.
+- A Site's source repository is a separate private Git history because it tracks that
+  owner's `.openai/hosting.json`. Open or initialize it through the Sites hosting workflow
+  in a distinct ignored checkout such as `.local/sites-source/<project-id>/`, or in another
+  owner-private directory. Never push that private branch or manifest to the public origin.
+- After the reviewed public change is pushed and local `main` exactly matches
+  `origin/main`, run the repository's `site:sync-source` command with the distinct public
+  and private checkout paths and `origin/main`. The repository helper constructs the
+  private source from the **complete** public commit plus the existing private manifest,
+  preserves both histories, and refuses the shared checkout, dirty trees, unpushed public
+  changes and a public manifest. `HOW_TO_SET_UP.md` contains the exact invocation.
+- Publish with the official Sites workflow from the returned private checkout. Never
+  selectively cherry-pick a release into private Site source; that silently omits other
+  reviewed `main` changes. Never merge private Site history back into public `main`.
+- A deployment task must finish with the shared checkout still on clean `main`, except
+  for explicitly identified pre-existing user changes. A private checkout may remain for
+  later Sites updates, but it is not an automation or development checkout.
+
 - Do not create pull requests or wait for CodeRabbit. Before
   pushing changes to `main`, spawn a **fresh Astra subagent (`gpt-6-astra`)** to independently
   review the complete proposed diff, including relevant tests and repository guidance.

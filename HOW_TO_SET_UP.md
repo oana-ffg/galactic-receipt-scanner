@@ -13,9 +13,18 @@ Give ChatGPT Work or Codex the public repository URL and ask:
 2. Read `AGENTS.md`. Use the installed **Sites building** and **Sites hosting** skills.
    Reuse a local `.openai/hosting.json` only when it belongs to this user's intended
    instance. It is deliberately Git-ignored and absent from the public repository.
-3. If no instance exists, create exactly one Site. Save its exact returned ID atomically
-   in `.openai/hosting.json`, with `d1: "DB"` and `r2: "BUCKET"`. Never commit this file.
+3. Keep two distinct checkouts:
+   - the public clone, which remains on `main` and never tracks `.openai/hosting.json`; and
+   - an ignored owner-private Sites source checkout under
+     `.local/sites-source/<project-id>/` (or another private directory).
+
+   For an existing instance, use the Sites hosting workflow to open its source into the
+   separate checkout before editing or publishing. For a new instance, create exactly one
+   Site, create its separate source checkout, and save the exact returned ID there in
+   `.openai/hosting.json`, with `d1: "DB"` and `r2: "BUCKET"`. The public clone may keep an
+   ignored local copy for builds and Site lookup, but neither copy is committed publicly.
    Do not enable public access, add viewers or editors, or invite a workspace.
+
 4. Read back the Site's access policy. Require the current role to be owner, custom
    access, exactly one allowed account (the owner), no external visitors, editors,
    workspace groups or tenant groups. Use a personal account if workspace admins must
@@ -37,6 +46,7 @@ Give ChatGPT Work or Codex the public repository URL and ask:
    npm ci
    npm run build
    npm test
+   npm run test:site-source-sync
    npm run test:e2e
    npm run format:check
    npm audit
@@ -48,11 +58,29 @@ Give ChatGPT Work or Codex the public repository URL and ask:
    Drizzle migrations. Existing migration files are immutable after deployment.
    The browser test uses installed Google Chrome and synthetic receipts only.
 
-8. Commit the validated source. Keep the public GitHub origin; push the same commit to
-   the instance's Sites source repository using its temporary credential only as a
-   per-command authorization header. Never put credentials in Git URLs or files.
-   Use Sites' build/package helpers and privately deploy the exact saved version.
-   Wait for a successful deployment, then re-read the saved owner-only access policy.
+8. Commit the validated source and push it directly to public `main`. Require the public
+   checkout to be clean and exactly equal to `origin/main`. Then synchronize the complete
+   public commit into the separate private Sites source checkout:
+
+   ```sh
+   npm run site:sync-source -- \
+     --public-checkout /absolute/path/to/public-clone \
+     --site-checkout /absolute/path/to/private-sites-checkout
+   ```
+
+   This creates one private source commit whose tree is the public commit plus the existing
+   private `.openai/hosting.json`. It preserves the private source history while removing
+   stale source drift. It refuses dirty trees, an unpushed public commit, shared or linked
+   checkouts, a manifest committed in public source, and collisions with ignored private
+   files. Do not replace this full-tree synchronization with cherry-picks or by switching
+   the public checkout to a deployment branch.
+
+   Give the resulting private checkout back to the Sites hosting workflow, using its
+   temporary credential only through stdin/per-command authorization. Never put credentials
+   in Git URLs or files. Use Sites' build/package helpers and privately deploy the exact
+   saved version. Wait for success, re-read the owner-only access policy, and verify the
+   public checkout is still on `main` before handoff.
+
 9. Verify the deployed root, camera, metadata, previews and file endpoints without
    cookies: no application data may be returned. Test spoofed identity headers too;
    the Sites dispatcher must strip or reject them. Verify the signed-in owner can

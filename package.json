@@ -8,8 +8,10 @@
     "build": "node scripts/assets.mjs && node scripts/build.mjs",
     "dev": "node scripts/test-server.mjs",
     "db:generate": "drizzle-kit generate",
+    "site:sync-source": "node scripts/site_source_sync.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:site-source-sync": "node --test scripts/site_source_sync.test.mjs",
     "format:check": "prettier --check web worker db scripts/*.mjs *.ts *.json *.md"
   },
   "dependencies": {
