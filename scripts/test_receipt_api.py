@@ -286,6 +286,25 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn(self.client.sites_token, output.getvalue())
         self.assertNotIn(self.client.processing_token, output.getvalue())
 
+    def test_post_accepts_exact_document_route_but_rejects_other_document_paths(self):
+        self.client.request = Mock(return_value=b'{"saved":[]}')
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "edit.json"
+            payload.write_bytes(b'{"documents":[]}')
+            with patch("receipt_api.credentials", return_value={}), \
+                    patch("receipt_api.ScannerClient", return_value=self.client), \
+                    patch("sys.argv", ["receipt_api.py", "post", "/api/documents", str(payload)]), \
+                    redirect_stdout(io.StringIO()):
+                main()
+            self.client.request.assert_called_once_with(
+                "/api/documents", payload.read_bytes(), "application/json")
+            with patch("receipt_api.credentials", return_value={}), \
+                    patch("receipt_api.ScannerClient", return_value=self.client), \
+                    patch("sys.argv", ["receipt_api.py", "post", "/api/documents/other", str(payload)]):
+                with self.assertRaisesRegex(ClientError, "allowed processing or document"):
+                    main()
+            self.client.request.assert_called_once()
+
     def test_jev_backfill_runs_one_retryable_job_per_request_until_complete(self):
         output = io.StringIO()
         self.client.request = Mock(side_effect=[

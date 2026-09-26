@@ -97,11 +97,14 @@ Windows artifact directories inherit their parent's ACL so the sandbox image vie
 read them; POSIX artifact directories remain owner-only. Verify the parent is private
 and authorized for processing, and preflight image viewing before taking a queue claim.
 
-`post /api/processing/ENDPOINT PRIVATE_JSON_FILE` submits a private JSON body. Read the
-[processing contract](../receipt-processing/references/processing-api.md). Model document
-changes require claim → inspect → submit. Generic machine document writes are denied;
-owner browser edits remain available. Renew a claim before its 20-minute expiry. An
-expired/stale claim requires rereading the current assignment, never force-saving it.
+`post API_PATH PRIVATE_JSON_FILE` submits a private JSON body. Read the
+[processing contract](../receipt-processing/references/processing-api.md). Routine
+Luna/Astra queue submissions use claim → inspect → submit. For an owner-requested
+document repair, the processing credential can POST complete current revisions to
+`/api/documents`, detach a page, or submit a validated extraction to
+`/api/processing/agent-correction` without a claim. These edits cannot mark human
+approval and reject stale revisions or documents reserved by another worker.
+Renew a queue claim before its 20-minute expiry; reread an expired or stale assignment.
 
 `save-ocr CAPTURE_ID PRIVATE_JSON_FILE` stores an immutable ordinary OCR artifact.
 PP-OCRv6 is the standard for all new OCR and searchable PDFs. `prepare` and `pdf`
@@ -141,7 +144,7 @@ goes **before** the subcommand.
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `status`                                            | Connection capabilities; the deterministic controller preflight verifies them once per run.                                                  |
 | `get API_PATH`                                      | Parsed JSON; construct token-bearing paths inside Python instead of shell arguments.                                                         |
-| `post PROCESSING_API_PATH PRIVATE_JSON_FILE`        | POSTs the saved JSON bytes; use /api/processing/ routes.                                                                                     |
+| `post API_PATH PRIVATE_JSON_FILE`                   | POSTs the saved JSON bytes to an allowed document or processing route.                                                                         |
 | `original CAPTURE_ID --directory PRIVATE_DIRECTORY` | Verified original path/hash; --directory is optional here.                                                                                   |
 | `prepare CAPTURE_ID`                                | OCR-host operation: verified original and stored OCR paths/hashes, using `receipt-ocr-host.json`. **No --directory CLI option.**             |
 | `pdf DOCUMENT_ID`                                   | Saved-PP consumer operation: generated local PDF with server-acknowledged hash/revision; it never infers OCR. **No --directory CLI option.** |

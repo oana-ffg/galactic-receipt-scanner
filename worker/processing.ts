@@ -84,7 +84,7 @@ async function activeLock(env: Env, token?: unknown) {
     .first<Lock>();
 }
 export async function protectBlindParse(request: Request, env: Env) {
-  if (!request.headers.has("authorization")) return;
+  if (!request.headers.has("authorization") || request.method !== "GET") return;
   const url = new URL(request.url),
     path = url.pathname;
   // This mode exposes checkpoint existence only, never previous model readings.
@@ -300,7 +300,7 @@ async function categoryCheck(env: Env, e: Extraction) {
 function state(
   e: Extraction,
   previous: ProcessingState | undefined,
-  stage: Lock["stage"] | "human",
+  stage: Lock["stage"] | "human" | "agent",
   revision: number,
 ): ProcessingState {
   return {
@@ -310,7 +310,9 @@ function state(
     small_model_certainty:
       stage === "small"
         ? e.certainty
-        : (previous?.small_model_certainty ?? null),
+        : stage === "agent"
+          ? null
+          : (previous?.small_model_certainty ?? null),
     large_model_confidence:
       stage === "large"
         ? e.certainty
@@ -322,7 +324,7 @@ function state(
     luna_needs_human_review:
       stage === "human"
         ? false
-        : stage === "small"
+        : stage === "small" || stage === "agent"
           ? e.needs_human_review === true
           : (previous?.luna_needs_human_review ??
             previous?.extraction.needs_human_review ??
@@ -330,7 +332,7 @@ function state(
     luna_human_review_reasons:
       stage === "human"
         ? []
-        : stage === "small"
+        : stage === "small" || stage === "agent"
           ? [...(e.human_review_reasons ?? [])]
           : [
               ...(previous?.luna_human_review_reasons ??
@@ -1375,20 +1377,31 @@ export async function processingRoute(
       loadSelectedCaptures,
     ))!;
   }
-  if (path === "/api/processing/human-review" && method === "POST") {
+  if (
+    (path === "/api/processing/human-review" ||
+      path === "/api/processing/agent-correction") &&
+    method === "POST"
+  ) {
+    const human = path === "/api/processing/human-review";
     requireThat(
-      !request.headers.has("authorization"),
+      human !== request.headers.has("authorization"),
       403,
-      "Human approval requires the owner's interactive session.",
+      human
+        ? "Human approval requires the owner's interactive session."
+        : "Agent correction requires scoped machine credentials.",
     );
     const input = await bodyJson(request, 1024 * 1024);
     validateExtraction(input.extraction);
     await categoryCheck(env, input.extraction);
     const doc = await storedDocumentById(env, String(input.document_id ?? ""));
     requireThat(
-      doc && doc.revision === input.revision,
+      doc &&
+        doc.revision === input.revision &&
+        !doc.mergedInto &&
+        !doc.duplicateOf &&
+        doc.pages.length > 0,
       409,
-      "Document changed. Reload before approving.",
+      "Document changed or is no longer retained. Reload before correcting.",
     );
     const keepPdf =
       doc.vendor === input.extraction.vendor &&
@@ -1398,20 +1411,25 @@ export async function processingRoute(
     applyExtraction(
       doc,
       input.extraction,
-      state(input.extraction, doc.processing, "human", doc.revision),
+      state(
+        input.extraction,
+        doc.processing,
+        human ? "human" : "agent",
+        doc.revision,
+      ),
     );
     if (keepPdf) {
       doc.checks.pdf = true;
       doc.reviewedPdfSha256 = checkedHash;
     }
-    const humanRecord = env.DB.prepare(
+    const correctionRecord = env.DB.prepare(
       "INSERT INTO processing_attempts(token,document_id,revision,stage,model,payload,created_at) VALUES(?,?,?,?,?,?,?)",
     ).bind(
       crypto.randomUUID(),
       doc.id,
       doc.revision + 1,
-      "human",
-      "human",
+      human ? "human" : "agent",
+      human ? "human" : "agent-correction",
       JSON.stringify({
         request: { extraction: input.extraction },
         sources: doc.pages.map((p) => ({
@@ -1426,7 +1444,7 @@ export async function processingRoute(
       env,
       load,
       [doc],
-      [humanRecord],
+      [correctionRecord],
       loadCapture,
       loadSelectedCaptures,
     );
@@ -1448,24 +1466,6 @@ export async function processingRoute(
       400,
       "Choose a page and explain the rejected match.",
     );
-    // Machine detach is only allowed after the independent Astra parse checkpoint.
-    const lock = await activeLock(env, input.token);
-    if (request.headers.has("authorization"))
-      requireThat(
-        lock &&
-          input.token === lock.token &&
-          lock.document_id === d.id &&
-          lock.stage === "large" &&
-          lock.draft,
-        409,
-        "An Astra claim and saved independent parse are required to detach a page.",
-      );
-    else
-      requireThat(
-        !lock,
-        409,
-        "A model is processing a document. Retry when its lease finishes.",
-      );
     const detachedCapture = await loadCapture(p.captureId);
     requireThat(detachedCapture, 503, "A source page is unavailable.");
     const separate = newDocument(detachedCapture);
@@ -1512,14 +1512,6 @@ export async function processingRoute(
         new Date().toISOString(),
       ),
     ];
-    if (lock) {
-      statements.unshift(leaseGuard(env, lock));
-      statements.push(
-        env.DB.prepare(
-          "UPDATE processing_lock SET expires=0 WHERE token=?",
-        ).bind(lock.token),
-      );
-    }
     return save(
       request,
       env,
@@ -1528,7 +1520,6 @@ export async function processingRoute(
       statements,
       loadCapture,
       loadSelectedCaptures,
-      lock ?? undefined,
     );
   }
   requireThat(

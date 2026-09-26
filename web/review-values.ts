@@ -39,15 +39,25 @@ export function reviewValues(doc: DocumentView, attempts: SavedReading[]) {
   const luna = current.find((a) => a.stage === "small");
   const astra = current.find((a) => a.stage === "large");
   const human = current.find((a) => a.stage === "human");
+  const agent = current.find((a) => a.stage === "agent");
   const p = doc.processing!;
   // Reprocessing invalidates older model reviews even when the pages are unchanged.
   const selected = p.has_human_review
     ? human
     : p.large_model_confidence !== null
       ? astra
-      : p.small_model_certainty !== null
-        ? luna
-        : undefined;
+      : !p.needs_reparse &&
+          agent &&
+          agent.revision >
+            Math.max(
+              luna?.revision ?? 0,
+              astra?.revision ?? 0,
+              human?.revision ?? 0,
+            )
+        ? agent
+        : p.small_model_certainty !== null
+          ? luna
+          : undefined;
   return {
     models,
     luna,
@@ -63,7 +73,9 @@ export function reviewValues(doc: DocumentView, attempts: SavedReading[]) {
         ? "Astra"
         : selected.stage === "small"
           ? "Luna"
-          : "saved human review"
+          : selected.stage === "agent"
+            ? "saved agent correction"
+            : "saved human review"
       : p.has_human_review
         ? "saved human review"
         : p.large_model_confidence !== null

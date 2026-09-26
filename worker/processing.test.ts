@@ -1573,6 +1573,74 @@ it.each([false, true])(
     ).toBe(409);
   },
 );
+it("lets a processing credential detach a page without an Astra claim", async () => {
+  const first = await capture();
+  const second = await capture();
+  const document = newDocument(first);
+  document.pages.push(...newDocument(second).pages);
+  await ok("/api/documents", { documents: [document] });
+  const current = (await ok(`/api/documents/${first.id}`)).document;
+  const input = {
+    document_id: first.id,
+    revision: current.revision,
+    capture_id: second.id,
+    reason: "Synthetic second page belongs to another purchase.",
+  };
+  expect((await ok("/api/processing/detach", input, true)).saved).toHaveLength(
+    2,
+  );
+  expect((await req("/api/processing/detach", input, true)).status).toBe(409);
+  expect((await ok(`/api/documents/${first.id}`)).document.pages).toHaveLength(
+    1,
+  );
+  const detached = (await ok(`/api/documents?captureId=${second.id}`)).document;
+  expect(detached.pages.map((page: any) => page.captureId)).toEqual([
+    second.id,
+  ]);
+});
+it("saves an agent extraction correction without claiming human approval", async () => {
+  const source = await capture();
+  const categoryId = await category();
+  const luna = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: luna.token,
+      model: "gpt-5.6-luna",
+      extraction: extraction(categoryId),
+    },
+    true,
+  );
+  const current = (await ok(`/api/documents/${source.id}`)).document;
+  const input = {
+    document_id: source.id,
+    revision: current.revision,
+    extraction: { ...extraction(categoryId), certainty: "low" },
+  };
+  await ok("/api/processing/agent-correction", input, true);
+  const corrected = (await ok(`/api/documents/${source.id}`)).document;
+  expect(corrected.processing.extraction).toEqual(input.extraction);
+  expect(corrected.processing.has_human_review).toBe(false);
+  expect(corrected.processing.needs_reparse).toBe(false);
+  expect(corrected.processing.small_model_certainty).toBeNull();
+  expect(corrected.processing.large_model_confidence).toBeNull();
+  expect(corrected.status).toBe("model-review");
+  expect(
+    (await req("/api/processing/agent-correction", input, true)).status,
+  ).toBe(409);
+  expect(
+    (
+      await req("/api/processing/agent-correction", {
+        ...input,
+        revision: corrected.revision,
+      })
+    ).status,
+  ).toBe(403);
+  const readings = await ok(
+    `/api/processing/readings?document_id=${source.id}`,
+  );
+  expect(readings.attempts[0].stage).toBe("agent");
+});
 it("keeps incomplete pages out of human review and retries them after new scans", async () => {
   const c = await capture(),
     cat = await category(),

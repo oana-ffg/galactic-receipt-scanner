@@ -15,7 +15,7 @@ afterAll(async () => {
   await mf?.dispose();
 });
 
-it("allows verified originals and immutable OCR but denies unclaimed document writes", async () => {
+it("allows authenticated versioned document edits and immutable OCR", async () => {
   const id = crypto.randomUUID();
   const bytes = new Uint8Array([255, 216, 255, 12]);
   const saved = await mf.dispatchFetch(`${origin}/api/captures/${id}`, {
@@ -55,11 +55,23 @@ it("allows verified originals and immutable OCR but denies unclaimed document wr
       headers: auth,
       body: JSON.stringify({ documents: [doc] }),
     });
-  expect((await save()).status).toBe(403);
+  expect((await save()).status).toBe(200);
+  expect((await save()).status).toBe(409);
   expect(
     ((await (await read(`/api/documents/${id}`)).json()) as any).document
       .vendor,
-  ).toBeNull();
+  ).toBe("Synthetic vendor");
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare(
+      "INSERT INTO processing_lock(id,token,stage,document_id,revision,expires,draft) VALUES(1,?,'large',?,?,?,NULL)",
+    )
+    .bind(crypto.randomUUID(), id, 1, Date.now() + 60000)
+    .run();
+  doc.revision = 1;
+  doc.vendor = "Conflicting edit";
+  expect((await save()).status).toBe(409);
+  await db.prepare("UPDATE processing_lock SET expires=0 WHERE id=1").run();
   const attempt = JSON.stringify({ model: "synthetic", has_handwriting: true });
   const upload = await mf.dispatchFetch(
     `${origin}/api/captures/${id}/artifacts/ocr`,

@@ -49,6 +49,9 @@ uploads handled by the client. Never print claim tokens; build query strings in 
 | POST /api/processing/submit                 | See Submit below                                                                                          | `{saved:[{id,revision},...],warnings?}`; exact replay may add `replayed:true`.                                                                                                                                                                                                                                                                             |
 | GET /api/documents/ID                       | none                                                                                                      | `{document,captures}`; read `response["document"]`.                                                                                                                                                                                                                                                                                                        |
 | POST /api/processing/pdf-review             | `{document_id,revision,sha256,evidence}`                                                                  | Read the document back and verify its PDF check/hash; see Outputs.                                                                                                                                                                                                                                                                                         |
+| POST /api/documents                          | `{documents:[complete current revisions]}`                                                                | Save source edits with the processing credential. Changed membership clears checks and queues reparse.                                                                                                                                                                                                                                                       |
+| POST /api/processing/detach                  | `{document_id,revision,capture_id,reason}`                                                                | Separate one page without a model claim; retain originals and record the rejected association.                                                                                                                                                                                                                                                             |
+| POST /api/processing/agent-correction        | `{document_id,revision,extraction}`                                                                       | Save a validated extraction and agent attempt without claiming human review.                                                                                                                                                                                                                                                                                |
 
 One renewable global lease prevents overlapping model work and expires after 20 minutes.
 A token assigns ONE document. Claim pages use `captureId`; context `next_images` use
@@ -74,7 +77,7 @@ extracted documents, not every unprocessed scan. Empty results do not establish 
 match. At most 50 candidates are returned; respect truncation and rejected associations,
 and confirm attachments visually.
 
-For an owner-requested repair of a specific processed document, Astra may claim with
+For a full independent review of a specific processed document, Astra may claim with
 `{stage:"large", document_id, revision}` using the current document ID and revision.
 This can revisit an awaiting-pages result; it never falls back to another queued
 document. Stale, merged, duplicate and human-reviewed targets are rejected, and the
@@ -217,10 +220,12 @@ Categories are stable by ID. Equivalent normalized names cannot silently acquire
 different descriptions; on conflict read the existing definition or choose a distinct
 appropriate category.
 
-POST /api/processing/detach accepts `{document_id,revision,capture_id,reason,token?}`
-from the owner browser or claimed Astra after checkpoint. It preserves originals,
-records a rejected association, clears affected validation and closes the claim.
-Requeue rather than submitting against the old grouping.
-
-Human review is owner-browser-only. A model never sets has_human_review.
-Generic machine POST /api/documents is denied; use the processing endpoints.
+POST /api/processing/detach accepts `{document_id,revision,capture_id,reason}`
+from the owner browser or processing credential. It preserves originals, records a
+rejected association and clears affected validation. POST /api/documents accepts
+complete current document revisions for grouping, duplicate links and source-backed
+edits; it cannot forge processing state. Use agent-correction for extraction fields.
+All three direct edits reject stale revisions and concurrent document reservations.
+Recheck the saved pages and regenerate or attest the PDF after membership changes.
+Human review remains owner-browser-only; an agent correction never sets
+`has_human_review`.

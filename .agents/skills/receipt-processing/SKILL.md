@@ -13,11 +13,11 @@ For second-pass visual review of low/medium-confidence results, use the separate
 A bare `$receipt-processing` invocation means **run the saved-receipt workflow now**.
 Default to one batch of up to **10 oldest pending documents in the Luna small stage**.
 An explicit count/stage in the user's request overrides that default. The claim API
-selects the next eligible document for routine batches. An owner-requested repair of
-a specific processed document uses the large-stage targeted claim with its exact ID
-and current revision; see [the processing API](references/processing-api.md).
-It keeps the normal exclusive lease and rejects stale or human-reviewed targets.
-Do not claim unrelated queued work to reach a named repair. Do not
+selects the next eligible document for routine batches. For an owner-requested page,
+grouping or field correction, use the versioned direct API edit described in
+[the processing API](references/processing-api.md); it needs no model claim. A full
+independent Astra review still uses the large-stage targeted claim. Do not claim
+unrelated queued work to reach a named repair. Do not
 end with "skill loaded" or ask which batch/range when none was specified. Announce the
 default and begin connection preparation and worker dispatch. An explicit request to
 explain, inspect or edit this skill is not a processing run.

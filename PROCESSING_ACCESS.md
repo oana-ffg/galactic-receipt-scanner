@@ -85,11 +85,13 @@ claiming work; do not copy credentials into a file as a fallback.
 ## Scope
 
 - **Processing:** capture/original/artifact reads, document/context/category reads, shared
-  queue claims, drafts/submission, supported detach, immutable OCR and PDF operations,
-  and Jev status/backfill reads and writes.
+  queue claims, drafts/submission, versioned document saves, page detachments, agent
+  extraction corrections, immutable OCR and PDF operations, and Jev status/backfill
+  reads and writes. Direct edits use the same source validation, revision checks and
+  document write guard as owner edits; they do not require a model claim.
 - **Backup:** GET-only capture history/metadata and original bytes; no processing writes.
-- Neither credential permits camera uploads, station controls, private issues, arbitrary
-  document writes, human approval, or creating/revoking other connections.
+- Neither credential permits camera uploads, station controls, private issues,
+  human approval, or creating/revoking other connections.
 
 The old `PROCESSING_TOKEN_SHA256` setting remains temporarily supported for existing
 clients during migration. Remove it only after its users have migrated and new access is

@@ -754,7 +754,7 @@ def main():
     commands.add_parser("jev-completeness", help="Assess current Jev purchase documents for missing source pages, lines, and totals")
     get = commands.add_parser("get", help="Read a relative processing API path")
     get.add_argument("path")
-    post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing endpoint")
+    post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing or document endpoint")
     post.add_argument("path")
     post.add_argument("file")
     listing = commands.add_parser("captures", help="One current-take page; follow next using --before")
@@ -821,8 +821,8 @@ def main():
             raise ClientError("Upload exceeds the client size limit.")
         content_type = "application/json"
         if args.command == "post":
-            if not args.path.startswith("/api/processing/"):
-                raise ClientError("Use post only for processing endpoints.")
+            if args.path != "/api/documents" and not args.path.startswith("/api/processing/"):
+                raise ClientError("Use post only for allowed processing or document endpoints.")
             path = args.path
         elif args.command == "save-ocr":
             if not UUID.fullmatch(args.capture_id):

@@ -527,7 +527,8 @@ save("document-after-submit.json",
      client.get("/api/documents/" + claim["document"]["id"])["document"])
 ```
 
-For a visually justified merge, use the grouping recipe instead of this submit block;
-it selects the actual model, reconciled extraction and optional resolution from claim.stage. For detachment, use the documented
-detach endpoint and stop because it closes the claim. Successful submission continues
+For a visually justified merge during a claimed review, use the grouping recipe instead
+of this submit block; it selects the actual model, reconciled extraction and optional
+resolution from claim.stage. A direct owner-requested detach needs no claim; if the
+document is already claimed, finish or release that claim before editing. Successful submission continues
 with the common PDF generation, inspection and attestation phase.
