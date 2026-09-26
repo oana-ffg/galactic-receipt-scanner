@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hold one local receipt batch across its sequential managed model workers."""
+"""Hold one workflow batch across its sequential managed model workers."""
 import argparse
 import json
 from pathlib import Path
@@ -500,6 +500,21 @@ class BatchGuard:
         self.lock.close()
 
 
+
+def batch_directory(repo, workflow, resolve=None):
+    base = repo / ".local" / "receipt-worker"
+    if workflow != "astra":
+        return base
+    previous = base / "batch-state.json"
+    if previous.exists():
+        state = json.loads(regular_path(previous).read_text(encoding="utf-8"))
+        if state.get("workflow") == "astra" and state.get("phase") != "complete" and resolve == state.get("batch_id"):
+            return base
+        require(state.get("workflow") != "astra" or state.get("phase") == "complete",
+                "An earlier Astra batch still uses the shared guard; finish or reconcile that exact batch before starting the separate Astra guard.")
+    return repo / ".local" / "receipt-verification"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--owner", required=True, action=Once)
@@ -522,7 +537,7 @@ def main():
     require(args.owner != "receipt-processing-scheduled" or not recovering or args.recovery_by is not None,
             "Scheduled processing cannot recover an unfinished batch without an interactive recovery task.")
     repo = Path(__file__).resolve().parent.parent
-    base = repo / ".local" / "receipt-worker"
+    base = batch_directory(repo, args.workflow, args.resolve)
     try:
         lease = ProcessingBatchLease(repo, args.client_config)
     except EXPECTED_BATCH_LEASE_ERRORS as error:

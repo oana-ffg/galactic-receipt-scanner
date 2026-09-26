@@ -139,3 +139,21 @@ This backup command requires a POSIX host (Linux/macOS) and a filesystem support
 Unix ownership, private permissions, no-follow file opens and file locking. Native
 Windows is unsupported and is rejected before credentials are read or files written.
 Its filesystem tests run on POSIX; Windows runs the platform-rejection tests instead.
+
+## Concurrent processing sessions
+
+Luna and Astra can process different documents concurrently. Claims exclude an already
+claimed or batch-reserved document, and PDF upload/attestation checks the affected document.
+Each batch retains its documents through its final verification; releasing or expiring that
+batch makes them available again. Jev continues to defer changes to processed groups while
+any processing batch is active.
+
+When two batches use the same configured credential provider, give each a private config
+with a distinct UUID `processing_session` field, alongside the existing `origin` and
+`credential_command` or `credential_file`. Use that exact config for every call in the batch.
+The client sends this non-secret identifier as `X-Processing-Session`; it isolates independent
+reading checkpoints and batch ownership without granting access or changing credentials.
+Configs without this field remain compatible and share one sequential session per credential.
+The local `--workflow astra` guard uses `.local/receipt-verification/`, separate from Luna's
+unchanged `.local/receipt-worker/` guard. Existing running controllers can finish normally.
+An active lease created before this upgrade remains exclusive until it finishes or expires.

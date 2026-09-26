@@ -33,6 +33,25 @@ class FakeLease:
 
 
 class BatchGuardTests(unittest.TestCase):
+    def test_astra_guard_is_separate_but_preserves_legacy_unfinished_astra(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            luna = module.batch_directory(repo, 'luna')
+            astra = module.batch_directory(repo, 'astra')
+            self.assertNotEqual(luna, astra)
+            luna.mkdir(parents=True)
+            state = luna / 'batch-state.json'
+            state.write_text(json.dumps({'workflow': 'luna', 'phase': 'active'}))
+            self.assertEqual(module.batch_directory(repo, 'astra'), astra)
+            state.write_text(json.dumps({'workflow': 'astra', 'phase': 'blocked', 'batch_id': 'a' * 32}))
+            with self.assertRaisesRegex(module.InputError, 'earlier Astra batch'):
+                module.batch_directory(repo, 'astra')
+            self.assertEqual(module.batch_directory(repo, 'astra', 'a' * 32), luna)
+            with self.assertRaisesRegex(module.InputError, 'earlier Astra batch'):
+                module.batch_directory(repo, 'astra', 'b' * 32)
+            state.write_text(json.dumps({'workflow': 'astra', 'phase': 'complete'}))
+            self.assertEqual(module.batch_directory(repo, 'astra'), astra)
+
     def test_correctable_worker_result_keeps_controller_acknowledgement(self):
         response = module.controller_response({
             "ok": False,

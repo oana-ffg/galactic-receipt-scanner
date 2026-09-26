@@ -1,3 +1,4 @@
+import { documentWriteGuard, processingBatch } from "./processing-coordination";
 import {
   documentTypes,
   financialTypes,
@@ -355,7 +356,12 @@ export async function documentRoute(
   request: Request,
   env: Env,
   loadCaptures: () => Promise<Capture[]>,
-  commit?: { statements: D1PreparedStatement[]; trustedProcessing: boolean },
+  commit?: {
+    statements: D1PreparedStatement[];
+    trustedProcessing: boolean;
+    processingToken?: string;
+    batchId?: string | null;
+  },
   loadCapture?: (id: string) => Promise<Capture | null>,
   loadSelectedCaptures?: (ids: string[]) => Promise<Capture[]>,
 ): Promise<Response | null> {
@@ -789,6 +795,16 @@ export async function documentRoute(
           : matches.filter((d) => d.id > after).slice(0, limit + 1);
         await loadFileRows(page.slice(0, limit).map((document) => document.id));
         await loadReviewState(page.slice(0, limit));
+        const reserved = await env.DB.prepare(
+          `SELECT document_id FROM processing_lock WHERE document_id IN (SELECT value FROM json_each(?)) AND expires>unixepoch()*1000
+          UNION SELECT r.document_id FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id IN (SELECT value FROM json_each(?)) AND b.expires>unixepoch()*1000`,
+        )
+          .bind(
+            JSON.stringify(page.slice(0, limit).map((d) => d.id)),
+            JSON.stringify(page.slice(0, limit).map((d) => d.id)),
+          )
+          .all<{ document_id: string }>();
+        const reservedIds = new Set(reserved.results.map((r) => r.document_id));
         return json({
           total: summaryPage?.total ?? matches.length,
           next:
@@ -799,6 +815,7 @@ export async function documentRoute(
             return {
               id: v.id,
               revision: v.revision,
+              processingReserved: reservedIds.has(v.id),
               vendor: v.vendor,
               receiptDate: v.receiptDate,
               reference: v.reference,
@@ -1024,7 +1041,15 @@ export async function documentRoute(
         }
       }
     }
-    const batch: D1PreparedStatement[] = [...(commit?.statements ?? [])];
+    const batch: D1PreparedStatement[] = [
+      documentWriteGuard(
+        env,
+        changed.map((d) => d.id),
+        commit?.processingToken ?? null,
+        commit?.batchId ?? (await processingBatch(request, env)),
+      ),
+      ...(commit?.statements ?? []),
+    ];
     const at = new Date().toISOString();
     for (const d of changed) {
       const saved = { ...d, revision: d.revision + 1 };
@@ -1119,11 +1144,29 @@ export async function documentRoute(
         503,
         "PDF storage not confirmed.",
       );
-    await env.DB.prepare(
-      "INSERT OR IGNORE INTO document_files(key,document_id,revision,sha256,filename,created_at) VALUES(?,?,?,?,?,?)",
-    )
-      .bind(key, id, doc.revision, sha, filename, new Date().toISOString())
-      .run();
+    try {
+      await env.DB.batch([
+        documentWriteGuard(
+          env,
+          [id],
+          null,
+          await processingBatch(request, env),
+        ),
+        env.DB.prepare(
+          "INSERT INTO processing_commits(token,valid) SELECT ?,EXISTS(SELECT 1 FROM document_heads WHERE id=? AND revision=?)",
+        ).bind(crypto.randomUUID(), id, doc.revision),
+        env.DB.prepare(
+          "INSERT OR IGNORE INTO document_files(key,document_id,revision,sha256,filename,created_at) VALUES(?,?,?,?,?,?)",
+        ).bind(key, id, doc.revision, sha, filename, new Date().toISOString()),
+      ]);
+    } catch (error) {
+      if (/constraint/.test(String(error)))
+        throw new HttpError(
+          409,
+          "Document changed or is reserved by another processing batch.",
+        );
+      throw error;
+    }
     return json({ sha256: sha, filename, revision: doc.revision });
   }
   if (action === "pdf" && request.method === "GET") {

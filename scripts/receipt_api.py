@@ -242,6 +242,8 @@ def credentials(config_path, from_stdin=False):
         if value.get("origin") != config.get("origin"):
             raise ClientError(f"Credential origin {value.get('origin')!r} differs from the configured Site "
                               f"{config.get('origin')!r}.")
+        if "processing_session" in config:
+            value = {**value, "processing_session": config["processing_session"]}
     return value
 
 
@@ -280,6 +282,9 @@ class ScannerClient:
                 or any(c.isspace() for c in self.sites_token)
                 or not re.fullmatch(r"rsc_[A-Za-z0-9_-]{43}", self.processing_token)):
             raise ClientError("Invalid scanner credential format.")
+        self.processing_session = value.get("processing_session")
+        if self.processing_session is not None and (not isinstance(self.processing_session, str) or not UUID.fullmatch(self.processing_session)):
+            raise ClientError("Processing session must be a UUID.")
         self.opener = build_opener(NoRedirect())
         self.ocr_backend = None
         self.node = "node"
@@ -347,6 +352,8 @@ class ScannerClient:
             "Cache-Control": "no-store",
             "Content-Type": content_type,
         }
+        if self.processing_session is not None:
+            headers["X-Processing-Session"] = self.processing_session
         req = Request(self.origin + path, data=data, headers=headers)
         # Reads can safely recover from a brief gateway failure. Never replay a
         # write here: its outcome may be unknown and the caller owns recovery.

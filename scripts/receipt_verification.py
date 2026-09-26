@@ -15,7 +15,7 @@ def require(condition, message):
         raise ClientError(message)
 
 
-def queue(client, limit=10):
+def queue(client, limit=10, confidence=None):
     ready, jev_seen, jev_cursor = set(), set(), None
     while True:
         query = {'limit': 25}
@@ -40,7 +40,8 @@ def queue(client, limit=10):
         for document in page['documents']:
             processing = document.get('processing') or {}
             if (document.get('id') in ready
-                    and processing.get('small_model_certainty') in {'low', 'medium'}
+                    and processing.get('small_model_certainty') in ({confidence} if confidence else {'low', 'medium'})
+                    and not document.get('processingReserved', False)
                     and processing.get('large_model_confidence') is None
                     and not processing.get('has_human_review') and not document.get('duplicateOf')
                     and document.get('pageIds') and processing.get('disposition') != 'processing'):
@@ -128,6 +129,7 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     listing = commands.add_parser('queue')
     listing.add_argument('--limit', type=int, default=10)
+    listing.add_argument('--confidence', choices=('low', 'medium'))
     proof = commands.add_parser('verify')
     proof.add_argument('work_directory', type=Path)
     proof.add_argument('--document-id', required=True)
@@ -136,7 +138,7 @@ def main():
     if args.command == 'queue' and not 1 <= args.limit <= 1000:
         parser.error('--limit must be between 1 and 1000')
     client = ScannerClient(credentials(args.config))
-    print(json.dumps(queue(client, args.limit) if args.command == 'queue' else
+    print(json.dumps(queue(client, args.limit, args.confidence) if args.command == 'queue' else
                      verify(client, args.work_directory, args.document_id, args.revision)))
 
 

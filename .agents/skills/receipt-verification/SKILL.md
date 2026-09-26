@@ -37,11 +37,21 @@ hourly first pass.
    guard: Astra uses the independent
    verification protocol below rather than the bounded Luna completion counter.
    Keep its live session ID and an ignored coordinator checkpoint. Respect busy/blocked
-   state; do not clear an earlier blocked batch merely to start verification. This guard
-   serializes Astra with Luna on this host; the server also enforces a global claim.
+   state; do not clear an earlier blocked batch merely to start verification. Astra uses
+   `.local/receipt-verification/`; Luna retains `.local/receipt-worker/`. Different documents
+   can be processed concurrently. The server reserves each batch's documents until its
+   final verification and release; a busy target must be skipped, never force-claimed.
+   An unfinished legacy Astra batch in the shared guard must finish or be reconciled first.
+   If the owner explicitly authorizes an existing credential instead of a fresh connection,
+   make a new private config referencing that provider and add a fresh UUID `processing_session`.
+   Pass that exact config to the guard, all workers and verification helper. This separates
+   blind readings and batch ownership even when Luna uses the same underlying credential.
+   Revoke/destroy only a connection created by this batch; never revoke a shared provider.
 3. Run the prepared Python executable with
    `scripts/receipt_verification.py --config PRIVATE_CLIENT_CONFIG queue --limit 10`.
-   Substitute the requested count when different. The script paginates summaries,
+   Substitute the requested count when different; use `--confidence medium` or
+   `--confidence low` when the owner specifies one. The script skips reserved documents,
+   paginates summaries,
    selects low/medium Luna results and returns only IDs/revisions and operational metadata.
    It makes no claims or writes. Do not fetch full receipt payloads into the coordinator.
 4. Before each dispatch, require `phase: active` from the same guard session. Refresh

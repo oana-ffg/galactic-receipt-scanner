@@ -40,6 +40,15 @@ class VerificationTests(unittest.TestCase):
         self.assertTrue(any('after=jev-cursor' in call.args[0] for call in client.get.call_args_list))
         self.assertIn('after=cursor', client.get.call_args.args[0])
 
+    def test_confidence_filter_excludes_other_confidence_and_reserved_documents(self):
+        client = Mock(origin='https://synthetic.example')
+        docs = [dict(id=i, revision=1, pageIds=['page'], scannedAt=['2026-01-01'],
+                     processingReserved=(i == 'reserved'), processing=dict(small_model_certainty=c))
+                for i, c in [('low', 'low'), ('medium', 'medium'), ('reserved', 'medium')]]
+        client.get.side_effect = [dict(documents=[dict(document_id=d['id'], ready=True,
+            jev={'role': 'purchase_document'}) for d in docs]), dict(documents=docs)]
+        self.assertEqual([d['document_id'] for d in queue(client, 50, 'medium')['documents']], ['medium'])
+
     def test_repeated_jev_cursor_is_not_reported_as_complete(self):
         client = Mock(origin='https://synthetic.example')
         client.get.side_effect = [dict(documents=[], next='same'), dict(documents=[], next='same')]

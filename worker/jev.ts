@@ -1042,15 +1042,15 @@ async function documentsAreUnlocked(env: Env, documents: ReceiptDocument[]) {
     )
   ) {
     const batch = await env.DB.prepare(
-      "SELECT 1 AS active FROM processing_batch_lease WHERE id=1 AND expires>unixepoch()*1000",
+      "SELECT 1 AS active FROM processing_batch_lease WHERE expires>unixepoch()*1000",
     ).first<{ active: number }>();
     if (batch) return false;
   }
   const active = await env.DB.prepare(
-    "SELECT document_id FROM processing_lock WHERE id=1 AND expires>unixepoch()*1000",
-  ).first<{ document_id: string }>();
-  return (
-    !active || !documents.some((document) => document.id === active.document_id)
+    "SELECT document_id FROM processing_lock WHERE expires>unixepoch()*1000",
+  ).all<{ document_id: string }>();
+  return !documents.some((document) =>
+    active.results.some((lock) => lock.document_id === document.id),
   );
 }
 
@@ -1461,7 +1461,7 @@ async function claimPipelineStep(env: Env, run: JevPipelineRun) {
   const token = crypto.randomUUID();
   const now = new Date().toISOString();
   const claimed = await env.DB.prepare(
-    "UPDATE jev_pipeline_runs SET step_token=?,step_started_at=?,updated_at=? WHERE id=? AND phase!='complete' AND (phase!='dates' OR NOT EXISTS(SELECT 1 FROM processing_batch_lease WHERE id=1 AND expires>unixepoch()*1000)) AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
+    "UPDATE jev_pipeline_runs SET step_token=?,step_started_at=?,updated_at=? WHERE id=? AND phase!='complete' AND (phase!='dates' OR NOT EXISTS(SELECT 1 FROM processing_batch_lease WHERE expires>unixepoch()*1000)) AND (step_token IS NULL OR unixepoch(step_started_at)<unixepoch()-300) RETURNING *",
   )
     .bind(token, now, now, run.id)
     .first<JevPipelineRun>();

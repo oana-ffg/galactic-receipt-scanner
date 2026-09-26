@@ -25,6 +25,15 @@ For an explicitly requested continuous, day or overnight run, continue with furt
 batches within the execution budget; ten documents is a checkpoint, not a run limit.
 Stop when the queue is empty or busy.
 
+**The scheduled hourly Luna run is autonomous, including overnight. Its active schedule
+is the standing authorization to run this default batch; never wait for owner action-time
+approval, ask the owner to approve a run, or create/upload/approve a fresh Site connection
+as part of a scheduled invocation. Reuse the configured host `client_config` and its
+secret-manager provider. If that provider or its scoped access is actually unavailable,
+stop before claiming work and follow the failure/reporting path below; do not turn the
+scheduled run into an approval request. Initial provisioning or rotation must be completed
+outside a scheduled run before the automation depends on it.**
+
 Before treating any previous incident as a blocker, read the current
 `.local/receipt-worker/batch-state.json` and relevant worker state/lock evidence.
 That file is the state read and updated by `receipt_batch.py`; automation memory is

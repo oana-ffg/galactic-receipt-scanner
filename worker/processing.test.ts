@@ -1888,3 +1888,371 @@ it("never treats a known conflicting currency or distant known date as a missing
     expect(context.candidates.map((d: any) => d.id)).not.toContain(receipt.id);
   }
 });
+
+async function independentProcessor(letter: string) {
+  const credential = "rsc_" + letter.repeat(43);
+  const hash = Buffer.from(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(credential)),
+  ).toString("hex");
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare(
+      "INSERT INTO agent_connections(id,name,scope,token_sha256,created_at,expires_at,request_hash,envelope) VALUES(?,?,?,?,?,?,?,?)",
+    )
+    .bind(
+      crypto.randomUUID(),
+      "Synthetic concurrent worker",
+      "processing",
+      hash,
+      Date.now(),
+      Date.now() + 86400000,
+      hash,
+      "{}",
+    )
+    .run();
+  return async (path: string, body?: unknown) =>
+    mf.dispatchFetch(origin + path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { Authorization: `Bearer ${credential}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+}
+
+it("processes distinct Luna and Astra documents concurrently through blind reading, submit and PDF attestation", async () => {
+  const old = await capture();
+  const initial = await claim();
+  await ok(
+    "/api/processing/submit",
+    {
+      token: initial.token,
+      model: "gpt-6-luna",
+      extraction: { ...extraction(), certainty: "medium" },
+    },
+    true,
+  );
+  const oldDoc = (await ok(`/api/documents/${old.id}`)).document;
+  const next = await capture();
+  const astra = await independentProcessor("b");
+  const competitor = await independentProcessor("c");
+  const lunaBatch = {
+    op: "acquire",
+    batch_id: "a".repeat(32),
+    owner: "synthetic-luna",
+  };
+  const astraBatch = {
+    op: "acquire",
+    batch_id: "b".repeat(32),
+    owner: "synthetic-astra",
+  };
+  await ok("/api/processing/batch-lease", lunaBatch, true);
+  expect((await astra("/api/processing/batch-lease", astraBatch)).status).toBe(
+    200,
+  );
+  const [smallResponse, largeResponse] = await Promise.all([
+    req("/api/processing/claim", { stage: "small" }, true),
+    astra("/api/processing/claim", {
+      stage: "large",
+      document_id: old.id,
+      revision: oldDoc.revision,
+    }),
+  ]);
+  const small = (await smallResponse.json()).claim;
+  const large = (await largeResponse.json()).claim;
+  expect(small.document.id).toBe(next.id);
+  expect(large.document.id).toBe(old.id);
+  expect((await astra(`/api/documents/${old.id}`)).status).toBe(409);
+  expect((await req(`/api/documents/${next.id}`, undefined, true)).status).toBe(
+    200,
+  );
+  expect(
+    (await req(`/api/processing/context?token=${small.token}`, undefined, true))
+      .status,
+  ).toBe(200);
+  expect(
+    (
+      await competitor("/api/processing/claim", {
+        stage: "large",
+        document_id: old.id,
+        revision: oldDoc.revision,
+      })
+    ).status,
+  ).toBe(200);
+  const blocked = await competitor("/api/processing/claim", {
+    stage: "large",
+    document_id: old.id,
+    revision: oldDoc.revision,
+  });
+  expect((await blocked.json()).claim).toBeNull();
+  const draft = {
+    token: large.token,
+    model: "gpt-6-astra",
+    extraction: extraction(),
+  };
+  expect((await astra("/api/processing/draft", draft)).status).toBe(200);
+  expect(
+    (await astra(`/api/processing/readings?document_id=${old.id}`)).status,
+  ).toBe(200);
+  expect((await astra("/api/processing/submit", draft)).status).toBe(200);
+  const reviewed = (await (await astra(`/api/documents/${old.id}`)).json())
+    .document;
+  const pdf = await mf.dispatchFetch(
+    origin + `/api/documents/${old.id}/pdf?revision=${reviewed.revision}`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${"rsc_" + "b".repeat(43)}` },
+      body: "%PDF-synthetic-concurrent-document",
+    },
+  );
+  expect(pdf.status).toBe(200);
+  const artifact = await pdf.json();
+  expect(
+    (
+      await astra("/api/processing/pdf-review", {
+        document_id: old.id,
+        revision: reviewed.revision,
+        sha256: artifact.sha256,
+        evidence: "All synthetic pages inspected.",
+      })
+    ).status,
+  ).toBe(200);
+  // A submitted result stays reserved until its own batch's final verification.
+  const final = (await (await astra(`/api/documents/${old.id}`)).json())
+    .document;
+  expect(
+    (
+      await (
+        await competitor("/api/processing/claim", {
+          stage: "large",
+          document_id: old.id,
+          revision: final.revision,
+        })
+      ).json()
+    ).claim,
+  ).toBeNull();
+  expect((await req("/api/documents", { documents: [final] })).status).toBe(
+    409,
+  );
+  expect(
+    (
+      await astra("/api/processing/batch-lease", {
+        ...astraBatch,
+        op: "release",
+      })
+    ).status,
+  ).toBe(200);
+  const reclaimed = (
+    await (
+      await competitor("/api/processing/claim", {
+        stage: "large",
+        document_id: old.id,
+        revision: final.revision,
+      })
+    ).json()
+  ).claim;
+  expect(reclaimed.document.id).toBe(old.id);
+  expect(
+    (await competitor("/api/processing/release", { token: reclaimed.token }))
+      .status,
+  ).toBe(200);
+  await ok(
+    "/api/processing/submit",
+    { token: small.token, model: "gpt-6-luna", extraction: extraction() },
+    true,
+  );
+  await ok(
+    "/api/processing/batch-lease",
+    { ...lunaBatch, op: "release" },
+    true,
+  );
+});
+
+it("allows exactly one winner when different connections claim the same document", async () => {
+  const source = await capture();
+  const initial = await claim();
+  await ok(
+    "/api/processing/submit",
+    { token: initial.token, model: "gpt-6-luna", extraction: extraction() },
+    true,
+  );
+  const document = (await ok(`/api/documents/${source.id}`)).document;
+  const other = await independentProcessor("b");
+  const body = {
+    stage: "large",
+    document_id: source.id,
+    revision: document.revision,
+  };
+  const responses = await Promise.all([
+    req("/api/processing/claim", body, true),
+    other("/api/processing/claim", body),
+  ]);
+  const values = await Promise.all(responses.map((r) => r.json()));
+  expect(values.filter((v) => v.claim)).toHaveLength(1);
+  expect(values.filter((v) => v.reason === "busy-or-changed")).toHaveLength(1);
+});
+
+it("isolates concurrent sessions sharing one configured credential", async () => {
+  const old = await capture();
+  const first = await claim();
+  await ok(
+    "/api/processing/submit",
+    { token: first.token, model: "gpt-6-luna", extraction: extraction() },
+    true,
+  );
+  const oldDoc = (await ok(`/api/documents/${old.id}`)).document;
+  const next = await capture();
+  const session = crypto.randomUUID();
+  const astra = (path: string, body?: unknown) =>
+    mf.dispatchFetch(origin + path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Processing-Session": session,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  const lunaBatch = { op: "acquire", batch_id: "a".repeat(32), owner: "luna" };
+  const astraBatch = {
+    op: "acquire",
+    batch_id: "b".repeat(32),
+    owner: "astra",
+  };
+  await ok("/api/processing/batch-lease", lunaBatch, true);
+  const acquired = await (
+    await astra("/api/processing/batch-lease", astraBatch)
+  ).json();
+  expect(acquired.lease.batch_id).toBe(astraBatch.batch_id);
+  const small = await claim();
+  const large = (
+    await (
+      await astra("/api/processing/claim", {
+        stage: "large",
+        document_id: old.id,
+        revision: oldDoc.revision,
+      })
+    ).json()
+  ).claim;
+  expect(small.document.id).toBe(next.id);
+  expect(large.document.id).toBe(old.id);
+  expect((await astra(`/api/documents/${old.id}`)).status).toBe(409);
+  expect((await req(`/api/documents/${next.id}`, undefined, true)).status).toBe(
+    200,
+  );
+  const draft = {
+    token: large.token,
+    model: "gpt-6-astra",
+    extraction: extraction(),
+  };
+  expect((await astra("/api/processing/draft", draft)).status).toBe(200);
+  expect((await astra("/api/processing/submit", draft)).status).toBe(200);
+  await ok(
+    "/api/processing/submit",
+    { token: small.token, model: "gpt-6-luna", extraction: extraction() },
+    true,
+  );
+  expect(
+    (
+      await astra("/api/processing/batch-lease", {
+        ...astraBatch,
+        op: "release",
+      })
+    ).status,
+  ).toBe(200);
+  // Releasing Astra must not release Luna's lease or its completion reservation.
+  expect(
+    (
+      await ok(
+        "/api/processing/batch-lease",
+        { ...lunaBatch, op: "renew" },
+        true,
+      )
+    ).lease.batch_id,
+  ).toBe(lunaBatch.batch_id);
+  const summaries = await ok("/api/documents?summary=1");
+  expect(
+    summaries.documents.find((d: any) => d.id === next.id).processingReserved,
+  ).toBe(true);
+  expect(
+    summaries.documents.find((d: any) => d.id === old.id).processingReserved,
+  ).toBe(false);
+});
+
+it("preserves active legacy claim and batch replay across the additive migration", async () => {
+  const source = await capture();
+  const small = await claim();
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare(
+      "UPDATE processing_lock SET client_sha256=NULL,batch_id=NULL WHERE token=?",
+    )
+    .bind(small.token)
+    .run();
+  const legacy = {
+    op: "acquire",
+    batch_id: "f".repeat(32),
+    owner: "legacy-running-controller",
+  };
+  await db
+    .prepare(
+      "INSERT INTO processing_batch_lease(batch_id,owner,expires,created_at,updated_at) VALUES(?,?,unixepoch()*1000+60000,?,?)",
+    )
+    .bind(
+      legacy.batch_id,
+      legacy.owner,
+      new Date().toISOString(),
+      new Date().toISOString(),
+    )
+    .run();
+  expect(
+    (await ok("/api/processing/batch-lease", legacy, true)).lease.batch_id,
+  ).toBe(legacy.batch_id);
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT client_sha256 FROM processing_batch_lease WHERE batch_id=?",
+        )
+        .bind(legacy.batch_id)
+        .first()
+    ).client_sha256,
+  ).toBeNull();
+  const other = await independentProcessor("b");
+  expect(
+    (
+      await (
+        await other("/api/processing/batch-lease", {
+          ...legacy,
+          batch_id: "b".repeat(32),
+          owner: "other",
+        })
+      ).json()
+    ).reason,
+  ).toBe("busy");
+  await ok("/api/processing/renew", { token: small.token }, true);
+  await ok(
+    "/api/processing/submit",
+    { token: small.token, model: "gpt-6-luna", extraction: extraction() },
+    true,
+  );
+  expect(
+    (await ok(`/api/documents/${source.id}`)).document.processing
+      .small_model_certainty,
+  ).toBe("high");
+  expect(
+    (await ok("/api/processing/batch-lease", { ...legacy, op: "renew" }, true))
+      .lease.batch_id,
+  ).toBe(legacy.batch_id);
+  expect(
+    await ok("/api/processing/batch-lease", { ...legacy, op: "release" }, true),
+  ).toEqual({ released: true });
+  expect(
+    (
+      await (
+        await other("/api/processing/batch-lease", {
+          ...legacy,
+          batch_id: "b".repeat(32),
+          owner: "other",
+        })
+      ).json()
+    ).lease.batch_id,
+  ).toBe("b".repeat(32));
+});

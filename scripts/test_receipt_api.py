@@ -14,6 +14,26 @@ from receipt_api import ScannerClient, ScannerConnectionError, ScannerHTTPError,
 
 
 class ClientTests(unittest.TestCase):
+    def test_session_config_is_nonsecret_and_sent_on_each_request(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        secret = {"origin": "https://scanner.example.test", "sites_token": "synthetic-sites",
+                  "processing_token": "rsc_" + "s" * 43}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"origin": secret["origin"], "credential_command": ["secret-tool"],
+                                        "processing_session": session}))
+            path.chmod(0o600)
+            with patch("receipt_api.provider_credentials", return_value=secret):
+                value = credentials(path)
+            self.assertNotIn("processing_session", secret)
+            client = ScannerClient(value)
+            with patch.object(client, "opener") as opener:
+                opener.open.return_value.__enter__.return_value.read.return_value = b"{}"
+                client.request("/api/processing/access")
+                self.assertEqual(opener.open.call_args.args[0].get_header("X-processing-session"), session)
+        with self.assertRaisesRegex(ClientError, "session must be a UUID"):
+            ScannerClient({**secret, "processing_session": "invalid"})
+
     def test_private_provider_config_loads_secret_without_a_credential_file(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "provider.json"

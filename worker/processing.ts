@@ -1,4 +1,10 @@
 import {
+  processingClient,
+  processingBatch,
+  documentWriteGuard,
+  reserveBatchDocuments,
+} from "./processing-coordination";
+import {
   lunaDraft,
   checkQwen,
   confirmationEvidence,
@@ -38,6 +44,8 @@ import { currentTake } from "./capture-selection";
 type Lock = {
   token: string;
   request_sha256: string | null;
+  client_sha256: string | null;
+  batch_id: string | null;
   stage: "small" | "large";
   document_id: string;
   revision: number;
@@ -64,10 +72,16 @@ const LEASE_MS = 20 * 60 * 1000;
 const BATCH_LEASE_MS = 30 * 60 * 1000;
 const BATCH_ID = /^[0-9a-f]{32}$/;
 const MAX_SUBMITTED_DOCUMENTS = 20;
-async function activeLock(env: Env) {
+async function activeLock(env: Env, token?: unknown) {
   return env.DB.prepare(
-    "SELECT * FROM processing_lock WHERE id=1 AND expires > unixepoch()*1000",
-  ).first<Lock>();
+    "SELECT * FROM processing_lock WHERE expires>unixepoch()*1000" +
+      (token === undefined ? "" : " AND token=?") +
+      " LIMIT 1",
+  )
+    .bind(
+      ...(token === undefined ? [] : [typeof token === "string" ? token : ""]),
+    )
+    .first<Lock>();
 }
 export async function protectBlindParse(request: Request, env: Env) {
   if (!request.headers.has("authorization")) return;
@@ -86,18 +100,18 @@ export async function protectBlindParse(request: Request, env: Env) {
     !/^\/api\/files\/[^/]+\/ocr$/.test(path)
   )
     return;
-  const lock = await activeLock(env);
+  const credential = await processingClient(request);
+  const lock = await env.DB.prepare(
+    "SELECT * FROM processing_lock WHERE expires>unixepoch()*1000 AND (client_sha256=? OR client_sha256 IS NULL) LIMIT 1",
+  )
+    .bind(credential)
+    .first<Lock>();
   if (path === "/api/processing/readings")
     requireThat(
       lock?.stage === "large" && lock.draft !== null,
       409,
       "Reading history requires an active Astra review with a saved independent draft.",
     );
-  requireThat(
-    !lock || request.method !== "POST",
-    409,
-    "Use the leased processing submission to change documents while a worker is active.",
-  );
   requireThat(
     !lock || lock.stage !== "large" || lock.draft !== null,
     409,
@@ -157,6 +171,8 @@ async function claimCandidateRows(
            OR page.capture_id=json_extract(v.payload,'$.pages[0].captureId'))
          AND json_extract(v.payload,'$.mergedInto') IS NULL
          AND json_extract(v.payload,'$.duplicateOf') IS NULL
+         AND NOT EXISTS(SELECT 1 FROM processing_lock l WHERE l.document_id=COALESCE(page.document_id,captures.id) AND l.expires>unixepoch()*1000)
+         AND NOT EXISTS(SELECT 1 FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id=COALESCE(page.document_id,captures.id) AND b.expires>unixepoch()*1000)
          AND ${eligibility}
          AND (page.capture_id IS NULL OR EXISTS (
            SELECT 1 FROM document_pages member
@@ -363,16 +379,29 @@ async function save(
   statements: D1PreparedStatement[],
   loadCapture?: (id: string) => Promise<Capture | null>,
   loadSelectedCaptures?: (ids: string[]) => Promise<Capture[]>,
+  lock?: Lock,
 ) {
   return (await documentRoute(
     new Request(new URL("/api/documents", request.url), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: request.headers,
       body: JSON.stringify({ documents }),
     }),
     env,
     load,
-    { statements, trustedProcessing: true },
+    {
+      statements: [
+        ...statements,
+        ...reserveBatchDocuments(
+          env,
+          documents.map((d) => d.id),
+          lock?.batch_id ?? null,
+        ),
+      ],
+      trustedProcessing: true,
+      processingToken: lock?.token,
+      batchId: lock?.batch_id,
+    },
     loadCapture,
     loadSelectedCaptures,
   ))!;
@@ -423,7 +452,7 @@ export async function processingRoute(
       "Finish the active model claim before queueing a reparse.",
     );
     const lease = await env.DB.prepare(
-      "SELECT batch_id FROM processing_batch_lease WHERE id=1 AND expires>unixepoch()*1000",
+      "SELECT batch_id FROM processing_batch_lease WHERE expires>unixepoch()*1000",
     ).first();
     requireThat(
       !lease,
@@ -976,7 +1005,7 @@ export async function processingRoute(
     };
     if (priorRequest) {
       const existing = await env.DB.prepare(
-        "SELECT * FROM processing_lock WHERE id=1 AND token=? AND request_sha256=? AND stage=? AND expires>unixepoch()*1000",
+        "SELECT * FROM processing_lock WHERE token=? AND request_sha256=? AND stage=? AND expires>unixepoch()*1000",
       )
         .bind(requestedToken, requestSha256, input.stage)
         .first<Lock>();
@@ -1115,25 +1144,45 @@ export async function processingRoute(
       return json({ claim: null, reason: "queue-empty" });
     }
     const token = requestedToken ?? crypto.randomUUID();
-    // Exactly one document lease across both stages. The head predicate rejects stale selection.
-    const result = await env.DB.prepare(
-      `INSERT INTO processing_lock(id,token,request_sha256,stage,document_id,revision,expires,draft)
-      SELECT 1,?,?,?,?,?,unixepoch()*1000+?,NULL WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=? AND (?=1 OR EXISTS(SELECT 1 FROM jev_document_heads WHERE document_id=?)) AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
-      ON CONFLICT(id) DO UPDATE SET token=excluded.token,request_sha256=excluded.request_sha256,stage=excluded.stage,document_id=excluded.document_id,revision=excluded.revision,expires=excluded.expires,draft=NULL WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
-    )
-      .bind(
+    const credential = await processingClient(request);
+    const batchId = await processingBatch(request, env);
+    // Both selection and acquisition exclude reservations; the SQL predicate is
+    // authoritative when another worker wins between these two operations.
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO processing_lock(token,request_sha256,stage,document_id,revision,expires,draft,client_sha256,batch_id)
+        SELECT ?,?,?,?,?,unixepoch()*1000+?,NULL,?,?
+        WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=?
+        AND (?=1 OR EXISTS(SELECT 1 FROM jev_document_heads WHERE document_id=?))
+        AND NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
+        AND NOT EXISTS(SELECT 1 FROM processing_lock WHERE expires>unixepoch()*1000 AND (client_sha256=? OR client_sha256 IS NULL))
+        AND NOT EXISTS(SELECT 1 FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id=? AND b.expires>unixepoch()*1000)
+        ON CONFLICT(document_id) DO UPDATE SET token=excluded.token,request_sha256=excluded.request_sha256,stage=excluded.stage,revision=excluded.revision,expires=excluded.expires,draft=NULL,client_sha256=excluded.client_sha256,batch_id=excluded.batch_id
+        WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
+      ).bind(
         token,
         requestSha256,
         input.stage,
         d.id,
         d.revision,
         LEASE_MS,
+        credential,
+        batchId,
         d.id,
         d.revision,
         targeted ? 1 : 0,
         d.id,
-      )
-      .first<{ token: string; expires: number }>();
+        credential,
+        d.id,
+      ),
+      env.DB.prepare(
+        `INSERT INTO processing_batch_documents(document_id,batch_id)
+        SELECT document_id,batch_id FROM processing_lock WHERE token=? AND batch_id IS NOT NULL
+        ON CONFLICT(document_id) DO UPDATE SET batch_id=excluded.batch_id`,
+      ).bind(token),
+    ]);
+    const result = results[0].results[0] as
+      { token: string; expires: number } | undefined;
     if (!result) {
       if (requestedToken)
         await env.DB.prepare(
@@ -1146,6 +1195,8 @@ export async function processingRoute(
     const lock = {
       token,
       request_sha256: requestSha256,
+      client_sha256: credential,
+      batch_id: batchId,
       stage: input.stage,
       document_id: d.id,
       revision: d.revision,
@@ -1180,7 +1231,7 @@ export async function processingRoute(
     );
     if (op === "release") {
       const released = await env.DB.prepare(
-        "DELETE FROM processing_batch_lease WHERE id=1 AND batch_id=? AND owner=? RETURNING batch_id",
+        "DELETE FROM processing_batch_lease WHERE batch_id=? AND owner=? RETURNING batch_id",
       )
         .bind(input.batch_id, input.owner)
         .first<{ batch_id: string }>();
@@ -1189,7 +1240,7 @@ export async function processingRoute(
     const now = new Date().toISOString();
     if (op === "renew") {
       const renewed = await env.DB.prepare(
-        "UPDATE processing_batch_lease SET expires=unixepoch()*1000+?,updated_at=? WHERE id=1 AND batch_id=? AND owner=? AND expires>unixepoch()*1000 RETURNING expires",
+        "UPDATE processing_batch_lease SET expires=unixepoch()*1000+?,updated_at=? WHERE batch_id=? AND owner=? AND expires>unixepoch()*1000 RETURNING expires",
       )
         .bind(BATCH_LEASE_MS, now, input.batch_id, input.owner)
         .first<{ expires: number }>();
@@ -1202,13 +1253,24 @@ export async function processingRoute(
     let acquired: { expires: number } | null;
     try {
       acquired = await env.DB.prepare(
-        `INSERT INTO processing_batch_lease(id,batch_id,owner,expires,created_at,updated_at)
-       SELECT 1,?,?,unixepoch()*1000+?,?,? WHERE NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
-       ON CONFLICT(id) DO UPDATE SET batch_id=excluded.batch_id,owner=excluded.owner,expires=excluded.expires,created_at=excluded.created_at,updated_at=excluded.updated_at
-       WHERE processing_batch_lease.expires<=unixepoch()*1000 OR (processing_batch_lease.batch_id=excluded.batch_id AND processing_batch_lease.owner=excluded.owner)
+        `INSERT INTO processing_batch_lease(batch_id,owner,expires,created_at,updated_at,client_sha256)
+       SELECT ?,?,unixepoch()*1000+?,?,?,?
+       WHERE NOT EXISTS(SELECT 1 FROM jev_pipeline_runs WHERE phase!='complete' AND step_token IS NOT NULL)
+       AND NOT EXISTS(SELECT 1 FROM processing_batch_lease WHERE expires>unixepoch()*1000 AND batch_id!=? AND (client_sha256=? OR client_sha256 IS NULL))
+       ON CONFLICT(batch_id) DO UPDATE SET expires=excluded.expires,updated_at=excluded.updated_at
+       WHERE processing_batch_lease.owner=excluded.owner AND (processing_batch_lease.client_sha256 IS NULL OR processing_batch_lease.client_sha256=excluded.client_sha256)
        RETURNING expires`,
       )
-        .bind(input.batch_id, input.owner, BATCH_LEASE_MS, now, now)
+        .bind(
+          input.batch_id,
+          input.owner,
+          BATCH_LEASE_MS,
+          now,
+          now,
+          await processingClient(request),
+          input.batch_id,
+          await processingClient(request),
+        )
         .first<{ expires: number }>();
     } catch (error) {
       // This statement has no receipt fields or text. Preserve its database
@@ -1278,11 +1340,6 @@ export async function processingRoute(
       403,
       "Use scoped machine credentials for PDF attestation.",
     );
-    requireThat(
-      !(await activeLock(env)),
-      409,
-      "Finish the active model claim before confirming a PDF.",
-    );
     const input = await bodyJson(request);
     const doc = await storedDocumentById(env, String(input.document_id ?? ""));
     requireThat(
@@ -1308,6 +1365,7 @@ export async function processingRoute(
     return (await documentRoute(
       new Request(new URL("/api/documents", request.url), {
         method: "POST",
+        headers: request.headers,
         body: JSON.stringify({ documents: [doc] }),
       }),
       env,
@@ -1391,7 +1449,7 @@ export async function processingRoute(
       "Choose a page and explain the rejected match.",
     );
     // Machine detach is only allowed after the independent Astra parse checkpoint.
-    const lock = await activeLock(env);
+    const lock = await activeLock(env, input.token);
     if (request.headers.has("authorization"))
       requireThat(
         lock &&
@@ -1470,6 +1528,7 @@ export async function processingRoute(
       statements,
       loadCapture,
       loadSelectedCaptures,
+      lock ?? undefined,
     );
   }
   requireThat(
@@ -1578,7 +1637,7 @@ export async function processingRoute(
       });
     }
   }
-  const lock = await activeLock(env);
+  const lock = await activeLock(env, input.token);
   requireThat(
     lock && lock.token === input.token,
     409,
@@ -1594,9 +1653,14 @@ export async function processingRoute(
     return json(result);
   }
   if (path === "/api/processing/release" && method === "POST") {
-    await env.DB.prepare("UPDATE processing_lock SET expires=0 WHERE token=?")
-      .bind(lock.token)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE processing_lock SET expires=0 WHERE token=?").bind(
+        lock.token,
+      ),
+      env.DB.prepare(
+        "DELETE FROM processing_batch_documents WHERE document_id=? AND batch_id=?",
+      ).bind(lock.document_id, lock.batch_id),
+    ]);
     return json({ released: true });
   }
   if (path === "/api/processing/draft" && method === "POST") {
@@ -1635,7 +1699,22 @@ export async function processingRoute(
     }
     try {
       await env.DB.batch([
+        documentWriteGuard(
+          env,
+          lock.stage === "small"
+            ? (frozen as LunaDraft).documents.map((d) => d.id)
+            : [lock.document_id],
+          lock.token,
+          lock.batch_id,
+        ),
         leaseGuard(env, lock, ":draft"),
+        ...reserveBatchDocuments(
+          env,
+          lock.stage === "small"
+            ? (frozen as LunaDraft).documents.map((d) => d.id)
+            : [lock.document_id],
+          lock.batch_id,
+        ),
         env.DB.prepare(
           "INSERT INTO processing_drafts(token,document_id,revision,model,payload,created_at) VALUES(?,?,?,?,?,?)",
         ).bind(
@@ -2135,6 +2214,7 @@ export async function processingRoute(
       statements,
       loadCapture,
       loadSelectedCaptures,
+      lock,
     );
   }
   throw new HttpError(404, "Processing route not found.");

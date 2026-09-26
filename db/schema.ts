@@ -204,16 +204,29 @@ export const purchaseCategoryRevisions = sqliteTable(
     ),
   ],
 );
-export const processingLock = sqliteTable("processing_lock", {
-  id: integer("id").primaryKey(),
-  token: text("token").notNull(),
-  request_sha256: text("request_sha256"),
-  stage: text("stage").notNull(),
-  document_id: text("document_id").notNull(),
-  revision: integer("revision").notNull(),
-  expires: integer("expires").notNull(),
-  draft: text("draft"),
-});
+export const processingLock = sqliteTable(
+  "processing_lock",
+  {
+    id: integer("id").primaryKey(),
+    token: text("token").notNull(),
+    request_sha256: text("request_sha256"),
+    client_sha256: text("client_sha256"),
+    batch_id: text("batch_id"),
+    stage: text("stage").notNull(),
+    document_id: text("document_id").notNull().unique(),
+    revision: integer("revision").notNull(),
+    expires: integer("expires").notNull(),
+    draft: text("draft"),
+  },
+  (table) => [
+    uniqueIndex("processing_lock_token_unique").on(table.token),
+    index("processing_lock_client_expires").on(
+      table.client_sha256,
+      table.expires,
+    ),
+    index("processing_lock_expires").on(table.expires),
+  ],
+);
 export const processingClaimRequests = sqliteTable(
   "processing_claim_requests",
   {
@@ -226,14 +239,32 @@ export const processingClaimRequests = sqliteTable(
     created_at: text("created_at").notNull(),
   },
 );
-export const processingBatchLease = sqliteTable("processing_batch_lease", {
-  id: integer("id").primaryKey(),
-  batch_id: text("batch_id").notNull().unique(),
-  owner: text("owner").notNull(),
-  expires: integer("expires").notNull(),
-  created_at: text("created_at").notNull(),
-  updated_at: text("updated_at").notNull(),
-});
+export const processingBatchLease = sqliteTable(
+  "processing_batch_lease",
+  {
+    id: integer("id").primaryKey(),
+    batch_id: text("batch_id").notNull().unique(),
+    owner: text("owner").notNull(),
+    client_sha256: text("client_sha256"),
+    expires: integer("expires").notNull(),
+    created_at: text("created_at").notNull(),
+    updated_at: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("processing_batch_client_expires").on(
+      table.client_sha256,
+      table.expires,
+    ),
+    index("processing_batch_expires").on(table.expires),
+  ],
+);
+export const processingBatchDocuments = sqliteTable(
+  "processing_batch_documents",
+  {
+    document_id: text("document_id").primaryKey(),
+    batch_id: text("batch_id").notNull(),
+  },
+);
 export const processingBatchLeaseEvents = sqliteTable(
   "processing_batch_lease_events",
   {

@@ -306,8 +306,10 @@ print(json.dumps({
 Use the current document revision for attestation. `document.pdf.revision` identifies
 the artifact version and can differ after a later attestation increments the document.
 Read/write hashes from JSON variables; never retype one from model text. An attestation
-request file alone is not proof of success. Do not start another worker before this
-phase finishes: PDF attestation rejects an active model claim, even for a different document.
+request file alone is not proof of success. Do not start another worker in this batch before this phase finishes. Other batches may
+process different documents; a claim or reservation on this document blocks attestation.
+Keep the same private client config (including `processing_session`, when supplied) through
+claim, PDF upload, attestation and final verification.
 
 ## Lease and recovery
 
