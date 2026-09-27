@@ -36,8 +36,16 @@ test("copies saved receipt details, reopens filtered documents and recovers from
     )
       writes.push(request.url());
   });
-  await page.route("**/api/documents", (route) =>
-    route.fulfill({ json: { documents: [doc], captures: [capture, second] } }),
+  await page.route("**/api/documents?*", (route) => {
+    const url = new URL(route.request().url());
+    const documents =
+      url.searchParams.get("model") === "astra"
+        ? []
+        : [{ ...doc, pageIds: doc.pages.map((item) => item.captureId) }];
+    return route.fulfill({ json: { documents, next: null } });
+  });
+  await page.route(`**/api/documents/${doc.id}`, (route) =>
+    route.fulfill({ json: { document: doc, captures: [capture, second] } }),
   );
   await page.route("**/api/processing/categories", (route) =>
     route.fulfill({ json: [] }),

@@ -239,9 +239,6 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
     page.getByRole("heading", { name: "Receipt review", exact: true }),
   ).toBeVisible();
   await expect(page.locator("#review-counts")).toContainText(
-    "3 awaiting processing",
-  );
-  await expect(page.locator("#review-counts")).toContainText(
     "0 documents in current list",
   );
   await expect(page.locator("#review-list button")).toHaveCount(0);

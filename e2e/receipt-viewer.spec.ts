@@ -4,7 +4,7 @@ import { test, expect } from "@playwright/test";
 import { newDocument, type DocumentView } from "../web/documents";
 import type { Capture } from "../web/types";
 import type { Extraction } from "../web/extraction";
-import type { SavedReading } from "../web/review-values";
+import { matchesReviewFilters, type SavedReading } from "../web/review-values";
 
 const extraction: Extraction = {
   type: "receipt",
@@ -235,6 +235,28 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       },
     }),
   );
+  await page.route("**/api/documents?*", (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const view = params.get("view") ?? "all";
+    const documents = docs
+      .filter((doc) =>
+        view === "human-reviewed"
+          ? doc.processing?.has_human_review
+          : !doc.processing?.has_human_review &&
+            matchesReviewFilters(
+              doc,
+              params.get("confidence") ?? "low-medium",
+              params.get("model") ?? "astra",
+              params.get("human") ?? "pending",
+            ) &&
+            (view === "all" || doc.status === view),
+      )
+      .map((doc) => ({
+        ...doc,
+        pageIds: doc.pages.map((item) => item.captureId),
+      }));
+    return route.fulfill({ json: { documents, next: null } });
+  });
   await page.route("**/api/documents", (route) =>
     route.fulfill({ json: { documents: docs, captures } }),
   );

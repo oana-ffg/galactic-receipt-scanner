@@ -16,6 +16,40 @@ import { scanCrop } from "./receipt-crop";
 export class OcrPendingError extends Error {}
 
 export const readDocuments = () => api<DocumentCatalog>("/api/documents");
+export interface DocumentSummary {
+  id: string;
+  revision: number;
+  vendor: string | null;
+  receiptDate: string | null;
+  reference: string | null;
+  kind: ReceiptDocument["kind"];
+  jevRole: string | null;
+  completenessAudit: DocumentView["completenessAudit"];
+  sourceInterventionFine: boolean;
+  status: DocumentView["status"];
+  reasons: string[];
+  pageIds: string[];
+  scannedAt: string[];
+  processing: null | {
+    has_human_review: boolean;
+    needs_reparse: boolean;
+    luna_needs_human_review: boolean;
+    small_model_certainty: string | null;
+    large_model_confidence: string | null;
+  };
+  duplicateOf: string | null;
+  filename: string | null;
+  pdf: DocumentView["pdf"];
+}
+export interface DocumentSummaryPage {
+  documents: DocumentSummary[];
+  next: string | null;
+  total?: number;
+}
+export function readDocumentSummaries(params: URLSearchParams) {
+  params.set("summary", "1");
+  return api<DocumentSummaryPage>(`/api/documents?${params}`);
+}
 export const readDocument = (id: string) =>
   api<{ document: DocumentView; captures: Capture[] }>(
     `/api/documents/${encodeURIComponent(id)}`,

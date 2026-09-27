@@ -18,11 +18,13 @@ import {
   filenameBase,
   newDocument,
   needsSourceIntervention,
+  pendingSourceIntervention,
   completenessUncertain,
   validDate,
   type ReceiptDocument,
   type DocumentView,
 } from "../web/documents";
+import { matchesReviewFilters } from "../web/review-values";
 import {
   bodyJson,
   bytes,
@@ -35,6 +37,44 @@ import {
 
 const HASH = /^[a-f0-9]{64}$/;
 export const MAX_DOCUMENT_CHANGES = 100;
+function reviewListMatches(
+  document: DocumentView,
+  view: string,
+  confidence: string,
+  model: string,
+  human: string,
+): boolean {
+  if (view === "human-reviewed") return !!document.processing?.has_human_review;
+  if (view !== "all" && document.processing?.has_human_review) return false;
+  const special = [
+    "source-intervention",
+    "scan-review",
+    "luna-reparse",
+    "non-receipt",
+  ].includes(view);
+  if (!special && !matchesReviewFilters(document, confidence, model, human))
+    return false;
+  if (view === "source-intervention")
+    return pendingSourceIntervention(document);
+  if (view === "scan-review") return completenessUncertain(document);
+  if (view === "luna-reparse") return !!document.processing?.needs_reparse;
+  if (view === "non-receipt")
+    return (
+      ["payment-slip", "atm", "note", "other", "not-receipt"].includes(
+        document.kind,
+      ) ||
+      [
+        "payment_evidence_only",
+        "account_record",
+        "cash_withdrawal",
+        "misc",
+      ].includes(document.jevRole ?? "") ||
+      document.completenessAudit?.result === "not_receipt"
+    );
+  if (view === "attention")
+    return ["review", "broken"].includes(document.status);
+  return view === "all" || document.status === view;
+}
 type FileRow = {
   key: string;
   document_id: string;
@@ -401,16 +441,32 @@ export async function documentRoute(
   const summaryLimit =
     request.method === "GET" &&
     url.pathname === "/api/documents" &&
-    url.searchParams.get("summary") === "1" &&
-    !url.searchParams.get("q")
+    url.searchParams.get("summary") === "1"
       ? Number(url.searchParams.get("limit") ?? 50)
       : null;
   const searchQuery =
     request.method === "GET" &&
     url.pathname === "/api/documents" &&
     url.searchParams.get("summary") === "1"
-      ? (url.searchParams.get("q") ?? "").toLowerCase()
+      ? (url.searchParams.get("q") ?? "").trim().toLowerCase()
       : "";
+  requireThat(
+    searchQuery.length <= 200,
+    400,
+    "Search is limited to 200 characters.",
+  );
+  requireThat(
+    !searchQuery ||
+      [...searchQuery].length >= 3 ||
+      !/[^\x00-\x7f]/.test(searchQuery),
+    400,
+    "Use at least three characters when searching non-ASCII text.",
+  );
+  const reviewer = url.searchParams.get("review") === "1";
+  const reviewView = url.searchParams.get("view") ?? "all";
+  const reviewConfidence = url.searchParams.get("confidence") ?? "low-medium";
+  const reviewModel = url.searchParams.get("model") ?? "astra";
+  const reviewHuman = url.searchParams.get("human") ?? "pending";
   const scopedPost =
     request.method === "POST" &&
     url.pathname === "/api/documents" &&
@@ -420,6 +476,21 @@ export async function documentRoute(
   let captures: Capture[];
   let stored: ReceiptDocument[];
   let summaryPage: { total: number; next: string | null } | null = null;
+  let preloadedNames: Promise<Awaited<ReturnType<typeof names>>> | null = null;
+  let preloadedReviewState: ReturnType<typeof loadCompletenessAudits> | null =
+    null;
+  let preloadedFileRows: Promise<FileRow[]> | null = null;
+  async function fetchFileRows(documentIds?: string[]): Promise<FileRow[]> {
+    return (
+      await measureQuery("pdf_records", () =>
+        env.DB.prepare(
+          `SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ${documentIds ? `WHERE f.document_id IN (${documentIds.map(() => "?").join(",")})` : ""} ORDER BY f.created_at DESC,f.sha256 DESC`,
+        )
+          .bind(...(documentIds ?? []))
+          .all<FileRow>(),
+      )
+    ).results;
+  }
   if (scopedPost) {
     const changes = scopedPost.documents;
     requireThat(
@@ -476,44 +547,6 @@ export async function documentRoute(
       ]),
     ];
     captures = await loadSelectedCaptures!(sourceIds);
-  } else if (searchQuery && loadSelectedCaptures) {
-    const limit = Number(url.searchParams.get("limit") ?? 50);
-    requireThat(
-      Number.isInteger(limit) && limit >= 1 && limit <= 100,
-      400,
-      "Use 1 to 100 summaries per page.",
-    );
-    const after = url.searchParams.get("after") ?? "";
-    const matches = (await storedDocuments(env))
-      .filter(
-        (document) =>
-          !document.mergedInto &&
-          `${document.vendor ?? ""} ${document.receiptDate ?? ""} ${document.reference ?? ""} ${document.text} ${document.uncertainties.join(" ")}`
-            .toLowerCase()
-            .includes(searchQuery),
-      )
-      .sort((left, right) => left.id.localeCompare(right.id));
-    const page = matches
-      .filter((document) => document.id > after)
-      .slice(0, limit + 1);
-    stored = page.slice(0, limit);
-    const ids = [
-      ...new Set(
-        stored.flatMap((document) =>
-          document.pages.map((item) => item.captureId),
-        ),
-      ),
-    ];
-    captures = await loadSelectedCaptures(ids);
-    requireThat(
-      captures.length === ids.length,
-      503,
-      "A selected document page is unavailable.",
-    );
-    summaryPage = {
-      total: matches.length,
-      next: page.length > limit ? stored.at(-1)!.id : null,
-    };
   } else if (summaryLimit !== null && loadSelectedCaptures) {
     requireThat(
       Number.isInteger(summaryLimit) &&
@@ -523,36 +556,121 @@ export async function documentRoute(
       "Use 1 to 100 summaries per page.",
     );
     const after = url.searchParams.get("after") ?? "";
+    const indexedSearch = [...searchQuery].length >= 3;
+    const searchSql = searchQuery
+      ? ` AND (${indexedSearch ? "h.rowid IN (SELECT rowid FROM document_search WHERE document_search MATCH ?)" : "instr(lower(v.payload),?)>0"} OR h.id IN (SELECT document_id FROM document_names WHERE instr(lower(filename),?)>0))`
+      : "";
+    const searchArgs = searchQuery
+      ? [
+          indexedSearch
+            ? `"${searchQuery.replaceAll('"', '""')}"`
+            : searchQuery,
+          searchQuery,
+        ]
+      : [];
+    const specialView = [
+      "source-intervention",
+      "scan-review",
+      "luna-reparse",
+      "non-receipt",
+      "human-reviewed",
+    ].includes(reviewView);
+    const reviewWhere: string[] = [];
+    const reviewArgs: (string | number)[] = [];
+    if (reviewer) {
+      if (
+        reviewView === "human-reviewed" ||
+        (reviewView === "all" && reviewHuman === "reviewed")
+      )
+        reviewWhere.push(
+          "json_extract(v.payload,'$.processing.has_human_review')=1",
+        );
+      else if (reviewView !== "all" || reviewHuman === "pending")
+        reviewWhere.push(
+          "coalesce(json_extract(v.payload,'$.processing.has_human_review'),0)=0",
+        );
+      if (reviewView === "luna-reparse")
+        reviewWhere.push(
+          "json_extract(v.payload,'$.processing.needs_reparse')=1",
+        );
+      if (reviewView === "duplicate")
+        reviewWhere.push("json_extract(v.payload,'$.duplicateOf') IS NOT NULL");
+      if (!specialView) {
+        const astra =
+          "json_extract(v.payload,'$.processing.large_model_confidence')";
+        const luna =
+          "json_extract(v.payload,'$.processing.small_model_certainty')";
+        if (reviewHuman === "reviewed" && reviewView !== "all")
+          reviewWhere.push("1=0");
+        if (reviewModel === "astra") reviewWhere.push(`${astra} IS NOT NULL`);
+        if (reviewModel === "luna") reviewWhere.push(`${luna} IS NOT NULL`);
+        if (reviewModel === "luna-only")
+          reviewWhere.push(`${luna} IS NOT NULL`, `${astra} IS NULL`);
+        if (reviewModel === "none")
+          reviewWhere.push(`${luna} IS NULL`, `${astra} IS NULL`);
+        const certainty =
+          reviewModel === "luna" || reviewModel === "luna-only"
+            ? luna
+            : `coalesce(${astra},${luna})`;
+        if (reviewConfidence === "low-medium")
+          reviewWhere.push(`${certainty} IN ('low','medium')`);
+        else if (reviewConfidence === "unknown")
+          reviewWhere.push(`${certainty} IS NULL`);
+        else if (["low", "medium", "high"].includes(reviewConfidence)) {
+          reviewWhere.push(`${certainty}=?`);
+          reviewArgs.push(reviewConfidence);
+        }
+      }
+    }
+    const reviewSql = reviewWhere.length
+      ? ` AND ${reviewWhere.join(" AND ")}`
+      : "";
+    const includeVirtual =
+      !searchQuery &&
+      (!reviewer ||
+        (reviewView !== "human-reviewed" &&
+          reviewHuman !== "reviewed" &&
+          (specialView ||
+            ((reviewModel === "none" || reviewModel === "all") &&
+              ["all", "unknown"].includes(reviewConfidence)))));
     const [savedRows, virtualRows, savedCount, virtualCount] =
       await Promise.all([
         env.DB.prepare(
           `SELECT h.id,v.payload FROM document_heads h
          JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
-         WHERE h.id>? AND json_extract(v.payload,'$.mergedInto') IS NULL
+         WHERE h.id>? AND json_extract(v.payload,'$.mergedInto') IS NULL${searchSql}${reviewSql}
          ORDER BY h.id LIMIT ?`,
         )
-          .bind(after, summaryLimit + 1)
+          .bind(after, ...searchArgs, ...reviewArgs, summaryLimit + 1)
           .all<{ id: string; payload: string }>(),
-        env.DB.prepare(
-          `SELECT captures.id FROM captures
+        includeVirtual
+          ? env.DB.prepare(
+              `SELECT captures.id FROM captures
          LEFT JOIN document_pages page ON page.capture_id=captures.id
          LEFT JOIN document_heads saved ON saved.id=captures.id
          WHERE captures.id>? AND page.capture_id IS NULL AND saved.id IS NULL
            AND (${currentTake}) ORDER BY captures.id LIMIT ?`,
-        )
-          .bind(after, summaryLimit + 1)
-          .all<{ id: string }>(),
-        env.DB.prepare(
-          `SELECT COUNT(*) AS total FROM document_heads h
+            )
+              .bind(after, summaryLimit + 1)
+              .all<{ id: string }>()
+          : Promise.resolve({ results: [] as { id: string }[] }),
+        reviewer
+          ? Promise.resolve({ total: 0 })
+          : env.DB.prepare(
+              `SELECT COUNT(*) AS total FROM document_heads h
          JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
-         WHERE json_extract(v.payload,'$.mergedInto') IS NULL`,
-        ).first<{ total: number }>(),
-        env.DB.prepare(
-          `SELECT COUNT(*) AS total FROM captures
+         WHERE json_extract(v.payload,'$.mergedInto') IS NULL${searchSql}${reviewSql}`,
+            )
+              .bind(...searchArgs, ...reviewArgs)
+              .first<{ total: number }>(),
+        !reviewer && includeVirtual
+          ? env.DB.prepare(
+              `SELECT COUNT(*) AS total FROM captures
          LEFT JOIN document_pages page ON page.capture_id=captures.id
          LEFT JOIN document_heads saved ON saved.id=captures.id
          WHERE page.capture_id IS NULL AND saved.id IS NULL AND (${currentTake})`,
-        ).first<{ total: number }>(),
+            ).first<{ total: number }>()
+          : Promise.resolve({ total: 0 }),
       ]);
     const ordered = [
       ...savedRows.results.map((row) => ({ ...row, virtual: false })),
@@ -608,6 +726,17 @@ export async function documentRoute(
         saved.pages.some((item) => item.captureId === sourceId))
     ) {
       stored = [saved];
+      if (single) {
+        preloadedNames = measureQuery("filename_reservations", () =>
+          names(env, [saved]),
+        );
+        preloadedFileRows = fetchFileRows([saved.id]);
+        preloadedReviewState = loadCompletenessAudits(
+          env,
+          [saved],
+          profile ? measureQuery : undefined,
+        );
+      }
       const selected = await Promise.all(
         saved.pages.map((item) =>
           measureQuery("capture", () => loadCapture(item.captureId)),
@@ -666,11 +795,16 @@ export async function documentRoute(
   let jevRoles = new Map<string, string>();
   let sourceDecisions = new Map<string, boolean>();
   const loadReviewState = async (selected: ReceiptDocument[]) => {
-    const state = await loadCompletenessAudits(
-      env,
-      selected,
-      profile ? measureQuery : undefined,
-    );
+    const state =
+      preloadedReviewState &&
+      selected.length === 1 &&
+      selected[0].id === stored[0]?.id
+        ? await preloadedReviewState
+        : await loadCompletenessAudits(
+            env,
+            selected,
+            profile ? measureQuery : undefined,
+          );
     completenessAudits = state.audits;
     jevRoles = state.roles;
     sourceDecisions = state.sourceDecisions;
@@ -689,12 +823,14 @@ export async function documentRoute(
         ),
       ]
     : docs;
-  const reserved =
+  const reservedPromise =
     namedAction?.[2] === "history"
-      ? []
-      : await measureQuery("filename_reservations", () =>
+      ? Promise.resolve([] as Awaited<ReturnType<typeof names>>)
+      : (preloadedNames ??
+        measureQuery("filename_reservations", () =>
           names(env, nameCandidates),
-        );
+        ));
+  let reserved: Awaited<ReturnType<typeof names>> = [];
   let fileRows: FileRow[] = [];
   let filesLoaded = false;
   const loadFileRows = async (documentIds?: string[]) => {
@@ -703,15 +839,12 @@ export async function documentRoute(
       filesLoaded = true;
       return;
     }
-    fileRows = (
-      await measureQuery("pdf_records", () =>
-        env.DB.prepare(
-          `SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ${documentIds ? `WHERE f.document_id IN (${documentIds.map(() => "?").join(",")})` : ""} ORDER BY f.created_at DESC,f.sha256 DESC`,
-        )
-          .bind(...(documentIds ?? []))
-          .all<FileRow>(),
-      )
-    ).results;
+    fileRows =
+      preloadedFileRows &&
+      documentIds?.length === 1 &&
+      documentIds[0] === stored[0]?.id
+        ? await preloadedFileRows
+        : await fetchFileRows(documentIds);
     filesLoaded = true;
   };
   function currentPdf(d: ReceiptDocument, filename: string | null) {
@@ -847,6 +980,7 @@ export async function documentRoute(
       .run();
     return json({ sourceInterventionFine: decision === "fine" });
   }
+  if (!single) reserved = await reservedPromise;
   if (request.method === "GET") {
     const single = url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})$/);
     const sourceId = url.searchParams.get("captureId");
@@ -857,8 +991,12 @@ export async function documentRoute(
           : d.pages.some((p) => p.captureId === sourceId),
       );
       requireThat(doc, 404, "Document not found.");
-      await loadFileRows([doc.id]);
-      await loadReviewState([doc]);
+      const [names] = await Promise.all([
+        reservedPromise,
+        loadFileRows([doc.id]),
+        loadReviewState([doc]),
+      ]);
+      reserved = names;
       const response = json({
         document: view(doc),
         captures: captures.filter((c) =>
@@ -882,81 +1020,84 @@ export async function documentRoute(
           400,
           "Use 1 to 100 summaries per page.",
         );
-        const query = (url.searchParams.get("q") ?? "").toLowerCase();
-        const after = url.searchParams.get("after") ?? "";
-        const matches = docs
-          .filter(
-            (d) =>
-              !d.mergedInto &&
-              `${d.vendor ?? ""} ${d.receiptDate ?? ""} ${d.reference ?? ""} ${d.text} ${d.uncertainties.join(" ")}`
-                .toLowerCase()
-                .includes(query),
-          )
-          .sort((a, b) => a.id.localeCompare(b.id));
-        const page = summaryPage
-          ? matches
-          : matches.filter((d) => d.id > after).slice(0, limit + 1);
-        await loadFileRows(page.slice(0, limit).map((document) => document.id));
-        await loadReviewState(page.slice(0, limit));
-        const reserved = await env.DB.prepare(
-          `SELECT document_id FROM processing_lock WHERE document_id IN (SELECT value FROM json_each(?)) AND expires>unixepoch()*1000
+        const page = docs.sort((a, b) => a.id.localeCompare(b.id));
+        await Promise.all([
+          loadFileRows(page.slice(0, limit).map((document) => document.id)),
+          loadReviewState(page.slice(0, limit)),
+        ]);
+        const reserved = reviewer
+          ? { results: [] as { document_id: string }[] }
+          : await env.DB.prepare(
+              `SELECT document_id FROM processing_lock WHERE document_id IN (SELECT value FROM json_each(?)) AND expires>unixepoch()*1000
           UNION SELECT r.document_id FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id IN (SELECT value FROM json_each(?)) AND b.expires>unixepoch()*1000`,
-        )
-          .bind(
-            JSON.stringify(page.slice(0, limit).map((d) => d.id)),
-            JSON.stringify(page.slice(0, limit).map((d) => d.id)),
-          )
-          .all<{ document_id: string }>();
+            )
+              .bind(
+                JSON.stringify(page.slice(0, limit).map((d) => d.id)),
+                JSON.stringify(page.slice(0, limit).map((d) => d.id)),
+              )
+              .all<{ document_id: string }>();
         const reservedIds = new Set(reserved.results.map((r) => r.document_id));
         return json({
-          total: summaryPage?.total ?? matches.length,
-          next:
-            summaryPage?.next ??
-            (page.length > limit ? page[limit - 1].id : null),
-          documents: page.slice(0, limit).map((d) => {
-            const v = view(d);
-            return {
-              id: v.id,
-              revision: v.revision,
-              processingReserved: reservedIds.has(v.id),
-              vendor: v.vendor,
-              receiptDate: v.receiptDate,
-              reference: v.reference,
-              kind: v.kind,
-              jevRole: v.jevRole,
-              completenessAudit: v.completenessAudit,
-              sourceInterventionFine: v.sourceInterventionFine,
-              status: v.status,
-              reasons: v.reasons.slice(0, 3),
-              pageIds: v.pages.map((p) => p.captureId),
-              scannedAt: v.scannedAt,
-              handwriting: v.handwriting,
-              processing: v.processing
-                ? {
-                    not_invoice: v.processing.not_invoice,
-                    has_handwriting: v.processing.has_handwriting,
-                    small_model_certainty: v.processing.small_model_certainty,
-                    large_model_confidence: v.processing.large_model_confidence,
-                    has_human_review: v.processing.has_human_review,
-                    luna_needs_human_review:
-                      v.processing.luna_needs_human_review ??
-                      v.processing.extraction.needs_human_review ??
-                      false,
-                    category_id: v.processing.extraction.category_id,
-                    total_minor: v.processing.extraction.total_minor,
-                    currency: v.processing.extraction.currency,
-                    disposition: processingDisposition(v.processing),
-                  }
-                : null,
-              duplicateOf: v.duplicateOf,
-              filename: v.filename,
-              pdf: v.pdf,
-            };
-          }),
+          total: reviewer ? undefined : (summaryPage?.total ?? page.length),
+          next: summaryPage?.next ?? null,
+          documents: page
+            .slice(0, limit)
+            .map(view)
+            .filter(
+              (v) =>
+                !reviewer ||
+                reviewListMatches(
+                  v,
+                  reviewView,
+                  reviewConfidence,
+                  reviewModel,
+                  reviewHuman,
+                ),
+            )
+            .map((v) => {
+              return {
+                id: v.id,
+                revision: v.revision,
+                processingReserved: reservedIds.has(v.id),
+                vendor: v.vendor,
+                receiptDate: v.receiptDate,
+                reference: v.reference,
+                kind: v.kind,
+                jevRole: v.jevRole,
+                completenessAudit: v.completenessAudit,
+                sourceInterventionFine: v.sourceInterventionFine,
+                status: v.status,
+                reasons: v.reasons.slice(0, 3),
+                pageIds: v.pages.map((p) => p.captureId),
+                scannedAt: v.scannedAt,
+                handwriting: v.handwriting,
+                processing: v.processing
+                  ? {
+                      not_invoice: v.processing.not_invoice,
+                      has_handwriting: v.processing.has_handwriting,
+                      small_model_certainty: v.processing.small_model_certainty,
+                      large_model_confidence:
+                        v.processing.large_model_confidence,
+                      has_human_review: v.processing.has_human_review,
+                      needs_reparse: v.processing.needs_reparse,
+                      luna_needs_human_review:
+                        v.processing.luna_needs_human_review ??
+                        v.processing.extraction.needs_human_review ??
+                        false,
+                      category_id: v.processing.extraction.category_id,
+                      total_minor: v.processing.extraction.total_minor,
+                      currency: v.processing.extraction.currency,
+                      disposition: processingDisposition(v.processing),
+                    }
+                  : null,
+                duplicateOf: v.duplicateOf,
+                filename: v.filename,
+                pdf: v.pdf,
+              };
+            }),
         });
       }
-      await loadFileRows();
-      await loadReviewState(docs);
+      await Promise.all([loadFileRows(), loadReviewState(docs)]);
       return json({ documents: docs.map(view), captures });
     }
   }

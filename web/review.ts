@@ -1,11 +1,13 @@
 import { documentPreview } from "./document-preview";
-import { matchesReviewFilters } from "./review-values";
 import { reviewOcrSource } from "./review-ocr";
 import { processingReview, categorySetup } from "./processing-review";
 import { documentTypes, type PurchaseCategory } from "./extraction";
 import { api } from "./api";
 import {
   readDocuments,
+  readDocument,
+  readDocumentSummaries,
+  type DocumentSummary,
   saveDocuments,
   generateDocumentPdf,
   OcrPendingError,
@@ -22,7 +24,7 @@ import {
   type DocumentView,
   type InvoiceCheck,
 } from "./documents";
-import { messageOf } from "./errors";
+import { messageOf, RequestError } from "./errors";
 import { inspectImage } from "./image-viewer";
 import { captureNotes } from "./capture-notes";
 import { receiptHandoff } from "./receipt-handoff";
@@ -45,6 +47,9 @@ type PaymentMatch = {
   payment_document_id: string;
   original_receipt_document_id: string;
   original_payment_document_id: string;
+  receipt_label: string;
+  payment_label: string;
+  human_reviewed: boolean;
   status: "attached" | "needs-review" | "changed";
   evidence_current: boolean;
   probability: number;
@@ -71,6 +76,13 @@ export async function mountReview(app: HTMLElement) {
   app.innerHTML =
     '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><p id="review-intervention-alert" role="alert"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="human-reviewed">Human reviewed</option><option value="payment-matches">Payment matches</option><option value="source-intervention">Needs source intervention</option><option value="scan-review">Completeness scan review</option><option value="luna-reparse">Needs Luna reparse</option><option value="non-receipt">Non-receipt documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
+  let summaries: DocumentSummary[] = [];
+  let nextPage: string | null = null;
+  let cursors = [""];
+  let pageIndex = 0;
+  let listRequest = 0;
+  let navigationGeneration = 0;
+  let navigationLoading = false;
   let paymentMatches: PaymentMatch[] = [];
   let selected = new URL(location.href).searchParams.get("document");
   let categories: PurchaseCategory[] = [];
@@ -105,6 +117,21 @@ export async function mountReview(app: HTMLElement) {
   const setMessage = (text: string) => {
     message.textContent = text;
   };
+  const counts = app.querySelector<HTMLElement>("#review-counts")!;
+  const listControls = el("div", undefined, "review-list-controls");
+  const previousPage = el("button", "Previous", "secondary");
+  const nextPageButton = el("button", "Next", "secondary");
+  const pageLabel = el("span");
+  listControls.append(previousPage, pageLabel, nextPageButton);
+  const listColumn = el("div", undefined, "review-list-column");
+  list.before(listColumn);
+  listColumn.append(list, listControls);
+  const interventionAlert = app.querySelector<HTMLElement>(
+    "#review-intervention-alert",
+  )!;
+  const interventionLink = el("a", "View documents needing source review");
+  interventionLink.href = "/review?view=source-intervention";
+  interventionAlert.append(interventionLink);
   async function action(task: () => Promise<void>) {
     if (busy) return;
     busy = true;
@@ -116,64 +143,139 @@ export async function mountReview(app: HTMLElement) {
       busy = false;
     }
   }
+  function listParams(after: string) {
+    const params = new URLSearchParams({
+      review: "1",
+      limit: "50",
+      view: filter.value,
+      confidence: confidence.value,
+      model: model.value,
+      human: human.value,
+    });
+    if (search.value.trim()) params.set("q", search.value.trim());
+    if (after) params.set("after", after);
+    return params;
+  }
+  async function loadList() {
+    const request = ++listRequest;
+    const query = search.value.trim();
+    if (
+      filter.value !== "payment-matches" &&
+      query &&
+      [...query].length < 3 &&
+      /[^\x00-\x7f]/.test(query)
+    ) {
+      summaries = [];
+      nextPage = null;
+      renderList();
+      counts.textContent =
+        "Type at least three characters to search accented text.";
+      return;
+    }
+    if (filter.value === "payment-matches") {
+      paymentMatches = (
+        await api<{ matches: PaymentMatch[] }>("/api/payment-matches")
+      ).matches;
+      if (request === listRequest) renderList();
+      return;
+    }
+    let after = cursors[pageIndex];
+    // A status filter can leave an otherwise valid cursor page empty.
+    // Skip one empty candidate page, keeping each UI load bounded.
+    for (let scanned = 0; scanned < 2; scanned++) {
+      const page = await readDocumentSummaries(listParams(after));
+      if (request !== listRequest) return;
+      if (page.documents.length || !page.next || scanned === 1) {
+        summaries = page.documents;
+        nextPage = page.next;
+        cursors[pageIndex] = after;
+        renderList();
+        return;
+      }
+      after = page.next;
+      cursors[pageIndex] = after;
+    }
+  }
+  async function loadSelected(
+    preloaded?: Awaited<ReturnType<typeof readDocument>>,
+  ) {
+    if (!selected) return;
+    try {
+      const result = preloaded ?? (await readDocument(selected));
+      catalog = { documents: [result.document], captures: result.captures };
+      if (result.document.mergedInto) {
+        selected = result.document.mergedInto;
+        const destination = await readDocument(selected);
+        catalog = {
+          documents: [destination.document],
+          captures: destination.captures,
+        };
+        const url = new URL(location.href);
+        url.searchParams.set("document", selected);
+        history.replaceState(null, "", url);
+      }
+      renderList();
+      renderDetail(catalog.documents[0]);
+    } catch (error) {
+      disposeDetail();
+      detail.replaceChildren(
+        el(
+          "p",
+          error instanceof RequestError && error.status === 404
+            ? "The linked document was not found in this instance."
+            : "The linked document could not be loaded.",
+        ),
+      );
+      throw error;
+    }
+  }
   async function refresh() {
-    [catalog, categories, paymentMatches] = await Promise.all([
-      readDocuments(),
+    navigationGeneration++;
+    navigationLoading = false;
+    if (selected && !/^[0-9a-f-]{36}$/.test(selected)) {
+      selected = null;
+      disposeDetail();
+      detail.replaceChildren(
+        el("p", "The linked document was not found in this instance."),
+      );
+    }
+    const selectedRequest = selected
+      ? readDocument(selected).catch((error) => {
+          disposeDetail();
+          detail.replaceChildren(
+            el(
+              "p",
+              error instanceof RequestError && error.status === 404
+                ? "The linked document was not found in this instance."
+                : "The linked document could not be loaded.",
+            ),
+          );
+          throw error;
+        })
+      : Promise.resolve(null);
+    const [loadedCategories, , selectedDocument] = await Promise.all([
       api<PurchaseCategory[]>("/api/processing/categories?include_archived=1"),
-      api<{ matches: PaymentMatch[] }>("/api/payment-matches").then(
-        (value) => value.matches,
-      ),
+      loadList(),
+      selectedRequest,
     ]);
+    categories = loadedCategories;
     app
       .querySelector("#review-categories")!
       .replaceChildren(categorySetup(categories, action, refresh));
-    renderList();
-    if (selected) {
-      let d = catalog.documents.find((d) => d.id === selected);
-      if (d?.mergedInto) {
-        const targetId = d.mergedInto;
-        const merged = catalog.documents.find((item) => item.id === targetId);
-        if (merged) {
-          d = merged;
-          selected = merged.id;
-          const url = new URL(location.href);
-          url.searchParams.set("document", merged.id);
-          history.replaceState(null, "", url);
-          renderList();
-        }
-      }
-      if (d) renderDetail(d);
-      else {
-        disposeDetail();
-        detail.replaceChildren(
-          el("p", "The linked document was not found in this instance."),
-        );
-      }
-    }
+    if (selectedDocument) await loadSelected(selectedDocument);
   }
   function renderList() {
     list.replaceChildren();
-    if (filter.value === "payment-matches") {
+    const paymentView = filter.value === "payment-matches";
+    listControls.hidden = paymentView;
+    interventionAlert.hidden = filter.value === "source-intervention";
+    if (paymentView) {
       const needle = search.value.toLowerCase();
       let shown = 0;
       for (const match of paymentMatches) {
-        const receipt = catalog.documents.find(
-          (item) => item.id === match.receipt_document_id,
-        );
-        const slip = catalog.documents.find(
-          (item) => item.id === match.payment_document_id,
-        );
-        if (
-          receipt?.processing?.has_human_review ||
-          slip?.processing?.has_human_review
-        )
-          continue;
-        const receiptLabel =
-          receipt?.filename ??
-          receipt?.vendor ??
-          match.original_receipt_document_id;
-        const slipLabel =
-          slip?.filename ?? slip?.vendor ?? match.original_payment_document_id;
+        if (match.human_reviewed) continue;
+        const receiptLabel = match.receipt_label;
+        const slipLabel = match.payment_label;
         if (
           !`${receiptLabel} ${slipLabel} ${match.status} ${match.match_pass}`
             .toLowerCase()
@@ -199,127 +301,31 @@ export async function mountReview(app: HTMLElement) {
         shown++;
       }
       if (!shown) list.append(el("p", "No payment matches found."));
-      app.querySelector("#review-counts")!.textContent =
-        `${shown} payment matches in current list · ${paymentMatches.length} total · ${paymentMatches.filter((item) => item.status === "needs-review").length} need verification`;
+      counts.textContent = `${shown} payment matches in current list · ${paymentMatches.length} total · ${paymentMatches.filter((item) => item.status === "needs-review").length} need verification`;
       return;
     }
-    const interventionCount = catalog.documents.filter(
-      (d) =>
-        pendingSourceIntervention(d) &&
-        !d.mergedInto &&
-        !d.processing?.has_human_review,
-    ).length;
-    const interventionAlert = app.querySelector("#review-intervention-alert")!;
-    interventionAlert.replaceChildren();
-    if (interventionCount > 0) {
-      const link = el(
-        "a",
-        `View ${interventionCount} document${interventionCount === 1 ? "" : "s"} needing source review`,
-      );
-      link.href = "/review?view=source-intervention";
-      interventionAlert.append(
-        link,
-        ". Inspect the saved scans and page grouping before looking for paper.",
-      );
-    }
-    const counts = catalog.documents.reduce<Record<string, number>>((a, d) => {
-      if (!d.processing?.has_human_review) a[d.status] = (a[d.status] ?? 0) + 1;
-      return a;
-    }, {});
-    const reviewedCount = catalog.documents.filter(
-      (d) => d.processing?.has_human_review && !d.mergedInto,
-    ).length;
-    let shown = 0;
-    for (const d of catalog.documents) {
-      if (d.status === "merged") continue;
-      if (filter.value === "human-reviewed" && !d.processing?.has_human_review)
-        continue;
-      if (
-        filter.value !== "all" &&
-        filter.value !== "human-reviewed" &&
-        d.processing?.has_human_review
-      )
-        continue;
-      if (
-        ![
-          "source-intervention",
-          "scan-review",
-          "luna-reparse",
-          "non-receipt",
-          "human-reviewed",
-        ].includes(filter.value) &&
-        !matchesReviewFilters(d, confidence.value, model.value, human.value)
-      )
-        continue;
-      if (
-        filter.value === "source-intervention" &&
-        !pendingSourceIntervention(d)
-      )
-        continue;
-      if (filter.value === "scan-review" && !completenessUncertain(d)) continue;
-      if (filter.value === "luna-reparse" && !d.processing?.needs_reparse)
-        continue;
-      if (
-        filter.value === "non-receipt" &&
-        !["payment-slip", "atm", "note", "other", "not-receipt"].includes(
-          d.kind,
-        ) &&
-        ![
-          "payment_evidence_only",
-          "account_record",
-          "cash_withdrawal",
-          "misc",
-        ].includes(d.jevRole ?? "") &&
-        d.completenessAudit?.result !== "not_receipt"
-      )
-        continue;
-      if (
-        filter.value === "attention" &&
-        !["review", "broken"].includes(d.status)
-      )
-        continue;
-      if (
-        ![
-          "attention",
-          "all",
-          "source-intervention",
-          "scan-review",
-          "luna-reparse",
-          "non-receipt",
-          "human-reviewed",
-        ].includes(filter.value) &&
-        d.status !== filter.value
-      )
-        continue;
-      const number =
-        catalog.captures
-          .filter((c) => c.is_current)
-          .findIndex((c) => c.id === d.pages[0]?.captureId) + 1;
+    for (const document of summaries) {
       const label =
-        d.filename ?? `Picture ${number || ""} · vendor/date to identify`;
-      if (
-        !`${label} ${d.reference ?? ""} ${d.text} ${d.reasons.join(" ")}`
-          .toLowerCase()
-          .includes(search.value.toLowerCase())
-      )
-        continue;
-      const button = el("button", undefined, `review-item ${d.status}`);
-      const reviewed = d.processing?.has_human_review === true;
-      button.setAttribute("aria-current", String(d.id === selected));
+        document.filename ??
+        document.vendor ??
+        "Unidentified scan · vendor/date to identify";
+      const button = el("button", undefined, `review-item ${document.status}`);
+      const reviewed = document.processing?.has_human_review === true;
+      button.setAttribute("aria-current", String(document.id === selected));
       button.append(
         el("strong", label),
         el(
           "span",
           reviewed
-            ? `Human reviewed · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · ${d.pdf ? "PDF ready for download" : "PDF needs retry"}`
-            : `${d.processing?.needs_reparse ? "Needs Luna reparse · " : pendingSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}`,
+            ? `Human reviewed · ${document.pageIds.length} page${document.pageIds.length === 1 ? "" : "s"} · ${document.pdf ? "PDF ready for download" : "PDF needs retry"}`
+            : `${document.processing?.needs_reparse ? "Needs Luna reparse · " : pendingSourceIntervention(document) ? "Needs source intervention · " : completenessUncertain(document) ? "Completeness needs scan review · " : ""}${document.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${document.kind}${document.kind === "unknown" && document.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${document.kind === "unknown" && document.jevRole ? ` · Jev: ${document.jevRole.replaceAll("_", " ")}` : ""} · ${document.status} · ${document.pageIds.length} page${document.pageIds.length === 1 ? "" : "s"} · Luna: ${document.processing?.small_model_certainty ?? "—"} · Astra: ${document.processing?.large_model_confidence ?? "—"}`,
         ),
         el(
           "small",
           reviewed
             ? "Open to edit values or download the PDF"
-            : (d.reasons[0] ??
-                (d.duplicateOf
+            : (document.reasons[0] ??
+                (document.duplicateOf
                   ? "Original retained; excluded from output"
                   : "Checks complete")),
         ),
@@ -327,26 +333,75 @@ export async function mountReview(app: HTMLElement) {
       button.onclick = () => {
         if (busy) return;
         setMessage("");
-        selected = d.id;
+        selected = document.id;
         const url = new URL(location.href);
-        url.searchParams.set("document", d.id);
+        url.searchParams.set("document", document.id);
         history.replaceState(null, "", url);
         renderList();
-        renderDetail(d);
-        detail
-          .querySelector(
-            needsSourceIntervention(d)
-              ? ".source-review-controls"
-              : ".receipt-review-panes",
-          )
-          ?.scrollIntoView({ block: "start" });
+        void action(async () => {
+          await loadSelected();
+          const current = catalog.documents[0];
+          detail
+            .querySelector(
+              needsSourceIntervention(current)
+                ? ".source-review-controls"
+                : ".receipt-review-panes",
+            )
+            ?.scrollIntoView({ block: "start" });
+        });
       };
       list.append(button);
-      shown++;
     }
-    if (!shown) list.append(el("p", "No documents match this view."));
-    app.querySelector("#review-counts")!.textContent =
-      `${shown} documents in current list · ${reviewedCount} human reviewed · ${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
+    if (!summaries.length)
+      list.append(
+        el(
+          "p",
+          nextPage
+            ? "No matches in this part of the list. Continue to the next page."
+            : "No documents match this view.",
+        ),
+      );
+    counts.textContent = `${summaries.length} documents in current list`;
+    previousPage.disabled = navigationLoading || pageIndex === 0;
+    nextPageButton.disabled = navigationLoading || !nextPage;
+    pageLabel.textContent = `Page ${pageIndex + 1}`;
+  }
+  function navigatePage(direction: -1 | 1) {
+    if (navigationLoading || (direction < 0 ? pageIndex === 0 : !nextPage))
+      return;
+    const previousIndex = pageIndex;
+    const generation = ++navigationGeneration;
+    navigationLoading = true;
+    pageIndex += direction;
+    if (direction > 0) cursors[pageIndex] = nextPage!;
+    renderList();
+    const request = listRequest + 1;
+    void loadList().then(
+      () => {
+        if (generation !== navigationGeneration || request !== listRequest)
+          return;
+        navigationLoading = false;
+        renderList();
+      },
+      (error) => {
+        if (generation !== navigationGeneration || request !== listRequest)
+          return;
+        pageIndex = previousIndex;
+        navigationLoading = false;
+        setMessage(messageOf(error));
+        renderList();
+      },
+    );
+  }
+  previousPage.onclick = () => navigatePage(-1);
+  nextPageButton.onclick = () => navigatePage(1);
+  function resetList() {
+    navigationGeneration++;
+    navigationLoading = false;
+    cursors = [""];
+    pageIndex = 0;
+    nextPage = null;
+    void loadList().catch((error) => setMessage(messageOf(error)));
   }
   function renderDetail(original: DocumentView) {
     const doc = structuredClone(original);
@@ -792,11 +847,10 @@ export async function mountReview(app: HTMLElement) {
         action,
         async (outcome?: string) => {
           await refresh();
-          const reviewed = catalog.documents.find((item) => item.id === doc.id)
-            ?.processing?.has_human_review;
+          const reviewed = catalog.documents[0]?.processing?.has_human_review;
           if (reviewed) {
             filter.value = "human-reviewed";
-            renderList();
+            resetList();
           }
           setMessage(
             outcome ??
@@ -823,9 +877,7 @@ export async function mountReview(app: HTMLElement) {
     generate.onclick = () =>
       void action(async () => {
         setMessage("Generating from the saved page order…");
-        const current = (await readDocuments()).documents.find(
-          (d) => d.id === doc.id,
-        )!;
+        const current = (await readDocument(doc.id)).document;
         try {
           const result = await generateDocumentPdf(
             current,
@@ -869,9 +921,7 @@ export async function mountReview(app: HTMLElement) {
         );
         checked.onclick = () =>
           void action(async () => {
-            const fresh = (await readDocuments()).documents.find(
-              (d) => d.id === doc.id,
-            )!;
+            const fresh = (await readDocument(doc.id)).document;
             if (fresh.pdf?.sha256 !== doc.pdf?.sha256)
               throw Error("PDF changed; inspect the current version first.");
             fresh.checks.pdf = true;
@@ -891,9 +941,7 @@ export async function mountReview(app: HTMLElement) {
       );
       restore.onclick = () =>
         void action(async () => {
-          const fresh = (await readDocuments()).documents.find(
-            (d) => d.id === doc.id,
-          )!;
+          const fresh = (await readDocument(doc.id)).document;
           fresh.duplicateOf = null;
           fresh.checks.grouping = false;
           fresh.evidence +=
@@ -915,19 +963,83 @@ export async function mountReview(app: HTMLElement) {
     const empty = el("option", "Choose document…");
     empty.value = "";
     target.append(empty);
-    for (const other of catalog.documents.filter(
-      (d) => d.id !== doc.id && !d.mergedInto && !d.duplicateOf,
-    )) {
-      const option = el(
-        "option",
-        `${other.filename ?? other.vendor ?? "Unidentified"} · ${other.scannedAt[0] ?? ""} · ${other.id.slice(0, 8)}`,
-      );
-      option.value = other.id;
+    const targetSearch = field(
+      "Find destination by vendor, date, reference, text or document ID",
+      "",
+    );
+    const loadMoreTargets = el("button", "Load more destinations", "secondary");
+    loadMoreTargets.type = "button";
+    loadMoreTargets.hidden = true;
+    let targetNext: string | null = null;
+    let targetGeneration = 0;
+    let targetTimer: ReturnType<typeof setTimeout> | undefined;
+    function appendTarget(id: string, label: string) {
+      if (
+        id === doc.id ||
+        [...target.options].some((option) => option.value === id)
+      )
+        return;
+      const option = el("option", label);
+      option.value = id;
       target.append(option);
     }
+    async function loadTargets(reset: boolean, generation: number) {
+      const query = targetSearch.input.value.trim();
+      if (reset) target.replaceChildren(empty);
+      loadMoreTargets.disabled = true;
+      if (/^[0-9a-f-]{36}$/.test(query)) {
+        const { document: found } = await readDocument(query);
+        if (generation !== targetGeneration) return;
+        if (!found.mergedInto && !found.duplicateOf)
+          appendTarget(
+            found.id,
+            `${found.filename ?? found.vendor ?? "Unidentified"} · ${found.id.slice(0, 8)}`,
+          );
+        targetNext = null;
+      } else {
+        const params = new URLSearchParams({ limit: "50" });
+        if (query) params.set("q", query);
+        if (!reset && targetNext) params.set("after", targetNext);
+        const page = await readDocumentSummaries(params);
+        if (generation !== targetGeneration) return;
+        for (const other of page.documents.filter((item) => !item.duplicateOf))
+          appendTarget(
+            other.id,
+            `${other.filename ?? other.vendor ?? "Unidentified"} · ${other.scannedAt[0] ?? ""} · ${other.id.slice(0, 8)}`,
+          );
+        targetNext = page.next;
+      }
+      loadMoreTargets.hidden = !targetNext;
+      loadMoreTargets.disabled = false;
+    }
+    targetSearch.input.oninput = () => {
+      clearTimeout(targetTimer);
+      const generation = ++targetGeneration;
+      targetNext = null;
+      target.replaceChildren(empty);
+      loadMoreTargets.hidden = true;
+      targetTimer = setTimeout(() => {
+        void loadTargets(true, generation).catch((error) =>
+          setMessage(messageOf(error)),
+        );
+      }, 250);
+    };
+    organize.addEventListener("toggle", () => {
+      if (!organize.open || targetSearch.input.value.trim()) return;
+      const generation = ++targetGeneration;
+      void loadTargets(true, generation).catch((error) =>
+        setMessage(messageOf(error)),
+      );
+    });
+    loadMoreTargets.onclick = () => {
+      if (!targetNext || loadMoreTargets.disabled) return;
+      void loadTargets(false, targetGeneration).catch((error) =>
+        setMessage(messageOf(error)),
+      );
+    };
     const targetLabel = el("label", "Destination document", "review-field");
     targetLabel.append(target);
-    organize.append(targetLabel);
+    organize.append(targetSearch.wrap, targetLabel, loadMoreTargets);
     const reason = field("Evidence for the relationship", "", true);
     organize.append(reason.wrap);
     for (const [label, duplicate] of [
@@ -1001,9 +1113,7 @@ export async function mountReview(app: HTMLElement) {
       );
       split.onclick = () =>
         void action(async () => {
-          const source = (await readDocuments()).documents.find(
-            (d) => d.id === doc.id,
-          )!;
+          const source = (await readDocument(doc.id)).document;
           const page = source.pages.pop()!;
           const capture = catalog.captures.find(
             (c) => c.id === page.captureId,
@@ -1080,12 +1190,16 @@ export async function mountReview(app: HTMLElement) {
       url.searchParams.set("view", filter.value);
     else url.searchParams.delete("view");
     history.replaceState(null, "", url);
-    renderList();
+    resetList();
   };
-  confidence.onchange = renderList;
-  model.onchange = renderList;
-  human.onchange = renderList;
-  search.oninput = renderList;
+  confidence.onchange = resetList;
+  model.onchange = resetList;
+  human.onchange = resetList;
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  search.oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(resetList, 250);
+  };
   app.querySelector<HTMLButtonElement>("#review-refresh")!.onclick = () =>
     void action(refresh);
   registerSiteTools(refresh);

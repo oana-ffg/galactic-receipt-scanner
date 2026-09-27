@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
 import { documentRoute } from "./documents";
@@ -496,6 +497,192 @@ it("pages default summaries using selected captures only", async () => {
   expect(page.documents).toHaveLength(1);
   expect(page.next).toBeTruthy();
   expect(page.total).toBeGreaterThanOrEqual(2);
+});
+it("searches and filters reviewer pages on the server without loading the catalog", async () => {
+  const a = newDocument(await capture());
+  const b = newDocument(await capture());
+  const marker = crypto.randomUUID().replaceAll("-", "");
+  a.vendor = `Synthetic Orchard ${marker}`;
+  b.vendor = "Synthetic Grocer";
+  b.broken = ["Synthetic source requires review"];
+  expect((await save([a, b])).status).toBe(200);
+  const db = await mf.getD1Database("DB");
+  const selected = async (id: string) =>
+    (await (await request(`/api/captures/${id}`)).json()) as any;
+  const route = async (query: string) => {
+    const response = await documentRoute(
+      new Request(origin + `/api/documents?summary=1&${query}`),
+      { DB: db, BUCKET: await mf.getR2Bucket("BUCKET") } as any,
+      async () => {
+        throw new Error("Full capture collection was loaded");
+      },
+      undefined,
+      selected,
+      async (ids) => Promise.all(ids.map(selected)),
+    );
+    expect(response?.status).toBe(200);
+    return response!.json() as Promise<any>;
+  };
+  const search = await route(`q=${marker}&limit=1`);
+  expect(search.documents.map((item: any) => item.id)).toEqual([a.id]);
+  expect(search.next).toBeNull();
+  const review = await route(
+    "review=1&view=broken&model=all&confidence=all&human=all&limit=1",
+  );
+  const results = [...review.documents];
+  let next = review.next;
+  while (next) {
+    const page = await route(
+      `review=1&view=broken&model=all&confidence=all&human=all&limit=1&after=${next}`,
+    );
+    results.push(...page.documents);
+    next = page.next;
+  }
+  expect(results.map((item: any) => item.id)).toContain(b.id);
+  expect(results.every((item: any) => item.status === "broken")).toBe(true);
+  const defaultView = await route(`review=1&limit=1&q=${marker}`);
+  expect(defaultView.documents).toEqual([]);
+});
+it("finds Unicode vendors, displayed filenames, and reviewed documents in All", async () => {
+  const source = await capture();
+  const document = newDocument(source);
+  const marker = crypto.randomUUID().replaceAll("-", "");
+  document.vendor = `ØSTER ${marker}`;
+  document.receiptDate = "2026-09-27";
+  expect((await save([document])).status).toBe(200);
+  const saved = (
+    (await (await request(`/api/documents/${document.id}`)).json()) as any
+  ).document;
+  expect(saved.filename).toBeTruthy();
+  const unicode = (await (
+    await request(
+      `/api/documents?summary=1&q=${encodeURIComponent(`øster ${marker}`)}`,
+    )
+  ).json()) as any;
+  expect(unicode.documents.map((item: any) => item.id)).toEqual([document.id]);
+  expect(
+    (await request(`/api/documents?summary=1&q=${encodeURIComponent("ø")}`))
+      .status,
+  ).toBe(400);
+  const filename = (await (
+    await request(
+      `/api/documents?summary=1&q=${encodeURIComponent(saved.filename)}`,
+    )
+  ).json()) as any;
+  expect(filename.documents.map((item: any) => item.id)).toEqual([document.id]);
+  const db = await mf.getD1Database("DB");
+  const extraction = {
+    type: "receipt",
+    vendor: document.vendor,
+    receipt_date: document.receiptDate,
+    reference: null,
+    currency: null,
+    has_handwriting: false,
+    has_payment_slip: false,
+    payment_status: "unknown",
+    card_last_four: null,
+    line_items: [],
+    adjustments: [],
+    total_minor: null,
+    charged_total_minor: null,
+    payment_adjustments: [],
+    vat_minor: null,
+    tax_basis: "unknown",
+    completeness: "complete",
+    category_id: null,
+    certainty: "medium",
+    uncertainties: [],
+    broken_reasons: [],
+    confirmed_arithmetic_mismatch: false,
+    evidence: "Synthetic review",
+  };
+  saved.processing = {
+    extraction,
+    not_invoice: false,
+    has_handwriting: false,
+    small_model_certainty: "medium",
+    large_model_confidence: "medium",
+    has_human_review: true,
+    human_review_revision: saved.revision,
+    needs_reparse: false,
+    seen_capture_count: 1,
+  };
+  await db
+    .prepare(
+      "UPDATE document_versions SET payload=? WHERE document_id=? AND revision=?",
+    )
+    .bind(JSON.stringify(saved), document.id, saved.revision)
+    .run();
+  const reviewed = (await (
+    await request(
+      `/api/documents?summary=1&review=1&view=all&model=astra&confidence=medium&human=reviewed&q=${marker}`,
+    )
+  ).json()) as any;
+  expect(reviewed.documents.map((item: any) => item.id)).toEqual([document.id]);
+});
+it("backfills existing documents into trigram search and follows later revisions", async () => {
+  const legacy = await runtime({ migrationLimit: 32 });
+  try {
+    const db = await legacy.getD1Database("DB");
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await db
+      .prepare(
+        "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+      )
+      .bind(id, 1, JSON.stringify({ vendor: "ØSTER synthetic" }), now)
+      .run();
+    await db
+      .prepare("INSERT INTO document_heads(id,revision) VALUES(?,?)")
+      .bind(id, 1)
+      .run();
+    const migration = await readFile(
+      "drizzle/0032_document-review-search.sql",
+      "utf8",
+    );
+    for (const statement of migration.split("--> statement-breakpoint"))
+      if (statement.trim()) await db.prepare(statement).run();
+    const search = async (query: string) =>
+      (
+        await db
+          .prepare(
+            "SELECT rowid FROM document_search WHERE document_search MATCH ?",
+          )
+          .bind(`"${query}"`)
+          .all()
+      ).results;
+    expect(await search("øster")).toHaveLength(1);
+    await db
+      .prepare(
+        "INSERT INTO document_versions(document_id,revision,payload,created_at) VALUES(?,?,?,?)",
+      )
+      .bind(id, 2, JSON.stringify({ vendor: "REVISED synthetic" }), now)
+      .run();
+    await db
+      .prepare("UPDATE document_heads SET revision=? WHERE id=?")
+      .bind(2, id)
+      .run();
+    expect(await search("øster")).toHaveLength(0);
+    expect(await search("revised")).toHaveLength(1);
+    const plan = await db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT h.id FROM document_heads h
+       JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
+       WHERE h.id>? AND (h.rowid IN (SELECT rowid FROM document_search WHERE document_search MATCH ?)
+         OR h.id IN (SELECT document_id FROM document_names WHERE instr(lower(filename),?)>0))
+       ORDER BY h.id LIMIT ?`,
+      )
+      .bind("", '"revised"', "revised", 51)
+      .all<{ detail: string }>();
+    expect(
+      plan.results.some((row) => row.detail.includes("VIRTUAL TABLE INDEX")),
+    ).toBe(true);
+    expect(plan.results.some((row) => row.detail.includes("CORRELATED"))).toBe(
+      false,
+    );
+  } finally {
+    await legacy.dispose();
+  }
 });
 it("reserves filenames for a full summary page within the database bind limit", async () => {
   const documents = [];

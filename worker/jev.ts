@@ -4515,6 +4515,17 @@ export async function paymentMatchesRoute(
         payment_document_id: slip?.owner ?? row.candidate_id,
         original_receipt_document_id: row.subject_id,
         original_payment_document_id: row.candidate_id,
+        receipt_label: receipt
+          ? (documentById.get(receipt.owner)?.vendor ?? receipt.owner)
+          : row.subject_id,
+        payment_label: slip
+          ? (documentById.get(slip.owner)?.vendor ?? slip.owner)
+          : row.candidate_id,
+        human_reviewed: Boolean(
+          (receipt &&
+            documentById.get(receipt.owner)?.processing?.has_human_review) ||
+          (slip && documentById.get(slip.owner)?.processing?.has_human_review),
+        ),
         status:
           !receipt || !slip
             ? "changed"
