@@ -704,14 +704,22 @@ export async function documentRoute(
     ).results;
     filesLoaded = true;
   };
+  function currentPdf(d: ReceiptDocument, filename: string | null) {
+    const sameDocumentPages = (file: FileRow) =>
+      file.document_id === d.id &&
+      samePageSources(JSON.parse(file.payload).pages, d.pages);
+    return (
+      fileRows.find(
+        (file) => file.filename === filename && sameDocumentPages(file),
+      ) ??
+      (d.processing?.has_human_review
+        ? fileRows.find(sameDocumentPages)
+        : undefined)
+    );
+  }
   function view(d: ReceiptDocument): DocumentView {
     const filename = chooseName(d, reserved);
-    const file = fileRows.find(
-      (f) =>
-        f.document_id === d.id &&
-        f.filename === filename &&
-        samePageSources(JSON.parse(f.payload).pages, d.pages),
-    );
+    const file = currentPdf(d, filename);
     const state = documentReasons(d);
     const completenessAudit = completenessAudits.get(d.id) ?? null;
     if (needsSourceIntervention({ completenessAudit })) {
@@ -985,14 +993,9 @@ export async function documentRoute(
       if (d.checks.pdf) {
         const filename = chooseName(d, reserved);
         requireThat(
-          fileRows.find(
-            (f) =>
-              f.document_id === d.id &&
-              f.filename === filename &&
-              samePageSources(JSON.parse(f.payload).pages, d.pages),
-          )?.sha256 === d.reviewedPdfSha256,
+          currentPdf(d, filename)?.sha256 === d.reviewedPdfSha256,
           400,
-          "Generate and inspect the PDF for these exact pages and filename before confirming it.",
+          "Generate and inspect the current PDF for these exact pages before confirming it.",
         );
       }
       requireThat(
@@ -1231,10 +1234,14 @@ export async function documentRoute(
     );
     const object = await env.BUCKET.get(file.key);
     requireThat(object, 503, "PDF unavailable; original sources are retained.");
+    const downloadName =
+      selected?.sha256 === file.sha256 && selected.revision === file.revision
+        ? (chooseName(doc, reserved) ?? file.filename)
+        : file.filename;
     return new Response(object.body, {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
         "X-Content-SHA256": file.sha256,
       },
     });

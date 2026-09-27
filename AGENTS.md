@@ -19,6 +19,11 @@ Build a fast, hands-free receipt capture station. The operator mounts a phone ab
 desk and replaces receipts one by one, using a large desktop preview and red/amber/green
 feedback. The operator's work ends after scanning. Organisation, OCR review, PDF output
 and reporting belong to the downstream processing workflow, not to the operator.
+The automated workflow must produce downloadable PDFs and finish documents whose
+evidence passes its safeguards without requiring the owner to review each one.
+Human review is for exceptions that remain uncertain or need an owner decision;
+it is never a universal gate for PDF generation or completion. Accepting human
+review is a terminal owner decision and must not wait for PDF generation.
 
 ### Receipt organization is incremental
 

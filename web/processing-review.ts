@@ -2,7 +2,6 @@ import { currencyDigits, displayMoney, readMoney } from "./review-money";
 import type { ReviewOcrSource } from "./review-ocr";
 import { reviewComparison } from "./review-comparison";
 import { api } from "./api";
-import { generateDocumentPdf, readDocument } from "./document-processing";
 import {
   arithmetic,
   documentTypes,
@@ -477,19 +476,7 @@ function reviewForm(
               extraction: e,
             }),
           });
-          const saved = (await readDocument(doc.id)).document;
-          let outcome = "Human review accepted. PDF ready for download.";
-          if (!saved.pdf || saved.pdf.revision !== saved.revision) {
-            try {
-              const pdf = await generateDocumentPdf(saved, true);
-              outcome = pdf.imageOnlyPages
-                ? `Human review accepted. PDF saved with ${pdf.imageOnlyPages} image-only page${pdf.imageOnlyPages === 1 ? "" : "s"}; download is available.`
-                : "Human review accepted. Searchable PDF saved for download.";
-            } catch (error) {
-              outcome = `Human review accepted, but PDF generation failed: ${messageOf(error)}. Use Generate PDF to retry.`;
-            }
-          }
-          await refresh(outcome);
+          await refresh("Human review accepted.");
         } finally {
           save.disabled = false;
           cancelButton.disabled = false;

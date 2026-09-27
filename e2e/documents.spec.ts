@@ -598,6 +598,20 @@ test("human review edits structured values and detaches a wrong page into the po
     model: "gpt-6-astra",
     extraction,
   });
+  const beforeReview = (
+    await (await isolatedRequest.get(`/api/documents/${target.id}`)).json()
+  ).document;
+  expect(
+    (
+      await isolatedRequest.post(
+        `/api/documents/${target.id}/pdf?revision=${beforeReview.revision}`,
+        {
+          data: Buffer.from("%PDF-1.7\nsynthetic processed PDF"),
+          headers: { Origin: origin, "X-Scanner-Request": "1" },
+        },
+      )
+    ).ok(),
+  ).toBe(true);
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await page.locator("#review-filter").selectOption("review");
   await page.locator("#review-list button").click();
@@ -610,20 +624,49 @@ test("human review edits structured values and detaches a wrong page into the po
       .getByText(/Luna: medium · Astra: medium/),
   ).toBeVisible();
   await expect(page.getByLabel("Handwriting is present")).toBeChecked();
+  await expect(
+    page.getByRole("link", { name: "Download saved PDF" }),
+  ).toBeVisible();
   await page
     .getByLabel("Vendor", { exact: true })
     .fill("Corrected synthetic vendor");
   await page
     .getByLabel("Review findings", { exact: true })
     .fill("Human checked every synthetic source.");
+  const acceptancePdfWrites: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/pdf?"))
+      acceptancePdfWrites.push(request.url());
+  });
   await page.getByRole("button", { name: "Accept human review" }).click();
   await expect(page.locator("#review-filter")).toHaveValue("human-reviewed");
   await expect(
     page.getByRole("link", { name: "Download saved PDF" }),
   ).toBeVisible();
   await expect(page.locator("#review-message")).toContainText(
-    /Human review accepted.*PDF saved/,
+    "Human review accepted.",
   );
+  expect(acceptancePdfWrites).toEqual([]);
+  const reviewedDocument = (
+    await (await isolatedRequest.get(`/api/documents/${target.id}`)).json()
+  ).document;
+  const download = await isolated.dispatchFetch(
+    `${origin}/api/documents/${target.id}/pdf?version=${reviewedDocument.pdf.sha256}&revision=${reviewedDocument.pdf.revision}`,
+    { headers: ownerHeaders },
+  );
+  expect(download.status).toBe(200);
+  expect(download.headers.get("Content-Disposition")).toContain(
+    encodeURIComponent(reviewedDocument.filename),
+  );
+  await page
+    .getByRole("button", { name: "PDF inspected — confirm legibility" })
+    .click();
+  await expect
+    .poll(async () =>
+      (await (await isolatedRequest.get(`/api/documents/${target.id}`)).json())
+        .document.checks.pdf,
+    )
+    .toBe(true);
   await page.locator("#review-filter").selectOption("review");
   await expect(page.locator("#review-list button")).toHaveCount(0);
   await page.locator("#review-filter").selectOption("human-reviewed");
@@ -643,7 +686,9 @@ test("human review edits structured values and detaches a wrong page into the po
   await expect(page.locator("#review-message")).toContainText(
     "The scanner service is temporarily unavailable",
   );
-  expect(retryWrites.filter((url) => url.endsWith("/api/documents"))).toEqual([]);
+  expect(retryWrites.filter((url) => url.endsWith("/api/documents"))).toEqual(
+    [],
+  );
   expect(
     (await (await isolatedRequest.get(`/api/documents/${target.id}`)).json())
       .document.processing.has_human_review,
