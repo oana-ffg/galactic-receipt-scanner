@@ -634,9 +634,13 @@ def run_jev_backfill(client, *, sleep=time.sleep):
             remaining = last.get("remaining")
             if remaining != 0:
                 raise ClientError("Jev backfill returned an invalid waiting response.")
+            settling = last.get("settling_jobs", 0)
+            if not isinstance(settling, int) or settling < 0:
+                raise ClientError("Jev backfill returned an invalid settling count.")
             return {
                 "complete": False,
                 "waiting": True,
+                "settling_jobs": settling,
                 "processed": processed,
                 "remaining": 0,
                 "phase": last.get("phase"),

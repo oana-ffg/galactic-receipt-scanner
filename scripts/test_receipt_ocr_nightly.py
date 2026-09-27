@@ -123,6 +123,19 @@ class NightlyTests(unittest.TestCase):
         self.assertTrue(saved['jev']['complete'])
         jev.assert_called_once_with(self.client)
 
+    def test_legacy_all_null_page_layout_uses_capture_default(self):
+        capture_id = '00000000-0000-4000-8000-000000000001'
+        self.client.get.return_value = {'layouts': [
+            {'capture_id': capture_id, 'source_sha256': None, 'crop': None, 'rotation': None},
+        ]}
+        self.assertEqual(current_page_layouts(self.client), {})
+
+    def test_legacy_omitted_crop_uses_capture_default(self):
+        capture_id = '00000000-0000-4000-8000-000000000001'
+        row = {'capture_id': capture_id, 'source_sha256': 'a' * 64, 'rotation': 0}
+        self.client.get.return_value = {'layouts': [row]}
+        self.assertEqual(current_page_layouts(self.client), {capture_id: row})
+
     def test_main_does_not_treat_a_legacy_document_crop_as_new_ocr_work(self):
         scan = {**capture('completed'), 'ocr_status': 'unverified'}
         self.client.origin = self.state['origin']

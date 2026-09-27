@@ -108,8 +108,9 @@ class ClientTests(unittest.TestCase):
             evidence = json.loads(path.read_text())
             self.assertIn("test_failure_report_states_the_error", evidence["traceback"])
             self.assertNotIn(token, path.read_text())
-            self.assertEqual(path.stat().st_mode & 0o077, 0)
-            self.assertEqual(path.parent.stat().st_mode & 0o077, 0)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o077, 0)
+                self.assertEqual(path.parent.stat().st_mode & 0o077, 0)
 
     def test_failure_report_names_a_lost_diagnostic_instead_of_masking_the_error(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -357,6 +358,7 @@ class ClientTests(unittest.TestCase):
             "phase": "complete",
             "remaining": 0,
             "waiting": True,
+            "settling_jobs": 2,
             "busy": False,
             "blocked": 0,
         }
@@ -368,6 +370,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {
             "complete": False,
             "waiting": True,
+            "settling_jobs": 2,
             "processed": 1,
             "remaining": 0,
             "phase": "complete",

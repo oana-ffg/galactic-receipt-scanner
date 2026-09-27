@@ -40,15 +40,26 @@ def current_page_layouts(client):
     if not isinstance(rows, list):
         raise ClientError('Invalid document-page OCR layout inventory.')
     layouts = {}
+    seen = set()
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {'capture_id', 'source_sha256', 'rotation'}:
+        if not isinstance(row, dict) or set(row) not in (
+                {'capture_id', 'source_sha256', 'rotation'},
+                {'capture_id', 'source_sha256', 'crop', 'rotation'}):
             raise ClientError('Invalid document-page OCR layout.')
         cid, sha, rotation = (row[key] for key in ('capture_id', 'source_sha256', 'rotation'))
-        if (not isinstance(cid, str) or not UUID.fullmatch(cid) or cid in layouts or
-                not isinstance(sha, str) or not SHA.fullmatch(sha) or type(rotation) is not int or
+        # Historical page rows can carry a null crop or have no saved layout at all.
+        # A document crop cannot override the capture's saved scan outline.
+        if 'crop' in row and row['crop'] is not None:
+            raise ClientError('Invalid document-page OCR layout.')
+        if not isinstance(cid, str) or not UUID.fullmatch(cid) or cid in seen:
+            raise ClientError('Invalid document-page OCR layout.')
+        seen.add(cid)
+        if sha is None and rotation is None:
+            continue
+        if (not isinstance(sha, str) or not SHA.fullmatch(sha) or type(rotation) is not int or
                 rotation not in (0, 90, 180, 270)):
             raise ClientError('Invalid document-page OCR layout.')
-        layouts[cid] = row
+        layouts[cid] = {'capture_id': cid, 'source_sha256': sha, 'rotation': rotation}
     return layouts
 
 
@@ -202,7 +213,7 @@ def prepare_requirement(client, value, root):
 def finish_jev(client):
     """Drain hosted Jev work without copying document identifiers into the OCR summary."""
     result = run_jev_backfill(client)
-    fields = ('complete', 'deferred', 'waiting', 'processed', 'remaining', 'phase', 'blocked')
+    fields = ('complete', 'deferred', 'waiting', 'settling_jobs', 'processed', 'remaining', 'phase', 'blocked')
     return {key: result[key] for key in fields if key in result}
 
 

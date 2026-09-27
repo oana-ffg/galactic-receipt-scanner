@@ -98,7 +98,17 @@ async function saveCapture(retakeOf?: string) {
     body: new Uint8Array([255, 216, 255, 17]),
   });
   expect(response.status).toBe(200);
-  return response.json<any>();
+  const capture = await response.json<any>();
+  // Most Jev tests exercise historical backlog; fresh scans are set explicitly
+  // in the settling-window tests below.
+  const settledAt = new Date(Date.now() - 31 * 60_000).toISOString();
+  await (
+    await mf.getD1Database("DB")
+  )
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(settledAt, capture.id)
+    .run();
+  return { ...capture, created_at: settledAt };
 }
 
 async function sha256(bytes: Uint8Array) {
@@ -784,6 +794,14 @@ it("completes each page job without starving a multi-page document and binds the
     outboundService: syntheticJevResponse,
   });
   const captures = [await saveCapture(), await saveCapture()];
+  const db = await mf.getD1Database("DB");
+  for (const capture of captures) {
+    capture.created_at = new Date().toISOString();
+    await db
+      .prepare("UPDATE captures SET created_at=? WHERE id=?")
+      .bind(capture.created_at, capture.id)
+      .run();
+  }
   const document = newDocument(captures[0]);
   document.pages = captures.map((capture) => newDocument(capture).pages[0]);
   const grouped = await mf.dispatchFetch(`${origin}/api/documents`, {
@@ -826,16 +844,34 @@ it("completes each page job without starving a multi-page document and binds the
     expect(saved.jev.status).toBe("classified");
   }
   await drainBackfill(processingToken);
-  const db = await mf.getD1Database("DB");
-  expect(
+  const settledStatuses = async () =>
     (
       await db
         .prepare(
           "SELECT status,COUNT(*) AS count FROM jev_jobs GROUP BY status",
         )
         .all()
-    ).results,
-  ).toEqual([{ status: "complete", count: 2 }]);
+    ).results;
+  expect(await settledStatuses()).toEqual([{ status: "deferred", count: 2 }]);
+  expect(
+    await db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM jev_assessments WHERE task='document-classification'",
+      )
+      .first(),
+  ).toEqual({ count: 0 });
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(new Date(Date.now() - 32 * 60_000).toISOString(), captures[0].id)
+    .run();
+  await drainBackfill(processingToken);
+  expect(await settledStatuses()).toEqual([{ status: "deferred", count: 2 }]);
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(new Date(Date.now() - 31 * 60_000).toISOString(), captures[1].id)
+    .run();
+  await drainBackfill(processingToken);
+  expect(await settledStatuses()).toEqual([{ status: "complete", count: 2 }]);
   const stored = await mf.dispatchFetch(
     `${origin}/api/documents/${document.id}`,
     {
@@ -988,6 +1024,52 @@ it("completes each page job without starving a multi-page document and binds the
       )
     ).ready,
   ).toBe(true);
+});
+
+it("defers an unsaved singleton until its scan has settled", async () => {
+  const processingToken = `rsc_${"s".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const capture = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(new Date().toISOString(), capture.id)
+    .run();
+  await seedHistoricalOcr(
+    capture,
+    "Synthetic shop\nSynthetic item 12,34\nTOTAL 12,34",
+    new Date().toISOString(),
+  );
+  const held = await drainBackfill(processingToken);
+  expect(held.result).toMatchObject({
+    remaining: 0,
+    waiting: true,
+    settling_jobs: 1,
+  });
+  expect(await db.prepare("SELECT status FROM jev_jobs").first()).toEqual({
+    status: "deferred",
+  });
+  expect(
+    await db.prepare("SELECT COUNT(*) AS count FROM document_pages").first(),
+  ).toEqual({ count: 0 });
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind(new Date(Date.now() - 31 * 60_000).toISOString(), capture.id)
+    .run();
+  const finished = await drainBackfill(processingToken);
+  expect(finished.result).toMatchObject({
+    remaining: 0,
+    waiting: false,
+    settling_jobs: 0,
+  });
+  expect(await db.prepare("SELECT status FROM jev_jobs").first()).toEqual({
+    status: "complete",
+  });
 });
 
 it("does not publish a targeted Jev classification after a concurrent document edit", async () => {

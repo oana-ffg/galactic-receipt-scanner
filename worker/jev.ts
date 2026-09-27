@@ -51,6 +51,7 @@ const MAX_JEV_TEXT = 24_000;
 const JEV_ELIGIBILITY_VERSION = 3;
 const PAGE_CONTINUITY_PIPELINE_VERSION = 9;
 const JEV_PIPELINE_VERSION = 9;
+const DOCUMENT_SETTLE_MINUTES = 30;
 const DETACHED_PAYMENT_TASK = "payment-match-detached-v2";
 
 const detachedPaymentQuestion = {
@@ -1394,6 +1395,18 @@ async function hasCurrentWaitingCapture(env: Env) {
   ).first<{ found: number }>());
 }
 
+async function jevWaitingState(env: Env) {
+  const deferred = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM jev_jobs job JOIN captures ON captures.id=job.capture_id
+     WHERE job.status='deferred' AND (${currentTake})`,
+  ).first<{ count: number }>();
+  const settlingJobs = deferred?.count ?? 0;
+  return {
+    waiting: settlingJobs > 0 || (await hasCurrentWaitingCapture(env)),
+    settling_jobs: settlingJobs,
+  };
+}
+
 async function pipelineNeedsRun(
   env: Env,
   boundary: OrderedCapture | null,
@@ -1406,6 +1419,21 @@ async function pipelineNeedsRun(
        AND (${currentTake}) LIMIT 1`,
   ).first<{ found: number }>();
   if (unfinished) return true;
+  const settledDeferred = await env.DB.prepare(
+    `SELECT 1 AS found FROM jev_jobs job
+     JOIN captures ON captures.id=job.capture_id
+     LEFT JOIN document_pages page ON page.capture_id=job.capture_id
+     WHERE job.status='deferred' AND (${currentTake})
+       AND captures.created_at<=?
+       AND NOT EXISTS (
+         SELECT 1 FROM document_pages member_page
+         JOIN captures member ON member.id=member_page.capture_id
+         WHERE member_page.document_id=page.document_id AND member.created_at>?
+       ) LIMIT 1`,
+  )
+    .bind(documentSettleCutoff(), documentSettleCutoff())
+    .first<{ found: number }>();
+  if (settledDeferred) return true;
   if (!boundary) return false;
   if (
     captureOrder(boundary) >
@@ -2737,7 +2765,7 @@ async function markDocumentsWaitingForOcr(
     await env.DB.prepare(
       `UPDATE jev_jobs
        SET status='waiting',updated_at=?
-       WHERE status IN ('classified','complete')
+       WHERE status IN ('classified','complete','deferred')
          AND capture_id IN (${chunk.map(() => "?").join(",")})
          AND EXISTS (
            SELECT 1
@@ -2798,12 +2826,45 @@ async function ensureDocumentClassification(
   return alreadyCurrent ? "verified" : "classified";
 }
 
+function documentSettleCutoff() {
+  return new Date(Date.now() - DOCUMENT_SETTLE_MINUTES * 60_000).toISOString();
+}
+
 async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
+  let newest = "";
+  let found = 0;
+  const ids = document.pages.map((page) => page.captureId);
+  for (let index = 0; index < ids.length; index += 99) {
+    const chunk = ids.slice(index, index + 99);
+    const captures = await env.DB.prepare(
+      `SELECT created_at FROM captures WHERE id IN (${chunk.map(() => "?").join(",")})`,
+    )
+      .bind(...chunk)
+      .all<{ created_at: string }>();
+    found += captures.results.length;
+    for (const capture of captures.results)
+      if (capture.created_at > newest) newest = capture.created_at;
+  }
+  requireThat(
+    found === ids.length,
+    503,
+    "Jev document has no saved capture timestamp.",
+  );
+  if (newest > documentSettleCutoff()) {
+    const now = new Date().toISOString();
+    for (const page of document.pages)
+      await env.DB.prepare(
+        "UPDATE jev_jobs SET status='deferred',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
+      )
+        .bind(now, page.captureId)
+        .run();
+    return { status: "deferred", document_id: document.id };
+  }
   const evidence = await documentEvidence(env, document);
   if (!evidence) {
     for (const page of document.pages)
       await env.DB.prepare(
-        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
+        "UPDATE jev_jobs SET status='ineligible',ineligible_reason='document_evidence_incomplete',updated_at=? WHERE capture_id=? AND status IN ('classified','waiting','deferred')",
       )
         .bind(new Date().toISOString(), page.captureId)
         .run();
@@ -2816,7 +2877,7 @@ async function finalizePipelineDocument(env: Env, document: ReceiptDocument) {
   const status = await ensureDocumentClassification(env, document, evidence);
   for (const page of document.pages)
     await env.DB.prepare(
-      "UPDATE jev_jobs SET status='complete',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status IN ('classified','waiting')",
+      "UPDATE jev_jobs SET status='complete',ineligible_reason=NULL,updated_at=? WHERE capture_id=? AND status IN ('classified','waiting','deferred')",
     )
       .bind(new Date().toISOString(), page.captureId)
       .run();
@@ -2834,11 +2895,21 @@ async function documentPipelineStep(
   const next = await env.DB.prepare(
     `SELECT job.capture_id FROM jev_jobs job
      LEFT JOIN captures ON captures.id=job.capture_id
-     WHERE job.status='classified' AND
+     WHERE (job.status='classified' OR (job.status='deferred' AND (captures.id IS NULL OR captures.created_at<=?) AND NOT EXISTS (
+       SELECT 1 FROM document_pages page
+       JOIN document_pages member_page ON member_page.document_id=page.document_id
+       JOIN captures member ON member.id=member_page.capture_id
+       WHERE page.capture_id=job.capture_id AND member.created_at>?
+     ))) AND
        (captures.id IS NULL OR (captures.created_at,captures.id)<=(?,?))
      ORDER BY job.created_at,job.id LIMIT 1`,
   )
-    .bind(run.snapshot_created_at, run.snapshot_capture_id)
+    .bind(
+      documentSettleCutoff(),
+      documentSettleCutoff(),
+      run.snapshot_created_at,
+      run.snapshot_capture_id,
+    )
     .first<{ capture_id: string }>();
   if (!next) return { remaining: 0, cursor: null, result: null };
   const capture = await loadCapture(next.capture_id);
@@ -2850,7 +2921,7 @@ async function documentPipelineStep(
       ? "document_not_active"
       : "capture_not_current";
     await env.DB.prepare(
-      "UPDATE jev_jobs SET status='ineligible',ineligible_reason=?,updated_at=? WHERE capture_id=? AND status='classified'",
+      "UPDATE jev_jobs SET status='ineligible',ineligible_reason=?,updated_at=? WHERE capture_id=? AND status IN ('classified','deferred')",
     )
       .bind(reason, new Date().toISOString(), next.capture_id)
       .run();
@@ -4243,7 +4314,7 @@ export async function jevRoute(
           phase: "complete",
           remaining: 0,
           busy: false,
-          waiting: await hasCurrentWaitingCapture(env),
+          ...(await jevWaitingState(env)),
           blocked: blocked?.count ?? 0,
         });
       run = await startPipelineRun(env, boundary);
@@ -4253,7 +4324,7 @@ export async function jevRoute(
           phase: "complete",
           remaining: 0,
           busy: false,
-          waiting: await hasCurrentWaitingCapture(env),
+          ...(await jevWaitingState(env)),
           blocked: blocked?.count ?? 0,
         });
     }
@@ -4293,12 +4364,17 @@ export async function jevRoute(
         );
         await savePipelineStep(env, run, token, step.phase, step.cursor);
         saved = true;
+        const waitingState =
+          step.phase === "complete" ? await jevWaitingState(env) : null;
         return json({
           result: step.result,
           phase: step.phase,
           remaining: step.phase === "complete" ? 0 : 1,
           busy: step.busy ?? false,
-          waiting: "waiting" in step && step.waiting === true,
+          ...waitingState,
+          waiting:
+            ("waiting" in step && step.waiting === true) ||
+            (waitingState?.waiting ?? false),
           blocked: blocked?.count ?? 0,
         });
       }
@@ -4349,6 +4425,7 @@ export async function jevRoute(
           phase,
           remaining: step.remaining,
           busy: "busy" in step && step.busy === true,
+          ...(phase === "complete" ? await jevWaitingState(env) : {}),
           blocked: blocked?.count ?? 0,
         });
       }
@@ -4359,6 +4436,7 @@ export async function jevRoute(
         phase: "complete",
         remaining: 0,
         busy: false,
+        ...(await jevWaitingState(env)),
         blocked: blocked?.count ?? 0,
       });
     } finally {

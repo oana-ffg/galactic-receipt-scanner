@@ -98,12 +98,18 @@ test("synchronizes the complete public tree while preserving the private manifes
     assert.equal(result.changed, true);
     assert.equal(result.public_commit, value.publicCommit);
     assert.equal(
-      readFileSync(join(value.siteCheckout, "application.txt"), "utf8"),
+      readFileSync(join(value.siteCheckout, "application.txt"), "utf8").replace(
+        /\r\n/g,
+        "\n",
+      ),
       "public-main\n",
     );
     assert.equal(existsSync(join(value.siteCheckout, "obsolete.txt")), false);
     assert.equal(
-      readFileSync(join(value.siteCheckout, ".openai", "hosting.json"), "utf8"),
+      readFileSync(
+        join(value.siteCheckout, ".openai", "hosting.json"),
+        "utf8",
+      ).replace(/\r\n/g, "\n"),
       value.manifest,
     );
     assert.equal(git(value.publicCheckout, "status", "--porcelain"), "");
@@ -145,7 +151,10 @@ test("initializes an unborn private source history from public main plus the man
     const result = run(value.publicCheckout, value.siteCheckout);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(
-      readFileSync(join(value.siteCheckout, "application.txt"), "utf8"),
+      readFileSync(join(value.siteCheckout, "application.txt"), "utf8").replace(
+        /\r\n/g,
+        "\n",
+      ),
       "public-main\n",
     );
     assert.equal(

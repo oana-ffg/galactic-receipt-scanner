@@ -365,11 +365,13 @@ function synchronize({ publicCheckout, siteCheckout }) {
     if (siteHead) updateArgs.push(siteHead);
     git(siteRoot, updateArgs);
     git(siteRoot, ["reset", "--hard", newCommit]);
-    if (status(siteRoot))
-      fail("The private Sites checkout was not clean after synchronization.");
-    if (!readFileSync(manifest.path).equals(manifest.source)) {
+    // Git may materialize text with local line endings on checkout.
+    const normalized = (bytes) => bytes.toString("utf8").replace(/\r\n/g, "\n");
+    if (normalized(readFileSync(manifest.path)) !== normalized(manifest.source))
       fail("The private Sites manifest changed during synchronization.");
-    }
+    const remaining = status(siteRoot);
+    if (remaining)
+      fail("The private Sites checkout was not clean after synchronization.");
     return {
       changed: true,
       public_commit: publicCommit,

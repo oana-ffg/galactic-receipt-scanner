@@ -799,7 +799,8 @@ class BatchGuardTests(unittest.TestCase):
         self.assertEqual(diagnostic.parent, (private_base / 'diagnostics').resolve())
         self.assertIn('FileNotFoundError', json.loads(diagnostic.read_text())['traceback'])
         self.assertEqual(reported['error_type'], 'FileNotFoundError')
-        self.assertIn(str(private_base.parent / 'processing-host.json'), reported['error'])
+        self.assertIn(str(private_base.parent / 'processing-host.json'),
+                      reported['error'].replace('\\\\', '\\'))
         self.assertEqual(reported['stage'], 'batch-lease-setup')
         self.assertFalse(reported['batch_started'])
 
