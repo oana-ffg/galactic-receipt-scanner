@@ -19,7 +19,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
-from receipt_locks import LockBusy, acquire_lock, is_worker_batch_directory, lock_held
+from receipt_locks import LockBusy, acquire_lock, acquire_lock_wait, is_worker_batch_directory, lock_held
 from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, diagnostic_text, failure_report, write_new_file
 
 MAX_INPUT = 512 * 1024
@@ -1474,7 +1474,8 @@ class Worker:
             if self.state["phase"] == "claim-uncertain":
                 claim_request = self.state.get("claim_request")
                 if claim_request:
-                    result = self.claim_with_retry(claim_request)
+                    with acquire_lock_wait(self.repo / ".local" / "processing-claim.lock"):
+                        result = self.claim_with_retry(claim_request)
                     self.state.pop("failed", None)
                     return self.accept_claim_response(result)
                 # Compatibility for an unfinished run created before idempotent claims.
@@ -1520,17 +1521,18 @@ class Worker:
                 require(batch["batch_id"] == self.state.get("batch_id"),
                         "Worker belongs to a different batch; do not claim under a replacement coordinator.")
                 excluded = sorted(self.verified_document_ids(batch))
-                previous_state = deepcopy(self.state)
-                self.state["phase"] = "claim-uncertain"
-                self.state["claim_started"] = time.time()
-                self.state["claim_request"] = {
-                    "stage": "small",
-                    "exclude_document_ids": excluded,
-                    "claim_token": str(uuid.uuid4()),
-                }
-                self.checkpoint_intent(previous_state)
-                result = self.claim_with_retry(self.state["claim_request"])
-                response = self.accept_claim_response(result)
+                with acquire_lock_wait(self.repo / ".local" / "processing-claim.lock"):
+                    previous_state = deepcopy(self.state)
+                    self.state["phase"] = "claim-uncertain"
+                    self.state["claim_started"] = time.time()
+                    self.state["claim_request"] = {
+                        "stage": "small",
+                        "exclude_document_ids": excluded,
+                        "claim_token": str(uuid.uuid4()),
+                    }
+                    self.checkpoint_intent(previous_state)
+                    result = self.claim_with_retry(self.state["claim_request"])
+                    response = self.accept_claim_response(result)
                 verify(not result.get("claim") or result["claim"]["document"]["id"] not in excluded,
                        "Scanner returned a document already verified by this batch; preserve the lease for reconciliation.")
                 return response

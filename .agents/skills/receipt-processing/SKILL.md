@@ -177,10 +177,9 @@ the primary config may omit that field. Never copy a credential into these files
 controller owns a separate local guard, journal and backend batch lease. Dispatch one
 fresh Luna per acquired lane, up to ten active Luna workers at once. Within a lane,
 finish and verify the current document before requesting its next task. A busy lane
-has another live controller; do not replace it. **Send `next` to only one lane at a time
-and await its prepared claim response before sending `next` to another lane.** Luna
-workers may continue in parallel while those brief claims are prepared. This avoids
-multiple lanes selecting the same oldest document before any has claimed it. An empty
+has another live controller; do not replace it. Send `next` to idle lanes concurrently.
+The workers' shared claim lock serializes only the backend claim request; independent
+preflight and task preparation can overlap. Luna workers continue in parallel. An empty
 lane is terminal, even when
 other lanes still have work. If this task has fewer than ten available subagent slots,
 run only as many lanes as it can actively coordinate and report the actual concurrency.
@@ -197,7 +196,7 @@ Luna and repeat `complete`. On `next:"retry-controller"`, send the returned exac
 `retry_request` through the same controller without involving Luna; it replays only its
 pinned idempotent checkpoint or terminal lease release.
 On `next:"retry-contention"`, wait the returned `retry_after_ms`, then send `next` to
-that same lane after any other pending lane claim preparation. It has no active document.
+that same lane. It has no active document.
 After five confirmed contention responses, that controller terminates with
 `stop_reason:"claim-contention"`; report it as busy, not as an empty queue.
 On `next:"dispatch"`, request the next task. Terminal

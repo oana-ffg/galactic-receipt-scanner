@@ -112,10 +112,10 @@ document claim, verifies live saved state and updates the unique batch count.
 `next:"correct-luna-result"` requires the same Luna to rewrite only its result file;
 `next:"retry-controller"` sends the returned exact content-free `retry_request` so the
 controller can replay its pinned idempotent checkpoint or terminal lease release without Luna; `next:"dispatch"`
-requests another task. For scheduled parallel lanes, serialize all `next` requests
-across lane controllers while Luna workers run concurrently. A `retry-contention`
-response has no claim; wait its returned delay and retry that same lane after any other
-pending claim preparations. Five contentions end that lane with `claim-contention`,
+requests another task. For scheduled parallel lanes, send `next` to idle controllers
+concurrently. Their workers serialize only the backend claim request with a shared
+local lock, while independent preflight and task preparation overlap. A `retry-contention`
+response has no claim; wait its returned delay and retry that same lane. Five contentions end that lane with `claim-contention`,
 which is a busy stop, not evidence of an empty queue. Terminal `phase:"complete"` means
 the target was reached, a recorded empty claim proved exhaustion, or repeated contention
 stopped that lane; the batch lease is released.

@@ -1,6 +1,7 @@
 """Non-blocking OS locks shared by receipt workers and their batch coordinator."""
 import errno
 import os
+import time
 
 
 PARALLEL_LANES = tuple(f"parallel-{number}" for number in range(1, 10))
@@ -42,6 +43,15 @@ def acquire_lock(path, *, create=True):
             raise LockBusy() from None
         raise
     return handle
+
+
+def acquire_lock_wait(path):
+    """Wait for another live claim request to finish before entering this one."""
+    while True:
+        try:
+            return acquire_lock(path)
+        except LockBusy:
+            time.sleep(0.1)
 
 
 def lock_held(path):
