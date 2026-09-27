@@ -169,6 +169,15 @@ in progress while you work. This is not a disposable development instance.**
 
 ## Private issue reports
 
+- Prefer a directly callable authenticated API, connector, or Site tool for issue
+  metadata and screenshot bytes. Check what is available before opening a browser;
+  do not use browser UI automation to retrieve data that an accessible API can return.
+  Use a separately owner-approved `issues-read` connection for direct access when
+  configured; the processing credential is not authorized for `/api/issues`.
+  If owner-only access is available only through an authenticated browser session,
+  use that session without weakening access controls, and explicitly flag the
+  missing non-browser access path in the reply so the owner can decide whether
+  to fix it.
 - The scanner has an owner-only **Private issues** page at `/issues`. Reports live in
   the `issues` D1 table, with append-only progress history in `issue_updates` and private
   screenshots in R2 under `issues/`. They are separate from receipt records.

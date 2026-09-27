@@ -90,8 +90,27 @@ claiming work; do not copy credentials into a file as a fallback.
   reads and writes. Direct edits use the same source validation, revision checks and
   document write guard as owner edits; they do not require a model claim.
 - **Backup:** GET-only capture history/metadata and original bytes; no processing writes.
-- Neither credential permits camera uploads, station controls, private issues,
-  human approval, or creating/revoking other connections.
+- **Issues-read:** GET-only private issue list, details, updates, and screenshot bytes;
+  no issue updates or receipt access. Provision this as a separate owner-approved
+  connection. Existing processing and backup credentials do not gain issue access.
+- No machine credential permits camera uploads, station controls, human approval,
+  or creating/revoking other connections.
+
+## Read private issues without a browser
+
+Create a separate `issues-read` connection using the same encrypted handoff described
+above, with the owner approving the request on `/agent-access`. For a one-off local
+session, use a one-day lifetime and revoke it when finished. Keep its private config
+outside source; for recurring access, use the host's `credential_command` provider.
+The connection helper accepts `issues-read` as its scope. The existing API client can
+then list issues with `get /api/issues`, read an issue by its API path, and follow each
+non-null `next` cursor using the URL-encoded `before` query parameter. The `file`
+command downloads a screenshot to a private destination and verifies its bytes against
+the SHA-256 in the issue metadata. Supply the real issue path, hash, and output
+location returned by the authenticated API. Do not put issue content or credentials
+in source or command arguments. The sealed credential
+bundle retains the field name `processing_token` for compatibility, but its
+`issues-read` scope is enforced server-side.
 
 The old `PROCESSING_TOKEN_SHA256` setting remains temporarily supported for existing
 clients during migration. Remove it only after its users have migrated and new access is

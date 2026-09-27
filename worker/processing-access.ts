@@ -1,9 +1,10 @@
 import { digest, requireThat } from "./http";
 
+const id =
+  "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+
 // Explicit allowlist: new application routes never acquire machine access implicitly.
 export function processingRouteAllowed(method: string, path: string): boolean {
-  const id =
-    "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
   if (method === "GET")
     return (
       [
@@ -49,7 +50,15 @@ export function processingRouteAllowed(method: string, path: string): boolean {
   );
 }
 
-export async function authorizeProcessor(
+function issueReadRouteAllowed(method: string, path: string): boolean {
+  return (
+    method === "GET" &&
+    (path === "/api/issues" ||
+      new RegExp(`^/api/issues/${id}(/screenshot)?$`).test(path))
+  );
+}
+
+export async function authorizeAgent(
   request: Request,
   env: {
     APP_ORIGIN: string;
@@ -109,6 +118,14 @@ export async function authorizeProcessor(
         .run();
   }
   const path = new URL(request.url).pathname;
+  if (scope === "issues-read") {
+    requireThat(
+      issueReadRouteAllowed(request.method, path),
+      403,
+      "Route is outside issue read access.",
+    );
+    return;
+  }
   if (scope === "backup") {
     requireThat(
       request.method === "GET" &&

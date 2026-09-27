@@ -27,7 +27,7 @@ import {
 import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
 import { documentRoute } from "./documents";
-import { authorizeProcessor } from "./processing-access";
+import { authorizeAgent } from "./processing-access";
 import { connectionRoute } from "./connections";
 import { jevRoute, paymentMatchesRoute, queueJevJob, runJevJob } from "./jev";
 import {
@@ -1090,7 +1090,7 @@ export default {
     };
     try {
       if (request.headers.has("authorization"))
-        await authorizeProcessor(request, env);
+        await authorizeAgent(request, env);
       else authorize(request, env);
       timing.set("serverAuthMs", performance.now() - timing.started);
       return finish(

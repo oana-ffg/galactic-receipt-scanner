@@ -752,7 +752,7 @@ def main():
     commands.add_parser("status")
     commands.add_parser("jev-backfill", help="Run the resumable Jev page, grouping, detached-payment, and final-document pipeline")
     commands.add_parser("jev-completeness", help="Assess current Jev purchase documents for missing source pages, lines, and totals")
-    get = commands.add_parser("get", help="Read a relative processing API path")
+    get = commands.add_parser("get", help="Read a relative API path allowed by this connection's scope")
     get.add_argument("path")
     post = commands.add_parser("post", help="Submit a private JSON file to an allowed processing or document endpoint")
     post.add_argument("path")

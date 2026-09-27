@@ -135,6 +135,32 @@ test("connection cleanup removes an init-only private directory", () => {
   }
 });
 
+test("connection helper accepts a separate read-only issues scope", () => {
+  const parent = mkdtempSync(join(tmpdir(), "scanner-issues-connection-test-"));
+  const root = join(parent, "connection");
+  const run = (...args) =>
+    spawnSync(
+      process.execPath,
+      [resolve("scripts/receipt_connection.mjs"), ...args],
+      { encoding: "utf8" },
+    );
+  try {
+    const result = run(
+      "init",
+      root,
+      "https://synthetic.example",
+      "Synthetic issue viewer",
+      "issues-read",
+      "1",
+    );
+    assert.equal(result.status, 0);
+    assert.equal(JSON.parse(result.stdout).request.scope, "issues-read");
+    assert.equal(run("destroy", root).status, 0);
+  } finally {
+    rmSync(parent, { recursive: true });
+  }
+});
+
 test("connection cleanup removes malformed partial files and can resume partial deletion", () => {
   const parent = mkdtempSync(
     join(tmpdir(), "scanner-connection-partial-cleanup-"),

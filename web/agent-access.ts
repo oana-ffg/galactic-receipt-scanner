@@ -13,9 +13,9 @@ interface Connection {
 
 export async function mountAgentAccess(app: HTMLElement) {
   app.innerHTML = `<header><h1>Agent access</h1><a href="/">Capture station</a><a href="/review">Review receipts</a></header>
-    <main class="agent-access"><p>Connect a processing worker or a read-only backup. Each connection can be revoked separately.</p>
+    <main class="agent-access"><p>Connect a processing worker, a read-only backup, or a read-only issue viewer. Each connection can be revoked separately.</p>
     <p id="connection-status" role="status"></p>
-    <section><h2>Connect a worker</h2><p>Have your agent prepare a connection request, then approve it here or ask the agent to use this page’s site tools. Only the requesting worker can unlock the response.</p>
+    <section><h2>Connect a host</h2><p>Have your agent prepare a connection request, then approve it here or ask the agent to use this page’s site tools. Only the requesting host can unlock the response.</p>
     <label>Connection request file <input id="connection-file" type="file" accept="application/json,.json"></label>
     <p id="connection-summary"></p><button id="connection-create" disabled>Approve connection</button>
     <a id="connection-download" hidden download="connection-response.json">Download encrypted response</a></section>
@@ -49,7 +49,13 @@ export async function mountAgentAccess(app: HTMLElement) {
       const row = document.createElement("div");
       row.className = "connection-row";
       const text = document.createElement("p");
-      text.textContent = `${connection.name} · ${connection.scope === "backup" ? "Read-only backup" : "Receipt processing"} · ${connection.revoked_at ? "Revoked" : connection.expires_at <= Date.now() ? "Expired" : "Active"} · expires ${new Date(connection.expires_at).toLocaleString()} · last used ${connection.last_used_at ? new Date(connection.last_used_at).toLocaleString() : "Never"}`;
+      const scopeName =
+        connection.scope === "backup"
+          ? "Read-only backup"
+          : connection.scope === "issues-read"
+            ? "Read-only private issues"
+            : "Receipt processing";
+      text.textContent = `${connection.name} · ${scopeName} · ${connection.revoked_at ? "Revoked" : connection.expires_at <= Date.now() ? "Expired" : "Active"} · expires ${new Date(connection.expires_at).toLocaleString()} · last used ${connection.last_used_at ? new Date(connection.last_used_at).toLocaleString() : "Never"}`;
       row.append(text);
       if (!connection.revoked_at && connection.expires_at > Date.now()) {
         const button = document.createElement("button");
@@ -140,13 +146,13 @@ export async function mountAgentAccess(app: HTMLElement) {
   context?.registerTool({
     name: "create_processing_connection",
     description:
-      "Authorize a named processing or read-only backup connection using the signed-in owner session. Input must be the public request from receipt_connection.mjs. Returns encrypted credentials decryptable only by the requesting worker, never plaintext keys. Creating access is a write action.",
+      "Authorize a named processing, read-only backup, or read-only private-issues connection using the signed-in owner session. Input must be the public request from receipt_connection.mjs. Returns encrypted credentials decryptable only by the requesting worker, never plaintext keys. Creating access is a write action.",
     inputSchema: {
       type: "object",
       properties: {
         request_id: { type: "string" },
         name: { type: "string" },
-        scope: { enum: ["processing", "backup"] },
+        scope: { enum: ["processing", "backup", "issues-read"] },
         days: { type: "integer", minimum: 1, maximum: 365 },
         public_key: { type: "object" },
       },
@@ -159,7 +165,7 @@ export async function mountAgentAccess(app: HTMLElement) {
   context?.registerTool({
     name: "revoke_processing_connection",
     description:
-      "Revoke one exact processing or backup connection through the signed-in owner session. Use the connection ID returned when that connection was created. Revocation is a write action.",
+      "Revoke one exact agent connection through the signed-in owner session. Use the connection ID returned when that connection was created. Revocation is a write action.",
     inputSchema: {
       type: "object",
       properties: {

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
-import { authorizeProcessor } from "./processing-access";
+import { authorizeAgent } from "./processing-access";
 
 const token = `rsc_${"s".repeat(43)}`;
 const hash = createHash("sha256").update(token).digest("hex");
@@ -128,7 +128,7 @@ it("fails closed for disabled, wrong, cross-site and old rotated credentials", a
     PROCESSING_TOKEN_SHA256: hash,
   };
   const check = (headers = auth, config = env, url = origin) =>
-    authorizeProcessor(
+    authorizeAgent(
       new Request(url + "/api/processing/access", { headers }),
       config,
     );

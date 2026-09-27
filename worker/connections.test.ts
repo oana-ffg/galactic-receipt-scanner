@@ -4,6 +4,7 @@ import {
   privateDecrypt,
   createDecipheriv,
   constants,
+  createHash,
 } from "node:crypto";
 import { runtime, ownerHeaders } from "../scripts/test-runtime.mjs";
 
@@ -101,6 +102,9 @@ it("issues only owner-authorized encrypted connections and retries idempotently"
       .status,
   ).toBe(403);
   expect(
+    (await mf.dispatchFetch(origin + "/api/issues", { headers: auth })).status,
+  ).toBe(403);
+  expect(
     (await post("/api/connections", newRequest().input, auth as typeof headers))
       .status,
   ).toBe(403);
@@ -154,6 +158,81 @@ it("restricts backup keys to originals and metadata and enforces expiry", async 
     (await mf.dispatchFetch(origin + "/api/captures", { headers: auth }))
       .status,
   ).toBe(401);
+});
+
+it("limits an owner-approved issue connection to private issue reads", async () => {
+  const id = crypto.randomUUID();
+  const screenshot = new Uint8Array([255, 216, 255, 7, 8, 9]);
+  const screenshotHash = createHash("sha256").update(screenshot).digest("hex");
+  const key = `issues/${id}/synthetic`;
+  await (
+    await mf.getR2Bucket("BUCKET")
+  ).put(key, screenshot, {
+    httpMetadata: { contentType: "image/jpeg" },
+  });
+  const db = await mf.getD1Database("DB");
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO issues(id,created_at,updated_at,status,title,description,context,screenshot_key,sha256,fingerprint) VALUES(?,?,?,'open',?,?,?,?,?,?)",
+    )
+    .bind(
+      id,
+      now,
+      now,
+      "Synthetic issue",
+      "Synthetic report",
+      "{}",
+      key,
+      screenshotHash,
+      "synthetic",
+    )
+    .run();
+  const { input, pair } = newRequest("issues-read");
+  const response = await post("/api/connections", input);
+  expect(response.status).toBe(200);
+  const value = decrypt(await response.json(), pair);
+  expect(value.scope).toBe("issues-read");
+  const auth = { Authorization: `Bearer ${value.processing_token}` };
+  const read = (path: string) =>
+    mf.dispatchFetch(origin + path, { headers: auth });
+  const list = await read("/api/issues");
+  expect(list.status).toBe(200);
+  expect(
+    ((await list.json()) as any).issues.some((issue: any) => issue.id === id),
+  ).toBe(true);
+  const detail = await read(`/api/issues/${id}`);
+  expect(detail.status).toBe(200);
+  expect(await detail.json()).toMatchObject({
+    id,
+    title: "Synthetic issue",
+    sha256: screenshotHash,
+  });
+  const image = await read(`/api/issues/${id}/screenshot`);
+  expect(image.status).toBe(200);
+  expect(new Uint8Array(await image.arrayBuffer())).toEqual(screenshot);
+  for (const path of [
+    "/api/captures",
+    "/api/station",
+    "/api/connections",
+    "/issues",
+    "/api/issues/not-an-id",
+  ]) {
+    expect((await read(path)).status, path).toBe(403);
+  }
+  expect(
+    (
+      await mf.dispatchFetch(origin + `/api/issues/${id}`, {
+        method: "PATCH",
+        headers: auth,
+        body: JSON.stringify({ status: "resolved", note: "Forbidden" }),
+      })
+    ).status,
+  ).toBe(403);
+  expect(
+    (await post(`/api/connections/${input.request_id}/revoke`, {})).status,
+  ).toBe(200);
+  expect((await read("/api/issues")).status).toBe(401);
 });
 
 it("paginates retained connections so older active keys remain discoverable", async () => {

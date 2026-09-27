@@ -45,7 +45,7 @@ async function run() {
     !["init", "complete", "complete-stdin", "destroy"].includes(command)
   )
     throw Error(
-      "Use init DIRECTORY ORIGIN NAME [processing|backup] [DAYS], complete DIRECTORY ENVELOPE_FILE, complete-stdin DIRECTORY, or destroy DIRECTORY.",
+      "Use init DIRECTORY ORIGIN NAME [processing|backup|issues-read] [DAYS], complete DIRECTORY ENVELOPE_FILE, complete-stdin DIRECTORY, or destroy DIRECTORY.",
     );
   const root = resolve(directory);
   if (command === "init") {
@@ -57,7 +57,7 @@ async function run() {
       url.protocol !== "https:" ||
       !name ||
       name.length > 80 ||
-      !["processing", "backup"].includes(scope) ||
+      !["processing", "backup", "issues-read"].includes(scope) ||
       !Number.isInteger(days) ||
       days < 1 ||
       days > 365

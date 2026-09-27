@@ -118,7 +118,7 @@ export async function connectionRoute(
       "Connection name must have 1–80 characters.",
     );
     requireThat(
-      ["processing", "backup"].includes(body.scope),
+      ["processing", "backup", "issues-read"].includes(body.scope),
       400,
       "Invalid connection scope.",
     );
