@@ -7,7 +7,10 @@ import {
 import type { Env } from "./index";
 import type { Capture } from "../web/types";
 import { currentTake } from "./capture-selection";
-import { loadCompletenessAudits } from "./completeness-state";
+import {
+  loadCompletenessAudits,
+  type MeasureReviewQuery,
+} from "./completeness-state";
 import {
   DOCUMENT_EVIDENCE_LIMIT,
   documentReasons,
@@ -371,6 +374,20 @@ export async function documentRoute(
     request.method === "GET"
       ? url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})$/)
       : null;
+  const profile = Boolean(single && url.searchParams.get("profile") === "1");
+  const queryTimes = new Map<string, number>();
+  const measureQuery: MeasureReviewQuery = async (name, query) => {
+    if (!profile) return query();
+    const started = performance.now();
+    try {
+      return await query();
+    } finally {
+      queryTimes.set(
+        name,
+        (queryTimes.get(name) ?? 0) + performance.now() - started,
+      );
+    }
+  };
   const namedAction = url.pathname.match(
     /^\/api\/documents\/([0-9a-f-]{36})\/(pdf|history)$/,
   );
@@ -573,9 +590,8 @@ export async function documentRoute(
           .bind(sourceId)
           .first<{ document_id: string }>()
       : null;
-    const saved = await storedDocumentById(
-      env,
-      page?.document_id ?? requestedId,
+    const saved = await measureQuery("document", () =>
+      storedDocumentById(env, page?.document_id ?? requestedId),
     );
     if (
       saved &&
@@ -585,7 +601,9 @@ export async function documentRoute(
     ) {
       stored = [saved];
       const selected = await Promise.all(
-        saved.pages.map((item) => loadCapture(item.captureId)),
+        saved.pages.map((item) =>
+          measureQuery("capture", () => loadCapture(item.captureId)),
+        ),
       );
       requireThat(
         selected.every((item) => item !== null),
@@ -594,14 +612,18 @@ export async function documentRoute(
       );
       captures = selected as Capture[];
     } else {
-      const capture = await loadCapture(requestedId);
+      const capture = await measureQuery("capture", () =>
+        loadCapture(requestedId),
+      );
       const assignment =
         capture &&
-        (await env.DB.prepare(
-          "SELECT document_id FROM document_pages WHERE capture_id=?",
-        )
-          .bind(capture.id)
-          .first<{ document_id: string }>());
+        (await measureQuery("page_assignment", () =>
+          env.DB.prepare(
+            "SELECT document_id FROM document_pages WHERE capture_id=?",
+          )
+            .bind(capture.id)
+            .first<{ document_id: string }>(),
+        ));
       requireThat(
         capture?.is_current && !assignment,
         404,
@@ -635,7 +657,11 @@ export async function documentRoute(
   >();
   let jevRoles = new Map<string, string>();
   const loadReviewState = async (selected: ReceiptDocument[]) => {
-    const state = await loadCompletenessAudits(env, selected);
+    const state = await loadCompletenessAudits(
+      env,
+      selected,
+      profile ? measureQuery : undefined,
+    );
     completenessAudits = state.audits;
     jevRoles = state.roles;
   };
@@ -654,7 +680,11 @@ export async function documentRoute(
       ]
     : docs;
   const reserved =
-    namedAction?.[2] === "history" ? [] : await names(env, nameCandidates);
+    namedAction?.[2] === "history"
+      ? []
+      : await measureQuery("filename_reservations", () =>
+          names(env, nameCandidates),
+        );
   let fileRows: FileRow[] = [];
   let filesLoaded = false;
   const loadFileRows = async (documentIds?: string[]) => {
@@ -664,11 +694,13 @@ export async function documentRoute(
       return;
     }
     fileRows = (
-      await env.DB.prepare(
-        `SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ${documentIds ? `WHERE f.document_id IN (${documentIds.map(() => "?").join(",")})` : ""} ORDER BY f.created_at DESC,f.sha256 DESC`,
+      await measureQuery("pdf_records", () =>
+        env.DB.prepare(
+          `SELECT f.*,json_object('pages',json_extract(v.payload,'$.pages')) AS payload FROM document_files f JOIN document_versions v ON v.document_id=f.document_id AND v.revision=f.revision ${documentIds ? `WHERE f.document_id IN (${documentIds.map(() => "?").join(",")})` : ""} ORDER BY f.created_at DESC,f.sha256 DESC`,
+        )
+          .bind(...(documentIds ?? []))
+          .all<FileRow>(),
       )
-        .bind(...(documentIds ?? []))
-        .all<FileRow>()
     ).results;
     filesLoaded = true;
   };
@@ -764,12 +796,20 @@ export async function documentRoute(
       requireThat(doc, 404, "Document not found.");
       await loadFileRows([doc.id]);
       await loadReviewState([doc]);
-      return json({
+      const response = json({
         document: view(doc),
         captures: captures.filter((c) =>
           doc.pages.some((p) => p.captureId === c.id),
         ),
       });
+      if (profile)
+        response.headers.set(
+          "Server-Timing",
+          [...queryTimes]
+            .map(([name, duration]) => `${name};dur=${duration.toFixed(1)}`)
+            .join(", "),
+        );
+      return response;
     }
     if (url.pathname === "/api/documents") {
       if (url.searchParams.get("summary") === "1") {

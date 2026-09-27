@@ -27,24 +27,35 @@ type PageHeadRow = {
   ocr_sha256: string;
 };
 
+export type MeasureReviewQuery = <T>(
+  name: string,
+  query: () => Promise<T>,
+) => Promise<T>;
+
 export async function loadCompletenessAudits(
   env: Env,
   documents: ReceiptDocument[],
+  measureQuery?: MeasureReviewQuery,
 ): Promise<{
   audits: Map<string, NonNullable<DocumentView["completenessAudit"]>>;
   roles: Map<string, string>;
 }> {
   if (!documents.length) return { audits: new Map(), roles: new Map() };
+  const runQuery: MeasureReviewQuery = (name, query) =>
+    measureQuery ? measureQuery(name, query) : query();
   const selectChunks = async <T>(
+    name: string,
     query: (placeholders: string) => string,
     ids: string[],
   ): Promise<T[]> => {
     const rows: T[] = [];
     for (let offset = 0; offset < ids.length; offset += 90) {
       const chunk = ids.slice(offset, offset + 90);
-      const result = await env.DB.prepare(query(chunk.map(() => "?").join(",")))
-        .bind(...chunk)
-        .all<T>();
+      const result = await runQuery(name, () =>
+        env.DB.prepare(query(chunk.map(() => "?").join(",")))
+          .bind(...chunk)
+          .all<T>(),
+      );
       rows.push(...result.results);
     }
     return rows;
@@ -61,38 +72,42 @@ export async function loadCompletenessAudits(
   const [assessmentRows, headRows, pageHeadRows] = await Promise.all([
     scoped
       ? selectChunks<AssessmentRow>(
+          "jev_assessments",
           (ids) =>
             `SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
           documentIds,
         )
-      : env.DB.prepare(
-          "SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
-        )
-          .bind(COMPLETENESS_TASK)
-          .all<AssessmentRow>()
-          .then((row) => row.results),
+      : runQuery("jev_assessments", () =>
+          env.DB.prepare(
+            "SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
+          )
+            .bind(COMPLETENESS_TASK)
+            .all<AssessmentRow>(),
+        ).then((row) => row.results),
     scoped
       ? selectChunks<HeadRow>(
+          "jev_document_heads",
           (ids) =>
             `SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads WHERE document_id IN (${ids})`,
           documentIds,
         )
-      : env.DB.prepare(
-          "SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads",
-        )
-          .all<HeadRow>()
-          .then((row) => row.results),
+      : runQuery("jev_document_heads", () =>
+          env.DB.prepare(
+            "SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads",
+          ).all<HeadRow>(),
+        ).then((row) => row.results),
     scoped
       ? selectChunks<PageHeadRow>(
+          "jev_page_heads",
           (ids) =>
             `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads WHERE capture_id IN (${ids})`,
           pageIds,
         )
-      : env.DB.prepare(
-          "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
-        )
-          .all<PageHeadRow>()
-          .then((row) => row.results),
+      : runQuery("jev_page_heads", () =>
+          env.DB.prepare(
+            "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
+          ).all<PageHeadRow>(),
+        ).then((row) => row.results),
   ]);
   const current = new Map(documents.map((document) => [document.id, document]));
   const headById = new Map(headRows.map((head) => [head.document_id, head]));
@@ -118,15 +133,20 @@ export async function loadCompletenessAudits(
   const savedVersions = new Map<string, string>();
   for (let offset = 0; offset < legacyCandidates.length; offset += 45) {
     const chunk = legacyCandidates.slice(offset, offset + 45);
-    const rows = await env.DB.prepare(
-      `WITH wanted(document_id,revision) AS (VALUES ${chunk.map(() => "(?,?)").join(",")})
-       SELECT v.document_id,v.payload FROM document_versions v
-       JOIN wanted w ON v.document_id=w.document_id AND v.revision=w.revision`,
-    )
-      .bind(
-        ...chunk.flatMap((head) => [head.document_id, head.document_revision]),
+    const rows = await runQuery("jev_legacy_versions", () =>
+      env.DB.prepare(
+        `WITH wanted(document_id,revision) AS (VALUES ${chunk.map(() => "(?,?)").join(",")})
+         SELECT v.document_id,v.payload FROM document_versions v
+         JOIN wanted w ON v.document_id=w.document_id AND v.revision=w.revision`,
       )
-      .all<{ document_id: string; payload: string }>();
+        .bind(
+          ...chunk.flatMap((head) => [
+            head.document_id,
+            head.document_revision,
+          ]),
+        )
+        .all<{ document_id: string; payload: string }>(),
+    );
     rows.results.forEach((row) =>
       savedVersions.set(row.document_id, row.payload),
     );

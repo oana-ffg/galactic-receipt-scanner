@@ -185,6 +185,32 @@ it("reads one document without loading the collection and excludes an unsaved re
   expect((await request(`/api/documents/${source.id}`)).status).toBe(404);
   expect((await request(`/api/documents/${retake.id}`)).status).toBe(200);
 });
+it("reports individual read timings only when requested", async () => {
+  const source = await capture();
+  const document = newDocument(source);
+  document.vendor = "Synthetic shop";
+  document.receiptDate = "2026-02-01";
+  expect((await save([document])).status).toBe(200);
+
+  const ordinary = await request(`/api/documents/${source.id}`);
+  expect(ordinary.headers.get("Server-Timing")).toBeNull();
+
+  const profiled = await request(`/api/documents/${source.id}?profile=1`);
+  expect(profiled.status).toBe(200);
+  expect(await profiled.json()).toEqual(await ordinary.json());
+  const timing = profiled.headers.get("Server-Timing") ?? "";
+  for (const name of [
+    "document",
+    "capture",
+    "filename_reservations",
+    "pdf_records",
+    "jev_assessments",
+    "jev_document_heads",
+    "jev_page_heads",
+  ]) {
+    expect(timing).toMatch(new RegExp(`(?:^|, )${name};dur=\\d+\\.\\d`));
+  }
+});
 it("rejects spoofed sources, missing fields, cyclic duplicates and invalid money", async () => {
   const c = await capture(),
     d = newDocument(c);
