@@ -54,10 +54,8 @@ export interface Quality {
   candidateReady?: boolean;
   reason: string;
   empty?: boolean;
-  /** Last paper area is clear even at the most inclusive segmentation cut. */
+  /** The old paper area became markedly darker than it was when saved. */
   emptyStrong?: boolean;
-  /** No outline, substantially darker old paper area, near the empty cutoff. */
-  emptyUncertain?: boolean;
   motion?: number;
   /** Legacy diagnostics retained on older captures. */
   focus?: number;

@@ -73,6 +73,7 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     const removed = await analyze({
       preview: { capture: false, removal: true },
     });
+    const idleAfterRemoval = await analyze(scanning);
     // Synthetic peripheral glare crosses the occupancy boundary while the
     // previous paper area stays substantially darker. No real receipt data.
     const glare = async (width: number, background = "#181818") => {
@@ -86,6 +87,19 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     const glareBorderline = await glare(830);
     const glareBlocked = await glare(920);
     const glareBright = await glare(830, "#969696");
+    ctx.fillStyle = "#181818";
+    ctx.fillRect(0, 0, 2000, 2400);
+    ctx.fillStyle = "#c8c8c8";
+    ctx.fillRect(40, 180, 300, 2040);
+    const falseOutline = await analyze(removal);
+    ctx.fillStyle = "#181818";
+    ctx.fillRect(0, 0, 2000, 2400);
+    ctx.fillStyle = "#777777";
+    ctx.fillRect(380, 180, 1240, 2040);
+    ctx.fillStyle = "#101010";
+    ctx.font = "56px sans-serif";
+    ctx.fillText("SYNTHETIC NEW RECEIPT", 450, 420);
+    const darkerNewPaper = await analyze(scanning);
     worker.terminate();
     return {
       idle,
@@ -98,10 +112,13 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
       clipped,
       washedOut,
       removed,
+      idleAfterRemoval,
       glareClear,
       glareBorderline,
       glareBlocked,
       glareBright,
+      falseOutline,
+      darkerNewPaper,
     };
   }, `/assets/${workerFile}`);
   expect(result.idle).toMatchObject({ ok: false, handsChecked: false });
@@ -127,8 +144,8 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     empty: false,
   });
   expect(result.saved.sharpness).toBeUndefined();
-  for (const quality of [result.moved, result.clipped])
-    expect(quality.empty).toBe(false);
+  expect(result.moved.empty).toBe(false);
+  expect(result.clipped.empty).toBe(true);
   expect(result.saved.removalDiagnostics).toMatchObject({
     geometry: "outline",
     naturalEmpty: false,
@@ -146,19 +163,20 @@ test("real vision worker skips idle ML, stages a candidate, and checks the saved
     handsChecked: true,
     hands: [],
   });
-  expect(result.glareClear).toMatchObject({ empty: true, emptyStrong: false });
-  expect(result.glareBorderline).toMatchObject({
-    empty: false,
-    emptyUncertain: true,
-    quad: null,
-    handsChecked: true,
-    hands: [],
-  });
+  expect(result.idleAfterRemoval).toMatchObject({ empty: true, quad: null });
   for (const quality of [
+    result.glareClear,
+    result.glareBorderline,
     result.glareBlocked,
-    result.glareBright,
-    result.moved,
-    result.clipped,
+    result.falseOutline,
   ])
-    expect(quality.emptyUncertain).not.toBe(true);
+    expect(quality).toMatchObject({
+      empty: true,
+      handsChecked: true,
+      hands: [],
+    });
+  expect(result.falseOutline.removalDiagnostics?.geometry).toBe("outline");
+  expect(result.darkerNewPaper.quad).not.toBeNull();
+  expect(result.darkerNewPaper.empty).toBe(false);
+  expect(result.glareBright.empty).toBe(false);
 });

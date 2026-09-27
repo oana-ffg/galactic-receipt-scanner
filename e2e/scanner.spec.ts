@@ -458,6 +458,12 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     f.paper = false;
     f.originalDelay = 1200;
   });
+  await expect
+    .poll(async () => {
+      const station = await (await request.get("/api/station")).json();
+      return station.state?.armed;
+    })
+    .toBe(true);
   await expect(phone.locator("#status")).toHaveText(
     "Ready for the next receipt.",
   );
@@ -480,6 +486,12 @@ test("direct preview delivers live frames and immediate controls while HTTP prev
     .captures;
   expect(afterEarlyRemoval).toHaveLength(captures.length + 1);
   expect(afterEarlyRemoval[0].status).toBe("accepted");
+  await expect
+    .poll(async () => {
+      const station = await (await request.get("/api/station")).json();
+      return station.state?.armed;
+    })
+    .toBe(true);
   await expect(phone.locator("#status")).toHaveText(
     "Ready for the next receipt.",
   );

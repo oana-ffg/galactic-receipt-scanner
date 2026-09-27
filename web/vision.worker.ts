@@ -3,7 +3,7 @@ import { hasReceiptResolution } from "./capture-resolution";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
-import type { Quality } from "./types";
+import type { Quality, RemovalDiagnostics } from "./types";
 import { measurePrint } from "./print-quality";
 import { measureCapturedBlur } from "./blur-image";
 import { HandChecks, type PreviewChecks } from "./hand-checks";
@@ -22,6 +22,34 @@ const sceneContext = sceneCanvas.getContext("2d", {
 let previous: Uint8Array | undefined;
 let paperBounds: number[] | undefined;
 let paperBrightness: number | undefined;
+function boundsOf(quad: number[][]): number[] {
+  return [
+    Math.min(...quad.map((p) => p[0])),
+    Math.min(...quad.map((p) => p[1])),
+    Math.max(...quad.map((p) => p[0])),
+    Math.max(...quad.map((p) => p[1])),
+  ];
+}
+
+// Compare the same inset rectangle before and after saving. The warped crop
+// includes a different mix of paper and desk, so its mean is not comparable.
+function paperAreaBrightness(
+  gray: CV.Mat,
+  bounds: number[],
+): number | undefined {
+  const [left, top, right, bottom] = bounds;
+  const insetX = (right - left) * 0.1;
+  const insetY = (bottom - top) * 0.1;
+  const x0 = Math.max(0, Math.ceil((left + insetX) * gray.cols));
+  const x1 = Math.min(gray.cols, Math.ceil((right - insetX) * gray.cols));
+  const y0 = Math.max(0, Math.ceil((top + insetY) * gray.rows));
+  const y1 = Math.min(gray.rows, Math.ceil((bottom - insetY) * gray.rows));
+  if (x1 <= x0 || y1 <= y0) return undefined;
+  let sum = 0;
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) sum += gray.data[y * gray.cols + x];
+  return sum / ((x1 - x0) * (y1 - y0));
+}
 const canvas = new OffscreenCanvas(1, 1);
 const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 // OpenCV's browser bundle publishes a promise on self.cv, including its WASM payload.
@@ -131,12 +159,12 @@ function analyze(
     empty: false,
     motion: 0,
   };
-  const removal = removalOnly
+  const removal: RemovalDiagnostics | undefined = removalOnly
     ? (q.removalDiagnostics = {
         geometry: "no-candidates",
         bounds: paperBounds?.map((v) => Number(v.toFixed(4))).join(","),
         previousBrightness: paperBrightness,
-      } satisfies import("./types").RemovalDiagnostics)
+      })
     : undefined;
   try {
     const source = use(
@@ -145,6 +173,15 @@ function analyze(
     const gray = use(new cv.Mat()),
       smooth = use(new cv.Mat());
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY);
+    if (paperBounds && paperBrightness !== undefined) {
+      const current = paperAreaBrightness(gray, paperBounds);
+      if (current !== undefined) {
+        if (removal) removal.areaBrightness = current;
+        const difference = paperBrightness - current;
+        q.empty = difference > Math.max(30, paperBrightness * 0.3);
+        q.emptyStrong = difference > Math.max(40, paperBrightness * 0.35);
+      }
+    }
     cv.GaussianBlur(gray, smooth, new cv.Size(5, 5), 0);
     const mask = use(new cv.Mat());
     const threshold = cv.threshold(
@@ -197,14 +234,12 @@ function analyze(
     }[] = [];
     const regions: number[][] = [];
     let large = false;
-    let areaBrightness = 255;
     const paperOccupancy = () => {
       if (!paperBounds) return 1;
       const [left, top, right, bottom] = paperBounds;
       const insetX = (right - left) * 0.1;
       const insetY = (bottom - top) * 0.1;
       let occupied = 0,
-        brightness = 0,
         samples = 0;
       for (
         let y = Math.ceil((top + insetY) * height);
@@ -217,22 +252,16 @@ function analyze(
           x++
         ) {
           occupied += mask.data[y * width + x] > 0 ? 1 : 0;
-          brightness += gray.data[y * width + x];
           samples++;
         }
-      areaBrightness = samples ? brightness / samples : 255;
-      if (removal)
-        Object.assign(removal, {
-          areaBrightness,
-          coverage: samples ? occupied / samples : 1,
-        });
+      if (removal) removal.coverage = samples ? occupied / samples : 1;
       return samples ? occupied / samples : 1;
     };
-    let inclusiveOccupancy = 1;
     for (const cut of cuts) {
       cv.threshold(smooth, mask, cut, 255, cv.THRESH_BINARY);
       cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, kernel);
-      if (cut === cuts[0]) inclusiveOccupancy = paperOccupancy();
+      if (cut === cuts[0] && removal)
+        removal.inclusiveCoverage = paperOccupancy();
       cv.findContours(
         mask,
         contours,
@@ -287,43 +316,8 @@ function analyze(
       Object.assign(removal, {
         regions: regions.length,
         candidates: candidates.length,
-        inclusiveCoverage: inclusiveOccupancy,
       });
-    const clearOfPaper = () => {
-      if (
-        regions.every(
-          (region) =>
-            paperBounds &&
-            (region[2] < paperBounds[0] ||
-              region[0] > paperBounds[2] ||
-              region[3] < paperBounds[1] ||
-              region[1] > paperBounds[3]),
-        )
-      )
-        return true;
-      if (!paperBounds) return false;
-      // A region's bounding box can cover an empty desk (glare, keyboard,
-      // cables). Measure actual foreground occupancy where paper was seen.
-      // Use the highest segmentation cut, which separates paper from glare.
-      return paperOccupancy() < 0.3;
-    };
-    // A uniformly bright/washed-out frame can have no segmented regions too.
-    // Fast removal also needs the old paper area to become substantially darker.
-    const substantiallyDarker = () =>
-      paperBrightness !== undefined &&
-      paperBrightness - areaBrightness > Math.max(30, paperBrightness * 0.35);
-    const removalQuality = () => {
-      q.empty = clearOfPaper();
-      q.emptyStrong =
-        q.empty && inclusiveOccupancy < 0.08 && substantiallyDarker();
-      // An exposure/segmentation fluctuation close to the normal cutoff is
-      // uncertainty, not positive paper presence. Only the temporal gate can
-      // bridge one such hand-checked frame between clear observations.
-      q.emptyUncertain =
-        !q.empty && paperOccupancy() <= 0.35 && substantiallyDarker();
-    };
     if (!candidates.length) {
-      removalQuality();
       if (large)
         q.reason =
           "Paper outline is unclear. Reduce glare and leave space around the paper.";
@@ -343,9 +337,6 @@ function analyze(
     if (!complete.length) {
       if (removal)
         Object.assign(removal, { geometry: "incomplete", complete: 0 });
-      // Peripheral glare must not prevent rearming after the last paper's area
-      // is clear. An edge region overlapping that area still blocks removal.
-      removalQuality();
       q.reason =
         "No complete paper outline. Keep the whole receipt inside the preview, away from glare.";
       return q;
@@ -378,6 +369,10 @@ function analyze(
     // A saved receipt only needs presence checks. Print quality and aligned
     // motion cannot unlock it; run them again after confirmed removal.
     if (removalOnly) return q;
+    // After rearming, a darker new receipt can still be a valid candidate.
+    // Brightness is empty-desk feedback only when no complete outline exists.
+    q.empty = false;
+    q.emptyStrong = false;
     if (papers[1]?.area > 0.05) {
       q.reason =
         "More than one paper-like region detected. Separate overlapping paper and move bright objects out of view.";
@@ -492,7 +487,7 @@ function analyze(
       return q;
     }
     q.ok = true;
-    q.paperBrightness = cv.mean(interior)[0];
+    q.paperBrightness = paperAreaBrightness(gray, boundsOf(q.quad));
     q.reason = "Image checks passed.";
     if (outputs) {
       // Containment corners may bridge folds and must not be treated as true
@@ -574,12 +569,7 @@ async function process(
   );
   if (quality.ok && quality.quad) {
     paperBrightness = quality.paperBrightness;
-    paperBounds = [
-      Math.min(...quality.quad.map((p) => p[0])),
-      Math.min(...quality.quad.map((p) => p[1])),
-      Math.max(...quality.quad.map((p) => p[0])),
-      Math.max(...quality.quad.map((p) => p[1])),
-    ];
+    paperBounds = boundsOf(quality.quad);
   }
   delete quality.paperBrightness;
   if (!outputs || !quality.ok) return { quality };

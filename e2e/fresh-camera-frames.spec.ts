@@ -54,8 +54,7 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
             ctx.fill();
           }
           if (document.documentElement?.dataset.paper === "folded") {
-            // Keep a sizeable folded paper inside the prior receipt area.
-            // A sub-threshold speck outside it represents removal, not folding.
+            // A folded sheet covers much less of the old receipt area.
             ctx.fillStyle = "#c8c8c8";
             ctx.beginPath();
             ctx.moveTo(820, 300);
@@ -238,12 +237,14 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         await page.evaluate(() => {
           document.documentElement.dataset.paper = "folded";
         });
-        await page.waitForTimeout(1200);
-        await expect(page.locator("#phase")).toHaveText("SAVED · NEXT");
-        await page.evaluate(() => {
-          document.documentElement.dataset.paper = "true";
-        });
-        await page.waitForTimeout(1500);
+        // A folded sheet occupies less of the old area and can look darker.
+        // Brightness-only removal deliberately permits rearming in this case.
+        await expect
+          .poll(async () => {
+            const station = await (await request.get("/api/station")).json();
+            return station.state?.armed;
+          })
+          .toBe(true);
         expect(
           (await (await request.get("/api/captures")).json()).captures.length,
         ).toBe(before + 1);
@@ -252,6 +253,12 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
         document.documentElement.dataset.paper = "false";
         document.documentElement.dataset.deskChanged = "true";
       });
+      await expect
+        .poll(async () => {
+          const station = await (await request.get("/api/station")).json();
+          return station.state?.armed;
+        })
+        .toBe(true);
       await expect(page.locator("#status")).toHaveText(
         "Ready for the next receipt.",
       );
@@ -368,8 +375,8 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       expect(
         (await (await request.get("/api/captures")).json()).captures.length,
       ).toBe(before + 1);
-      // Disabling the stale reference must allow another complete cycle,
-      // while a stationary paper must still be saved only once.
+      // A new sheet must allow another complete cycle, while a stationary
+      // sheet must still be saved only once.
       await page.evaluate(() => {
         document.documentElement.dataset.paper = "true";
       });
@@ -383,6 +390,12 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       await page.evaluate(() => {
         document.documentElement.dataset.paper = "false";
       });
+      await expect
+        .poll(async () => {
+          const station = await (await request.get("/api/station")).json();
+          return station.state?.armed;
+        })
+        .toBe(true);
       await expect(page.locator("#status")).toHaveText(
         "Ready for the next receipt.",
       );
