@@ -349,6 +349,24 @@ export const jevAssessments = sqliteTable(
     ),
   ],
 );
+export const sourceReviewDecisions = sqliteTable(
+  "source_review_decisions",
+  {
+    id: text("id").primaryKey(),
+    document_id: text("document_id").notNull(),
+    assessment_id: text("assessment_id")
+      .notNull()
+      .references(() => jevAssessments.id),
+    decision: text("decision", { enum: ["fine", "needs-review"] }).notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    index("source_review_assessment_created").on(
+      table.assessment_id,
+      table.created_at,
+    ),
+  ],
+);
 export const jevPageHeads = sqliteTable(
   "jev_page_heads",
   {

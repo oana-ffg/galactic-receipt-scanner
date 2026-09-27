@@ -9,8 +9,13 @@ for (const engine of ["chromium", "webkit"] as const) {
     ).launchPersistentContext("", {
       channel: engine === "chromium" ? "chrome" : "",
       baseURL: server.origin,
+      ...(engine === "chromium" ? { args: ["--mute-audio"] } : {}),
     });
     try {
+      if (engine === "webkit")
+        await context.addInitScript(() =>
+          localStorage.setItem("scanner-audio", "off"),
+        );
       const phone = await context.newPage();
       await phone.addInitScript(() => {
         const canvas = document.createElement("canvas");

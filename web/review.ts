@@ -14,6 +14,7 @@ import { registerSiteTools } from "./site-tools";
 import {
   newDocument,
   needsSourceIntervention,
+  pendingSourceIntervention,
   completenessUncertain,
   mergeReviewReasons,
   retargetAbsorbedAliases,
@@ -203,7 +204,7 @@ export async function mountReview(app: HTMLElement) {
     }
     const interventionCount = catalog.documents.filter(
       (d) =>
-        needsSourceIntervention(d) &&
+        pendingSourceIntervention(d) &&
         !d.mergedInto &&
         !d.processing?.has_human_review,
     ).length;
@@ -249,7 +250,10 @@ export async function mountReview(app: HTMLElement) {
         !matchesReviewFilters(d, confidence.value, model.value, human.value)
       )
         continue;
-      if (filter.value === "source-intervention" && !needsSourceIntervention(d))
+      if (
+        filter.value === "source-intervention" &&
+        !pendingSourceIntervention(d)
+      )
         continue;
       if (filter.value === "scan-review" && !completenessUncertain(d)) continue;
       if (filter.value === "luna-reparse" && !d.processing?.needs_reparse)
@@ -307,7 +311,7 @@ export async function mountReview(app: HTMLElement) {
           "span",
           reviewed
             ? `Human reviewed · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · ${d.pdf ? "PDF ready for download" : "PDF needs retry"}`
-            : `${d.processing?.needs_reparse ? "Needs Luna reparse · " : needsSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}`,
+            : `${d.processing?.needs_reparse ? "Needs Luna reparse · " : pendingSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}`,
         ),
         el(
           "small",
@@ -329,7 +333,11 @@ export async function mountReview(app: HTMLElement) {
         renderList();
         renderDetail(d);
         detail
-          .querySelector(".receipt-review-panes")
+          .querySelector(
+            needsSourceIntervention(d)
+              ? ".source-review-controls"
+              : ".receipt-review-panes",
+          )
           ?.scrollIntoView({ block: "start" });
       };
       list.append(button);
@@ -363,7 +371,7 @@ export async function mountReview(app: HTMLElement) {
       );
       detail.append(notice);
     }
-    if (needsSourceIntervention(doc) && !doc.processing?.has_human_review)
+    if (pendingSourceIntervention(doc) && !doc.processing?.has_human_review)
       detail.append(
         el(
           "p",
@@ -381,6 +389,38 @@ export async function mountReview(app: HTMLElement) {
           "review-intervention-warning",
         ),
       );
+    if (needsSourceIntervention(doc)) {
+      const decision = el("div", undefined, "controls source-review-controls");
+      if (doc.sourceInterventionFine)
+        decision.append(el("span", "Human says the source is fine."));
+      const fine = el(
+        "button",
+        doc.sourceInterventionFine ? "Reopen source review" : "It's fine",
+        "secondary",
+      );
+      fine.onclick = () =>
+        void action(async () => {
+          await api(
+            `/api/documents/${encodeURIComponent(doc.id)}/source-review`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                assessmentId: doc.completenessAudit!.assessmentId,
+                decision: doc.sourceInterventionFine ? "needs-review" : "fine",
+              }),
+            },
+          );
+          await refresh();
+          setMessage(
+            doc.sourceInterventionFine
+              ? "Source review reopened."
+              : "Marked human says it's fine. Removed from Needs source intervention.",
+          );
+        });
+      decision.append(fine);
+      detail.append(decision);
+    }
     detail.append(
       receiptHandoff(catalog.documents.find((saved) => saved.id === doc.id)!),
     );

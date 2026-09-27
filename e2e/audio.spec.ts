@@ -20,6 +20,7 @@ test("real audio resumes for saves, deduplicates delivery, and enters private is
     }),
   );
   await page.addInitScript(() => {
+    localStorage.setItem("scanner-audio", "on");
     const NativeAudio = window.AudioContext;
     const contexts: AudioContext[] = [];
     let started = 0;
@@ -36,6 +37,10 @@ test("real audio resumes for saves, deduplicates delivery, and enters private is
     window.AudioContext = class extends NativeAudio {
       constructor() {
         super();
+        const silentOutput = super.createGain();
+        silentOutput.gain.value = 0;
+        silentOutput.connect(super.destination);
+        Object.defineProperty(this, "destination", { value: silentOutput });
         contexts.push(this);
         this.addEventListener("statechange", () =>
           events.push({

@@ -4,6 +4,7 @@ for (const engine of ["chromium", "webkit"] as const) {
   test(`${engine} phone reporting survives retired lazy assets and avoids full-resolution copies`, async () => {
     const browser = await (engine === "chromium" ? chromium : webkit).launch({
       channel: engine === "chromium" ? "chrome" : "",
+      ...(engine === "chromium" ? { args: ["--mute-audio"] } : {}),
     });
     try {
       const context = await browser.newContext({

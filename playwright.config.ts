@@ -7,6 +7,7 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:8766",
     channel: "chrome",
+    launchOptions: { args: ["--mute-audio"] },
     viewport: { width: 1360, height: 900 },
     screenshot: "only-on-failure",
   },

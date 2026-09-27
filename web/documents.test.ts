@@ -9,6 +9,7 @@ import {
   invoiceDifference,
   mergeReviewReasons,
   needsSourceIntervention,
+  pendingSourceIntervention,
   newDocument,
   retargetAbsorbedAliases,
   validDate,
@@ -38,6 +39,7 @@ it("separates missing-source findings from uncertain completeness", () => {
     issue = result === "no" ? "missing_total" : "none",
   ) => ({
     completenessAudit: {
+      assessmentId: "00000000-0000-4000-8000-000000000002",
       result,
       issue,
       confidence,
@@ -45,6 +47,18 @@ it("separates missing-source findings from uncertain completeness", () => {
     },
   });
   expect(needsSourceIntervention(audit("no", 1))).toBe(true);
+  expect(
+    pendingSourceIntervention({
+      ...audit("no", 1),
+      sourceInterventionFine: true,
+    }),
+  ).toBe(false);
+  expect(
+    pendingSourceIntervention({
+      ...audit("no", 1),
+      sourceInterventionFine: false,
+    }),
+  ).toBe(true);
   expect(needsSourceIntervention(audit("yes", 0.6))).toBe(false);
   expect(needsSourceIntervention(audit("yes", 0.9))).toBe(false);
   expect(needsSourceIntervention(audit("not_receipt", 1))).toBe(false);

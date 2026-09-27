@@ -71,11 +71,13 @@ export interface DocumentView extends ReceiptDocument {
   filename: string | null;
   jevRole?: string | null;
   completenessAudit?: {
+    assessmentId: string;
     result: "yes" | "no" | "not_receipt";
     issue: string;
     confidence: number;
     assessedAt: string;
   } | null;
+  sourceInterventionFine: boolean;
   status:
     | "ready"
     | "processing"
@@ -107,6 +109,12 @@ export function needsSourceIntervention(
       "page_or_slip_mismatch",
     ].includes(audit.issue)
   );
+}
+
+export function pendingSourceIntervention(
+  doc: Pick<DocumentView, "completenessAudit" | "sourceInterventionFine">,
+): boolean {
+  return needsSourceIntervention(doc) && !doc.sourceInterventionFine;
 }
 
 export function completenessUncertain(

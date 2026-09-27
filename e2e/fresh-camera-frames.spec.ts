@@ -22,7 +22,12 @@ for (const { engine, photoApi } of (["chromium", "webkit"] as const).flatMap(
       ).launchPersistentContext("", {
         channel: engine === "chromium" ? "chrome" : "",
         baseURL: server.origin,
+        ...(engine === "chromium" ? { args: ["--mute-audio"] } : {}),
       });
+      if (engine === "webkit")
+        await context.addInitScript(() =>
+          localStorage.setItem("scanner-audio", "off"),
+        );
       const request = context.request;
       const page = await context.newPage();
       const errors: string[] = [];

@@ -56,6 +56,111 @@ const isolatedRequest = {
   },
 };
 
+test("source intervention can be marked fine and reopened from review", async ({
+  page,
+}) => {
+  const id = randomUUID();
+  const image = await readFile("e2e/fixtures/generated/danish.png");
+  const sha256 = createHash("sha256").update(image).digest("hex");
+  expect(
+    (
+      await isolatedRequest.post(`/api/captures/${id}`, {
+        data: image,
+        headers: {
+          Origin: origin,
+          "X-Scanner-Request": "1",
+          "X-Capture-Status": "accepted",
+          "X-Capture-Metadata": JSON.stringify({
+            sourcePixels: [941, 1672],
+            quality: { ok: true, receiptPixels: [941, 1672] },
+          }),
+        },
+      })
+    ).ok(),
+  ).toBe(true);
+  expect(
+    (
+      await isolatedRequest.post("/api/documents", {
+        data: Buffer.from(
+          JSON.stringify({
+            documents: [newDocument({ id, sha256 } as any)],
+          }),
+        ),
+        headers: {
+          Origin: origin,
+          "X-Scanner-Request": "1",
+          "Content-Type": "application/json",
+        },
+      })
+    ).ok(),
+  ).toBe(true);
+  const saved = (
+    await (await isolatedRequest.get(`/api/documents/${id}`)).json()
+  ).document;
+  const db = await isolated.getD1Database("DB");
+  const fingerprint = await pageFingerprint(saved);
+  const assessmentId = randomUUID();
+  const ocrSha256 = "b".repeat(64);
+  const at = "2026-09-27T10:00:00.000Z";
+  await db
+    .prepare(
+      "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(id, sha256, ocrSha256, "receipt", 1, 1, "synthetic", randomUUID(), at)
+    .run();
+  await db
+    .prepare(
+      "INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(
+      id,
+      saved.revision,
+      fingerprint,
+      "purchase_document",
+      1,
+      1,
+      "synthetic",
+      randomUUID(),
+      at,
+    )
+    .run();
+  await db
+    .prepare(
+      "INSERT INTO jev_assessments(id,task,subject_id,subject_revision,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?,?)",
+    )
+    .bind(
+      assessmentId,
+      "receipt-completeness-v1",
+      id,
+      saved.revision,
+      "synthetic",
+      "c".repeat(64),
+      JSON.stringify({
+        input: {
+          page_fingerprint: fingerprint,
+          pins: [{ capture_id: id, ocr_sha256: ocrSha256 }],
+        },
+        response: {
+          answers: {
+            completeness: { choice: "no", confidence: 1 },
+            issue: { choice: "missing_total" },
+          },
+        },
+      }),
+      at,
+    )
+    .run();
+
+  await page.goto("/review?view=source-intervention");
+  await expect(page.locator("#review-list .review-item")).toHaveCount(1);
+  await page.locator("#review-list .review-item").click();
+  await page.getByRole("button", { name: "It's fine" }).click();
+  await expect(page.locator("#review-list .review-item")).toHaveCount(0);
+  await expect(page.getByText("Human says the source is fine.")).toBeVisible();
+  await page.getByRole("button", { name: "Reopen source review" }).click();
+  await expect(page.locator("#review-list .review-item")).toHaveCount(1);
+});
+
 test("review saves non-adjacent pages, produces a named multi-page PDF and keeps uncertainty visible", async ({
   page,
 }) => {
@@ -662,9 +767,13 @@ test("human review edits structured values and detaches a wrong page into the po
     .getByRole("button", { name: "PDF inspected — confirm legibility" })
     .click();
   await expect
-    .poll(async () =>
-      (await (await isolatedRequest.get(`/api/documents/${target.id}`)).json())
-        .document.checks.pdf,
+    .poll(
+      async () =>
+        (
+          await (
+            await isolatedRequest.get(`/api/documents/${target.id}`)
+          ).json()
+        ).document.checks.pdf,
     )
     .toBe(true);
   await page.locator("#review-filter").selectOption("review");

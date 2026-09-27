@@ -11,6 +11,7 @@ it("does not reuse a completeness verdict after PP OCR changes on the same pages
   const document = newDocument(capture);
   const fingerprint = await pageFingerprint(document);
   const assessment = {
+    id: "00000000-0000-4000-8000-000000000002",
     subject_id: document.id,
     subject_revision: document.revision,
     created_at: "2026-09-21T00:00:00Z",

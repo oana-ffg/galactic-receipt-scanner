@@ -9,6 +9,7 @@ import { legacyHeadMatches, pageFingerprint } from "./jev-head-identity";
 export const COMPLETENESS_TASK = "receipt-completeness-v1";
 
 type AssessmentRow = {
+  id: string;
   subject_id: string;
   subject_revision: number;
   payload: string;
@@ -39,8 +40,10 @@ export async function loadCompletenessAudits(
 ): Promise<{
   audits: Map<string, NonNullable<DocumentView["completenessAudit"]>>;
   roles: Map<string, string>;
+  sourceDecisions: Map<string, boolean>;
 }> {
-  if (!documents.length) return { audits: new Map(), roles: new Map() };
+  if (!documents.length)
+    return { audits: new Map(), roles: new Map(), sourceDecisions: new Map() };
   const runQuery: MeasureReviewQuery = (name, query) =>
     measureQuery ? measureQuery(name, query) : query();
   const selectChunks = async <T>(
@@ -74,12 +77,12 @@ export async function loadCompletenessAudits(
       ? selectChunks<AssessmentRow>(
           "jev_assessments",
           (ids) =>
-            `SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
+            `SELECT id,subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
           documentIds,
         )
       : runQuery("jev_assessments", () =>
           env.DB.prepare(
-            "SELECT subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
+            "SELECT id,subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
           )
             .bind(COMPLETENESS_TASK)
             .all<AssessmentRow>(),
@@ -209,11 +212,28 @@ export async function loadCompletenessAudits(
     )
       continue;
     result.set(row.subject_id, {
+      assessmentId: row.id,
       result: answer.choice,
       issue: issue.choice,
       confidence: answer.confidence,
       assessedAt: row.created_at,
     });
   }
-  return { audits: result, roles };
+  const sourceDecisions = new Map<string, boolean>();
+  const assessmentIds = [
+    ...new Set([...result.values()].map((audit) => audit.assessmentId)),
+  ];
+  const decisions = await selectChunks<{
+    assessment_id: string;
+    decision: string;
+  }>(
+    "source_review_decisions",
+    (ids) =>
+      `SELECT assessment_id,decision FROM source_review_decisions WHERE assessment_id IN (${ids}) ORDER BY rowid DESC`,
+    assessmentIds,
+  );
+  for (const row of decisions)
+    if (!sourceDecisions.has(row.assessment_id))
+      sourceDecisions.set(row.assessment_id, row.decision === "fine");
+  return { audits: result, roles, sourceDecisions };
 }

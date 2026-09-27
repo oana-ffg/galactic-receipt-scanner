@@ -391,6 +391,9 @@ export async function documentRoute(
   const namedAction = url.pathname.match(
     /^\/api\/documents\/([0-9a-f-]{36})\/(pdf|history)$/,
   );
+  const sourceReviewAction = url.pathname.match(
+    /^\/api\/documents\/([0-9a-f-]{36})\/source-review$/,
+  );
   const sourceId =
     request.method === "GET" && url.pathname === "/api/documents"
       ? url.searchParams.get("captureId")
@@ -581,8 +584,12 @@ export async function documentRoute(
       total: (savedCount?.total ?? 0) + (virtualCount?.total ?? 0),
       next: ordered.length > summaryLimit ? page.at(-1)!.id : null,
     };
-  } else if ((single || sourceId || namedAction) && loadCapture) {
-    const requestedId = single?.[1] ?? namedAction?.[1] ?? sourceId!;
+  } else if (
+    (single || sourceId || namedAction || sourceReviewAction) &&
+    loadCapture
+  ) {
+    const requestedId =
+      single?.[1] ?? namedAction?.[1] ?? sourceReviewAction?.[1] ?? sourceId!;
     const page = sourceId
       ? await env.DB.prepare(
           "SELECT document_id FROM document_pages WHERE capture_id=?",
@@ -597,6 +604,7 @@ export async function documentRoute(
       saved &&
       (single ||
         namedAction ||
+        sourceReviewAction ||
         saved.pages.some((item) => item.captureId === sourceId))
     ) {
       stored = [saved];
@@ -656,6 +664,7 @@ export async function documentRoute(
     NonNullable<DocumentView["completenessAudit"]>
   >();
   let jevRoles = new Map<string, string>();
+  let sourceDecisions = new Map<string, boolean>();
   const loadReviewState = async (selected: ReceiptDocument[]) => {
     const state = await loadCompletenessAudits(
       env,
@@ -664,6 +673,7 @@ export async function documentRoute(
     );
     completenessAudits = state.audits;
     jevRoles = state.roles;
+    sourceDecisions = state.sourceDecisions;
   };
   const nameCandidates = scopedPost
     ? [
@@ -722,7 +732,13 @@ export async function documentRoute(
     const file = currentPdf(d, filename);
     const state = documentReasons(d);
     const completenessAudit = completenessAudits.get(d.id) ?? null;
-    if (needsSourceIntervention({ completenessAudit })) {
+    const sourceInterventionFine = Boolean(
+      completenessAudit && sourceDecisions.get(completenessAudit.assessmentId),
+    );
+    if (
+      needsSourceIntervention({ completenessAudit }) &&
+      !sourceInterventionFine
+    ) {
       state.reasons.unshift(
         `Needs source intervention: ${completenessAudit!.result === "no" ? completenessAudit!.issue.replaceAll("_", " ") : "Jev could not confirm completeness confidently"}. Inspect the saved scans and page grouping; look for the original paper if a page or printed total is absent.`,
       );
@@ -786,11 +802,50 @@ export async function documentRoute(
       ...d,
       ...state,
       completenessAudit,
+      sourceInterventionFine,
       jevRole: jevRoles.get(d.id) ?? null,
       filename,
       pdf: file ? { sha256: file.sha256, revision: file.revision } : null,
       scannedAt: d.pages.map((p) => capturesById.get(p.captureId)!.created_at),
     };
+  }
+  if (sourceReviewAction && request.method === "POST") {
+    const input = await bodyJson(request, 1024);
+    requireThat(
+      typeof input.assessmentId === "string" &&
+        UUID.test(input.assessmentId) &&
+        typeof input.decision === "string" &&
+        ["fine", "needs-review"].includes(input.decision),
+      400,
+      "Provide a current completeness assessment and source review decision.",
+    );
+    const doc = docs.find((d) => d.id === sourceReviewAction[1]);
+    requireThat(
+      doc && !doc.mergedInto && !doc.duplicateOf,
+      404,
+      "Document not found.",
+    );
+    await loadReviewState([doc]);
+    const audit = completenessAudits.get(doc.id);
+    requireThat(
+      audit?.assessmentId === input.assessmentId &&
+        needsSourceIntervention({ completenessAudit: audit }),
+      409,
+      "Source assessment changed. Reload before deciding.",
+    );
+    const decision = input.decision as "fine" | "needs-review";
+    await env.DB.prepare(
+      "INSERT INTO source_review_decisions(id,document_id,assessment_id,decision,created_at) VALUES(?,?,?,?,?)",
+    )
+      .bind(
+        crypto.randomUUID(),
+        doc.id,
+        audit!.assessmentId,
+        decision,
+        new Date().toISOString(),
+      )
+      .run();
+    return json({ sourceInterventionFine: decision === "fine" });
   }
   if (request.method === "GET") {
     const single = url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})$/);
@@ -870,6 +925,7 @@ export async function documentRoute(
               kind: v.kind,
               jevRole: v.jevRole,
               completenessAudit: v.completenessAudit,
+              sourceInterventionFine: v.sourceInterventionFine,
               status: v.status,
               reasons: v.reasons.slice(0, 3),
               pageIds: v.pages.map((p) => p.captureId),

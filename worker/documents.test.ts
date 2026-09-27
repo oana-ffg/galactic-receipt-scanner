@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
 import { newDocument } from "../web/documents";
 import { documentRoute } from "./documents";
+import { pageFingerprint } from "./jev-head-identity";
 import type { Quality } from "../web/types";
 let mf: Awaited<ReturnType<typeof runtime>>;
 beforeAll(async () => {
@@ -47,6 +48,103 @@ async function capture(quality: Partial<Quality> = {}, retakeOf?: string) {
 }
 const save = (documents: unknown[]) =>
   request("/api/documents", "POST", JSON.stringify({ documents }));
+it("records a human source decision without invalidating the audit and reopens on a new audit", async () => {
+  const source = await capture();
+  expect((await save([newDocument(source)])).status).toBe(200);
+  const db = await mf.getD1Database("DB");
+  const current = (
+    (await (await request(`/api/documents/${source.id}`)).json()) as any
+  ).document;
+  const fingerprint = await pageFingerprint(current);
+  const pageAssessmentId = crypto.randomUUID();
+  const documentAssessmentId = crypto.randomUUID();
+  const ocrHash = "b".repeat(64);
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO jev_page_heads(capture_id,source_sha256,ocr_sha256,role,probability,confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(
+      source.id,
+      source.sha256,
+      ocrHash,
+      "receipt",
+      1,
+      1,
+      "synthetic",
+      pageAssessmentId,
+      now,
+    )
+    .run();
+  await db
+    .prepare(
+      "INSERT INTO jev_document_heads(document_id,document_revision,page_fingerprint,role,role_probability,role_confidence,model,assessment_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(
+      source.id,
+      current.revision,
+      fingerprint,
+      "purchase_document",
+      1,
+      1,
+      "synthetic",
+      documentAssessmentId,
+      now,
+    )
+    .run();
+  const assess = async (id: string, at: string) =>
+    db
+      .prepare(
+        "INSERT INTO jev_assessments(id,task,subject_id,subject_revision,model,input_sha256,payload,created_at) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .bind(
+        id,
+        "receipt-completeness-v1",
+        source.id,
+        current.revision,
+        "synthetic",
+        id.replaceAll("-", "").padEnd(64, "0"),
+        JSON.stringify({
+          input: {
+            page_fingerprint: fingerprint,
+            pins: [{ capture_id: source.id, ocr_sha256: ocrHash }],
+          },
+          response: {
+            answers: {
+              completeness: { choice: "no", confidence: 1 },
+              issue: { choice: "missing_total" },
+            },
+          },
+        }),
+        at,
+      )
+      .run();
+  const firstId = crypto.randomUUID();
+  await assess(firstId, "2026-09-27T10:00:00.000Z");
+  const read = async () =>
+    ((await (await request(`/api/documents/${source.id}`)).json()) as any)
+      .document;
+  const decide = (assessmentId: string, decision: string) =>
+    request(
+      `/api/documents/${source.id}/source-review`,
+      "POST",
+      JSON.stringify({ assessmentId, decision }),
+    );
+  expect((await read()).sourceInterventionFine).toBe(false);
+  expect((await decide(firstId, "fine")).status).toBe(200);
+  const accepted = await read();
+  expect(accepted.revision).toBe(current.revision);
+  expect(accepted.completenessAudit.assessmentId).toBe(firstId);
+  expect(accepted.sourceInterventionFine).toBe(true);
+  expect(accepted.reasons.join(" ")).not.toContain("Needs source intervention");
+  const secondId = crypto.randomUUID();
+  await assess(secondId, "2026-09-27T10:00:01.000Z");
+  expect((await read()).sourceInterventionFine).toBe(false);
+  expect((await decide(firstId, "fine")).status).toBe(409);
+  expect((await decide(secondId, "fine")).status).toBe(200);
+  expect((await decide(secondId, "needs-review")).status).toBe(200);
+  expect((await read()).sourceInterventionFine).toBe(false);
+});
 it("exposes only page rotation for OCR and discards legacy crop input", async () => {
   const source = await capture();
   const before = (await (
