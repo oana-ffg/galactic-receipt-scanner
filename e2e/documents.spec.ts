@@ -136,11 +136,29 @@ test("review saves non-adjacent pages, produces a named multi-page PDF and keeps
   await expect(page.locator("#review-counts")).toContainText(
     "3 awaiting processing",
   );
+  await expect(page.locator("#review-counts")).toContainText(
+    "0 documents in current list",
+  );
   await expect(page.locator("#review-list button")).toHaveCount(0);
   await page.locator("#review-confidence").selectOption("all");
   await page.locator("#review-model").selectOption("all");
   await page.locator("#review-filter").selectOption("processing");
   await expect(page.locator("#review-list button")).toHaveCount(3);
+  await expect(page.locator("#review-counts")).toContainText(
+    "3 documents in current list",
+  );
+  await page.locator("#review-search").fill("no matching synthetic document");
+  await expect(page.locator("#review-counts")).toContainText(
+    "0 documents in current list",
+  );
+  await page.locator("#review-search").clear();
+  await expect(page.locator("#review-counts")).toContainText(
+    "3 documents in current list",
+  );
+  await page.locator("#review-filter").selectOption("payment-matches");
+  await expect(page.locator("#review-counts")).toContainText(
+    "0 payment matches in current list",
+  );
   await page.locator("#review-filter").selectOption("attention");
   const result = await page.evaluate(async (ids) => {
     const tools = (window as any).documentTools;

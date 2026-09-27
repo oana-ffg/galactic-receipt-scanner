@@ -150,6 +150,7 @@ export async function mountReview(app: HTMLElement) {
     list.replaceChildren();
     if (filter.value === "payment-matches") {
       const needle = search.value.toLowerCase();
+      let shown = 0;
       for (const match of paymentMatches) {
         const receipt = catalog.documents.find(
           (item) => item.id === match.receipt_document_id,
@@ -185,11 +186,11 @@ export async function mountReview(app: HTMLElement) {
         links.append(receiptLink, " · ", slipLink);
         card.append(links);
         list.append(card);
+        shown++;
       }
-      if (!list.childElementCount)
-        list.append(el("p", "No payment matches found."));
+      if (!shown) list.append(el("p", "No payment matches found."));
       app.querySelector("#review-counts")!.textContent =
-        `${paymentMatches.length} payment matches · ${paymentMatches.filter((item) => item.status === "needs-review").length} need verification`;
+        `${shown} payment matches in current list · ${paymentMatches.length} total · ${paymentMatches.filter((item) => item.status === "needs-review").length} need verification`;
       return;
     }
     const interventionCount = catalog.documents.filter(
@@ -212,8 +213,7 @@ export async function mountReview(app: HTMLElement) {
       (a, d) => ((a[d.status] = (a[d.status] ?? 0) + 1), a),
       {},
     );
-    app.querySelector("#review-counts")!.textContent =
-      `${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
+    let shown = 0;
     for (const d of catalog.documents) {
       if (d.status === "merged") continue;
       if (
@@ -304,9 +304,11 @@ export async function mountReview(app: HTMLElement) {
           ?.scrollIntoView({ block: "start" });
       };
       list.append(button);
+      shown++;
     }
-    if (!list.childElementCount)
-      list.append(el("p", "No documents match this view."));
+    if (!shown) list.append(el("p", "No documents match this view."));
+    app.querySelector("#review-counts")!.textContent =
+      `${shown} documents in current list · ${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
   }
   function renderDetail(original: DocumentView) {
     const doc = structuredClone(original);
