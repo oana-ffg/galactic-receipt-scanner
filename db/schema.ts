@@ -43,6 +43,21 @@ export const captures = sqliteTable(
     ),
   ],
 );
+export const captureNotes = sqliteTable(
+  "capture_notes",
+  {
+    id: text("id").primaryKey(),
+    receipt_id: text("receipt_id").notNull(),
+    text: text("text").notNull(),
+    created_at: text("created_at").notNull(),
+  },
+  (table) => [
+    index("capture_notes_receipt_created").on(
+      table.receipt_id,
+      table.created_at,
+    ),
+  ],
+);
 export const captureKeeps = sqliteTable("capture_keeps", {
   capture_id: text("capture_id")
     .primaryKey()

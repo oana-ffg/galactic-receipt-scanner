@@ -158,6 +158,7 @@ export interface Capture {
     created_at: string;
   } | null;
   metadata: { quality?: Quality; sourcePixels?: number[] };
+  owner_notes?: { id: string; text: string; created_at: string }[];
 }
 
 export interface RemovalTransition {

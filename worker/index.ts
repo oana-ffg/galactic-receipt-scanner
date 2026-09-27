@@ -156,6 +156,7 @@ interface CaptureRow {
   manual_outline?: string | null;
   kept?: string | null;
   effective_status?: string;
+  owner_notes?: string;
 }
 function publicCapture(row: CaptureRow) {
   return {
@@ -174,6 +175,7 @@ function publicCapture(row: CaptureRow) {
     bytes: row.bytes,
     content_type: row.content_type,
     metadata: JSON.parse(row.metadata),
+    owner_notes: JSON.parse(row.owner_notes ?? "[]"),
     manual_outline:
       row.manual_outline === undefined
         ? undefined
@@ -530,6 +532,50 @@ async function route(
         );
       return json(publicCapture(await captureRow(env, id)));
     }
+  }
+  const note = path.match(/^\/api\/captures\/([^/]+)\/notes$/);
+  if (note && method === "POST") {
+    requireThat(UUID.test(note[1]), 400, "Invalid capture ID.");
+    const input = (await bodyJson(request)) as { id?: unknown; text?: unknown };
+    requireThat(
+      typeof input.id === "string" &&
+        UUID.test(input.id) &&
+        typeof input.text === "string" &&
+        input.text.trim().length > 0 &&
+        input.text.length <= 2000,
+      400,
+      "Write a note of up to 2000 characters.",
+    );
+    const source = await captureRow(env, note[1]);
+    const receiptId = source.receipt_id ?? source.id;
+    const text = input.text.trim();
+    const id = input.id;
+    const createdAt = new Date().toISOString();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO capture_notes(id,receipt_id,text,created_at) VALUES(?,?,?,?)",
+    )
+      .bind(id, receiptId, text, createdAt)
+      .run();
+    const saved = await env.DB.prepare(
+      "SELECT id,receipt_id,text,created_at FROM capture_notes WHERE id=?",
+    )
+      .bind(id)
+      .first<{
+        id: string;
+        receipt_id: string;
+        text: string;
+        created_at: string;
+      }>();
+    requireThat(
+      saved?.receipt_id === receiptId && saved.text === text,
+      409,
+      "This note ID already belongs to different content.",
+    );
+    return json({
+      id: saved.id,
+      text: saved.text,
+      created_at: saved.created_at,
+    });
   }
   const verification = path.match(/^\/api\/captures\/([^/]+)\/verify$/);
   if (verification && method === "GET") {

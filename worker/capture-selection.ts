@@ -10,6 +10,7 @@ export const currentTake = `${currentStatus} IN ('accepted','manual-review') AND
 export const receiptCount = `SELECT COUNT(DISTINCT COALESCE(receipt_id,id)) FROM captures WHERE ${currentStatus} IN ('accepted','manual-review')`;
 
 export const captureSelection = `SELECT captures.*, ${currentStatus} AS effective_status, (${currentTake}) AS is_current,
+  (SELECT json_group_array(json_object('id',n.id,'text',n.text,'created_at',n.created_at)) FROM (SELECT id,text,created_at FROM capture_notes WHERE receipt_id=COALESCE(captures.receipt_id,captures.id) ORDER BY created_at,id) n) AS owner_notes,
   (SELECT json_object('source_sha256',k.source_sha256,'reason',k.reason,'created_at',k.created_at) FROM capture_keeps k WHERE k.capture_id=captures.id) AS kept,
   (SELECT id FROM captures accepted WHERE (accepted.receipt_id=COALESCE(captures.receipt_id,captures.id) OR accepted.id=COALESCE(captures.receipt_id,captures.id)) AND ${acceptedStatus} IN ('accepted','manual-review') ORDER BY (${acceptedStatus}='accepted') DESC,accepted.take_number DESC LIMIT 1) AS current_capture_id,
   EXISTS(SELECT 1 FROM artifacts WHERE capture_id=captures.id AND kind='ocr') AS ocr_available,

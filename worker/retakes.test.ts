@@ -211,6 +211,12 @@ it("assigns legacy receipt identity without rewriting originals, metadata or art
       await readFile("drizzle/0015_chunky_wiccan.sql", "utf8")
     ).split("--> statement-breakpoint"))
       if (sql.trim()) await db.prepare(sql).run();
+    // The current read API includes owner comments; apply its additive table
+    // before exercising the migrated capture through current code.
+    for (const sql of (
+      await readFile("drizzle/0031_bizarre_warhawk.sql", "utf8")
+    ).split("--> statement-breakpoint"))
+      if (sql.trim()) await db.prepare(sql).run();
     const migrated = await (
       await legacy.dispatchFetch(origin + `/api/captures/${id}`, {
         headers: ownerHeaders,

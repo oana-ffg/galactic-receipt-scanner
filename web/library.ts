@@ -3,6 +3,7 @@ import { inspectImage } from "./image-viewer";
 import { CapturePreviews } from "./capture-previews";
 import { edgeOverlay } from "./paper-overlay";
 import { api } from "./api";
+import { captureNotes } from "./capture-notes";
 import { messageOf } from "./errors";
 import type { Capture, ScanState } from "./types";
 
@@ -183,7 +184,11 @@ export class CaptureLibrary {
     const heading = document.createElement("div");
     heading.className = "capture-heading";
     heading.append(info, links);
-    row.append(heading, this.previews.element(capture.id));
+    row.append(
+      heading,
+      this.previews.element(capture.id),
+      captureNotes(capture),
+    );
     return row;
   }
   private async show(capture: Capture) {
@@ -249,7 +254,14 @@ export class CaptureLibrary {
       : capture.metadata.quality?.quad
         ? "Outline from this saved photo. Original pixels stay intact."
         : "No paper outline was recorded for this photo.";
-    this.panel.append(title, details, stage, controls, note);
+    this.panel.append(
+      title,
+      details,
+      stage,
+      controls,
+      note,
+      captureNotes(capture),
+    );
     try {
       await img.decode();
       if (generation === this.selectionGeneration) zoom.disabled = false;

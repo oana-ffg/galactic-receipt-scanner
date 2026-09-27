@@ -24,6 +24,7 @@ import {
 } from "./documents";
 import { messageOf } from "./errors";
 import { inspectImage } from "./image-viewer";
+import { captureNotes } from "./capture-notes";
 import { receiptHandoff } from "./receipt-handoff";
 
 const el = <K extends keyof HTMLElementTagNameMap>(
@@ -352,6 +353,27 @@ export async function mountReview(app: HTMLElement) {
     disposeDetail();
     detail.replaceChildren();
     detail.append(el("h2", doc.filename ?? "Identify this document"));
+    const ownerNotes = el("section", undefined, "review-owner-notes");
+    const renderOwnerNotes = () => {
+      const sourceNotes = new Map<string, { page: number; text: string }>();
+      doc.pages.forEach((page, index) => {
+        const capture = catalog.captures.find(
+          (item) => item.id === page.captureId,
+        );
+        for (const note of capture?.owner_notes ?? [])
+          if (!sourceNotes.has(note.id))
+            sourceNotes.set(note.id, { page: index + 1, text: note.text });
+      });
+      ownerNotes.replaceChildren();
+      ownerNotes.hidden = sourceNotes.size === 0;
+      if (!ownerNotes.hidden) {
+        ownerNotes.append(el("strong", "Your notes about the original paper"));
+        for (const note of sourceNotes.values())
+          ownerNotes.append(el("p", `Page ${note.page}: ${note.text}`));
+      }
+    };
+    renderOwnerNotes();
+    detail.append(ownerNotes);
     if (doc.duplicateOf) {
       const primary = catalog.documents.find(
         (item) => item.id === doc.duplicateOf,
@@ -518,6 +540,7 @@ export async function mountReview(app: HTMLElement) {
       card.append(
         controls,
         el("p", `PDF rotation: ${p.rotation}° · scan crop`),
+        captureNotes(capture, renderOwnerNotes),
       );
       sources.append(card);
     });

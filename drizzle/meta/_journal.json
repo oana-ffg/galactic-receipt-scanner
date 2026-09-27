@@ -218,6 +218,13 @@
       "when": 1790512767168,
       "tag": "0030_bright_dazzler",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1790516422120,
+      "tag": "0031_bizarre_warhawk",
+      "breakpoints": true
     }
   ]
 }
