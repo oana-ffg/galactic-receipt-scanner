@@ -266,6 +266,15 @@ class WorkerTests(unittest.TestCase):
         worker.render_pages = lambda path, pages, dpi, label, format: [f"synthetic-{label}-{i + 1}.{format}" for i in range(pages)]
         return worker
 
+    def test_preloaded_credential_skips_provider_for_batch_worker(self):
+        self.worker.lock.close()
+        preloaded = {"synthetic": "credential"}
+        with patch.object(module, "credentials", side_effect=AssertionError("Provider started twice")), \
+             patch.object(module, "ScannerClient", return_value=self.fake) as client_class:
+            worker = module.Worker(self.profile, credential_value=preloaded)
+        self.addCleanup(worker.lock.close)
+        client_class.assert_called_once_with(preloaded)
+
     def send(self, op, **fields):
         if op == "draft" and "page_review" not in fields:
             ids = fields.get("grouping", {}).get("capture_ids", [DID])

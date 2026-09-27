@@ -15,6 +15,7 @@ class FakeLease:
         self.events = []
         self.profile = {}
         self.profile_path = Path("synthetic-profile.json")
+        self.credential_value = {"synthetic": True}
         self.client = Mock()
 
     def start(self, batch_id, owner):
@@ -132,7 +133,8 @@ class BatchGuardTests(unittest.TestCase):
             self.assertEqual(result['next'], 'complete-active-run')
             self.assertTrue(result['resumed'])
             worker_class.assert_called_once_with(lease.profile, resume=run_id,
-                                                 profile_path=lease.profile_path, work_base=guard.base)
+                                                 profile_path=lease.profile_path, work_base=guard.base,
+                                                 credential_value=lease.credential_value)
             with self.assertRaisesRegex(module.InputError, 'Complete the prepared Luna task'):
                 guard.handle({'op': 'next'})
         worker.prepare_luna_task.assert_not_called()
@@ -187,11 +189,24 @@ class BatchGuardTests(unittest.TestCase):
             'worker_profile': str(profile),
         }))
         client = Mock(origin='https://synthetic.example')
-        with patch.object(module, 'credentials', return_value={'fresh': True}) as load, \
+        credential_lock = repo / '.local' / 'processing-credential.lock'
+
+        def load_credentials(path):
+            self.assertTrue(module.lock_held(credential_lock))
+            return {'fresh': True}
+
+        with patch.object(module, 'credentials', side_effect=load_credentials) as load, \
              patch.object(module, 'ScannerClient', return_value=client):
             lease = module.ProcessingBatchLease(repo, str(self.client_config))
         self.assertTrue(load.call_args.args[0].samefile(self.client_config))
         self.assertTrue(Path(lease.profile['client_config']).samefile(self.client_config))
+        self.assertFalse(module.lock_held(credential_lock))
+
+        with patch.object(module, 'credentials', side_effect=RuntimeError('provider failed')), \
+             patch.object(module, 'ScannerClient', return_value=client):
+            with self.assertRaisesRegex(RuntimeError, 'provider failed'):
+                module.ProcessingBatchLease(repo, str(self.client_config))
+        self.assertFalse(module.lock_held(credential_lock))
 
     def test_second_coordinator_is_busy_until_first_finishes(self):
         first = self.guard()
@@ -260,9 +275,12 @@ class BatchGuardTests(unittest.TestCase):
 
         worker.complete_luna_task.side_effect = complete
         proof = {"verified": True, "run_id": "a" * 32, "document_id": "receipt"}
-        with patch.object(module, "Worker", return_value=worker), \
+        with patch.object(module, "Worker", return_value=worker) as worker_class, \
              patch.object(module, "verify_run", return_value=proof):
             prepared = guard.handle({"op": "next"})
+            worker_class.assert_called_once_with(lease.profile, profile_path=lease.profile_path,
+                                                 work_base=guard.base,
+                                                 credential_value=lease.credential_value)
             self.assertEqual(prepared["next"], "spawn-luna")
             self.assertEqual(prepared["task"]["run_id"], "a" * 32)
             completed = guard.handle({"op": "complete", "run_id": "a" * 32})

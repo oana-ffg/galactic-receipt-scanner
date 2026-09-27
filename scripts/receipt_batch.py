@@ -12,7 +12,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from receipt_api import ClientError, ScannerClient, credentials, diagnostic_text, failure_report
 from receipt_locks import (LockBusy as BatchBusy, PARALLEL_LANES, PROCESSING_LANES,
-                           acquire_lock, lock_held, worker_batch_directory)
+                           acquire_lock, acquire_lock_wait, lock_held, worker_batch_directory)
 from receipt_batch_verify import regular_path, verify_run
 from receipt_worker import InputError, Once, Worker, artifact_directory, replace_journal_file, require, write_new_file
 
@@ -73,7 +73,11 @@ class ProcessingBatchLease:
             require(isinstance(parallel_session, str) and parallel_session not in other_sessions,
                     "Parallel processing requires a distinct processing session.")
         profile = {**profile, "client_config": str(config_path)}
-        self.client = ScannerClient(credentials(config_path))
+        # Multiple scheduled lanes share one host credential provider. Opening all
+        # decryptors at once can exhaust its resources before any claim is made.
+        with acquire_lock_wait(repo / ".local" / "processing-credential.lock"):
+            self.credential_value = credentials(config_path)
+        self.client = ScannerClient(self.credential_value)
         require(self.client.origin == profile["origin"], "Batch lease destination differs from the prepared profile.")
         self.profile = profile
         self.profile_path = profile_path
@@ -236,7 +240,7 @@ class BatchGuard:
         self.lease.start(batch_id, self.owner)
         try:
             worker = Worker(self.lease.profile, resume=run_id, profile_path=self.lease.profile_path,
-                            work_base=self.base)
+                            work_base=self.base, credential_value=self.lease.credential_value)
             self.worker = worker
             require(worker.confirmation_provider == "ppocr"
                     and worker.state.get("batch_id") == batch_id,
@@ -281,7 +285,8 @@ class BatchGuard:
                 return self.try_finish_batch("target-reached")
             require(self.worker is None, "Complete the prepared Luna task before requesting another document.")
             self.check_worker_closed()
-            worker = Worker(self.lease.profile, profile_path=self.lease.profile_path, work_base=self.base)
+            worker = Worker(self.lease.profile, profile_path=self.lease.profile_path, work_base=self.base,
+                            credential_value=self.lease.credential_value)
             self.worker = worker
             try:
                 require(worker.confirmation_provider == "ppocr",

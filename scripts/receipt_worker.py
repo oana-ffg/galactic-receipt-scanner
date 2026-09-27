@@ -185,16 +185,16 @@ def disable_console_echo():
 
 
 class Worker:
-    def __init__(self, profile, resume=None, profile_path=None, work_base=None):
+    def __init__(self, profile, resume=None, profile_path=None, work_base=None, credential_value=None):
         self.lock = None
         try:
-            self.initialize(profile, resume, profile_path, work_base)
+            self.initialize(profile, resume, profile_path, work_base, credential_value)
         except Exception:
             if self.lock is not None:
                 self.lock.close()
             raise
 
-    def initialize(self, profile, resume, profile_path=None, work_base=None):
+    def initialize(self, profile, resume, profile_path=None, work_base=None, credential_value=None):
         self.repo = Path(__file__).resolve().parent.parent
         require(Path(profile["repository"]).resolve() == self.repo, "Profile repository does not match this helper.")
         for key, names in (("node", {"node", "node.exe"}), ("renderer", {"pdftoppm", "pdftoppm.exe"})):
@@ -203,7 +203,8 @@ class Worker:
                     "Profile must name the prepared Node and Poppler executables.")
         self.node = str(Path(profile["node"]).resolve(strict=True))
         self.renderer = str(Path(profile["renderer"]).resolve(strict=True))
-        self.client = ScannerClient(credentials(profile["client_config"]))
+        self.client = ScannerClient(credential_value if credential_value is not None
+                                    else credentials(profile["client_config"]))
         self.confirmation_provider = profile.get("confirmation_provider", "ppocr" if "ppocr" in profile else "qwen")
         require(self.confirmation_provider in {"ppocr", "qwen"}, "Unknown confirmation provider.")
         if self.confirmation_provider == "ppocr":
