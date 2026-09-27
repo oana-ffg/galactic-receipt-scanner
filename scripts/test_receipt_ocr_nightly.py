@@ -26,6 +26,31 @@ def result():
 
 
 class NightlyTests(unittest.TestCase):
+    def test_deferred_jev_backfill_keeps_full_pipeline_incomplete(self):
+        self.client.origin = 'https://synthetic.example'
+        self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}
+        summary = dict(complete=True, selected=1, verified=1, reused=0, retired=0,
+                       failures={}, remaining=0)
+        with patch.object(nightly, 'REPO', self.root), patch.object(nightly.os, 'chdir'), \
+                patch.object(nightly, 'discover', return_value=('config', 'profile')), \
+                patch.object(nightly, 'credentials', return_value={}), \
+                patch.object(nightly, 'ScannerClient', return_value=self.client), \
+                patch.object(nightly, 'ensure_profile', return_value='profile'), \
+                patch.object(nightly, 'inventory', return_value=[capture()]), \
+                patch.object(nightly, 'current_page_layouts', return_value={}), \
+                patch.object(nightly, 'drain', return_value=summary), \
+                patch.object(nightly, 'finish_jev') as jev, \
+                patch('sys.argv', ['receipt_ocr_nightly.py', '--skip-jev-backfill']), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(nightly.main(), 0)
+
+        saved = json.loads(next((self.root / '.local' / 'receipt-ocr-nightly').glob('*/last-run.json')).read_text())
+        self.assertTrue(saved['jev_backfill_deferred'])
+        self.assertTrue(saved['ocr_complete'])
+        self.assertFalse(saved['complete'])
+        self.assertEqual(saved['jev'], {'complete': False, 'skipped': True, 'reason': 'backfill_deferred'})
+        jev.assert_not_called()
+
     def test_request_cli_catches_full_backlog_and_does_not_continue_after_access_loss(self):
         requirement = dict(origin='https://synthetic.example', capture_id='00000000-0000-4000-8000-000000000001',
                            source_sha256='a' * 64, crop=None, rotation=0)

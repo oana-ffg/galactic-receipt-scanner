@@ -29,7 +29,7 @@ def save_state(path, value):
         candidate.unlink(missing_ok=True)
 
 
-def run_command(command, root=STATE_ROOT, *, popen=subprocess.Popen, now=utc_now,
+def run_command(command, root=STATE_ROOT, *, mode="full", popen=subprocess.Popen, now=utc_now,
                 save=save_state):
     """Run one foreground child and persist bounded scheduler facts outside source."""
     artifact_directory(root)
@@ -38,6 +38,7 @@ def run_command(command, root=STATE_ROOT, *, popen=subprocess.Popen, now=utc_now
     state_path = root / "last-run.json"
     state = {
         "schemaVersion": 1,
+        "mode": mode,
         "phase": "starting",
         "started_at": started,
         "log": str(log),
@@ -76,7 +77,14 @@ def main():
         action="store_true",
         help="Validate scheduled access without acquiring the OCR lock or writing OCR.",
     )
+    parser.add_argument(
+        "--skip-jev-backfill",
+        action="store_true",
+        help="Run the full OCR backlog and per-page Jev, but defer document backfill; the registered task does not use this option.",
+    )
     args = parser.parse_args()
+    if args.inventory_only and args.skip_jev_backfill:
+        parser.error("--skip-jev-backfill cannot be combined with --inventory-only")
     command = [
         sys.executable,
         "-X",
@@ -86,7 +94,9 @@ def main():
     ]
     if args.inventory_only:
         command.append("--inventory-only")
-    return run_command(command)
+    if args.skip_jev_backfill:
+        command.append("--skip-jev-backfill")
+    return run_command(command, mode="backfill-deferred" if args.skip_jev_backfill else "full")
 
 
 def record_launcher_failure(error, root=STATE_ROOT):

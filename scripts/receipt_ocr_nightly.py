@@ -303,11 +303,15 @@ def main():
     parser.add_argument('--cpu', action='store_true', help='Install/use CPU even when a GPU profile is configured')
     parser.add_argument('--node')
     parser.add_argument('--inventory-only', action='store_true', help='Read-only inventory; no runtime installation or OCR')
+    parser.add_argument('--skip-jev-backfill', action='store_true',
+                        help='Upload OCR and classify its page, but skip Jev document backfill')
     parser.add_argument('--request', help='Worker OCR request file: catch up all current scans through now, then this exact layout')
     parser.add_argument('--limit', type=int, help='Explicit diagnostic subset only; omitted for normal unlimited runs')
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
+    if args.skip_jev_backfill and (args.inventory_only or args.request or args.date or args.limit):
+        parser.error('--skip-jev-backfill requires the full current backlog')
     if args.request and (args.date or args.limit or args.inventory_only):
         parser.error('--request requires the full current backlog, without date, limit or inventory-only')
     os.chdir(REPO)
@@ -372,8 +376,11 @@ def main():
         result['limited'] = args.limit is not None and len(selected) < len(candidates)
         if result['limited']:
             result['complete'] = False
+        ocr_complete = result['complete']
         if result.get('blocked'):
             result['jev'] = dict(complete=False, skipped=True, reason=result['blocked'])
+        elif args.skip_jev_backfill:
+            result['jev'] = dict(complete=False, skipped=True, reason='backfill_deferred')
         else:
             try:
                 result['jev'] = finish_jev(client)
@@ -388,10 +395,14 @@ def main():
         if changed_layouts:
             result['complete'] = False
             result['layout_changed'] = changed_layouts
+            ocr_complete = False
+        if args.skip_jev_backfill:
+            result['jev_backfill_deferred'] = True
+            result['ocr_complete'] = ocr_complete
         print(json.dumps(dict(event='jev_finished', **result['jev'])), flush=True)
         save_json(root / 'last-run.json', result)
         print(json.dumps(dict(event='finished', **result)), flush=True)
-        return 0 if result['complete'] else 1
+        return 0 if (ocr_complete if args.skip_jev_backfill else result['complete']) else 1
 
 
 if __name__ == '__main__':

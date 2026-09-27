@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import receipt_ocr_scheduled as scheduled
 
@@ -18,6 +19,13 @@ class FakeProcess:
 
 
 class ScheduledOcrTests(unittest.TestCase):
+    def test_explicit_deferred_backfill_keeps_wrapper_ownership(self):
+        with patch('sys.argv', ['receipt_ocr_scheduled.py', '--skip-jev-backfill']), \
+                patch.object(scheduled, 'run_command', return_value=0) as run:
+            self.assertEqual(scheduled.main(), 0)
+        self.assertEqual(run.call_args.args[0][-1], '--skip-jev-backfill')
+        self.assertEqual(run.call_args.kwargs['mode'], 'backfill-deferred')
+
     def run_scheduled(self, exit_code):
         calls = []
         times = iter(["2026-09-20T12:00:00+00:00", "2026-09-20T12:05:00+00:00"])
@@ -40,6 +48,7 @@ class ScheduledOcrTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(state["phase"], "finished")
+        self.assertEqual(state["mode"], "full")
         self.assertEqual(state["outcome"], "success")
         self.assertEqual(state["exit_code"], 0)
         self.assertEqual(state["process_id"], 1234)
