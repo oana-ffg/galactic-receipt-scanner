@@ -820,9 +820,34 @@ test("human review edits structured values and detaches a wrong page into the po
   await page
     .getByLabel("Category explanation", { exact: true })
     .fill("Only synthetic personal groceries are present.");
+  let releaseCategorySave!: () => void;
+  const categorySaveHeld = new Promise<void>((resolve) => {
+    releaseCategorySave = resolve;
+  });
+  await page.route(
+    `${origin}/api/processing/category-assignment`,
+    async (route) => {
+      await categorySaveHeld;
+      await route.fallback();
+    },
+  );
   await page
     .getByRole("button", { name: "Save category only", exact: true })
     .click();
+  try {
+    await expect(page.locator("#review-detail")).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    await expect(page.locator("#review-detail")).toHaveAttribute("inert", "");
+  } finally {
+    releaseCategorySave();
+  }
+  await expect(page.locator("#review-detail")).not.toHaveAttribute(
+    "aria-busy",
+    "true",
+  );
+  await page.unroute(`${origin}/api/processing/category-assignment`);
   await expect(
     page.getByRole("combobox", { name: "Purchase category", exact: true }),
   ).toHaveValue(secondCategory.id);

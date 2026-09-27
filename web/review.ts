@@ -135,12 +135,16 @@ export async function mountReview(app: HTMLElement) {
   async function action(task: () => Promise<void>) {
     if (busy) return;
     busy = true;
+    detail.inert = true;
+    detail.setAttribute("aria-busy", "true");
     try {
       await task();
     } catch (e) {
       setMessage(messageOf(e));
     } finally {
       busy = false;
+      detail.inert = false;
+      detail.removeAttribute("aria-busy");
     }
   }
   function listParams(after: string) {

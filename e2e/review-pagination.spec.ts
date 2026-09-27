@@ -2,6 +2,63 @@ import { expect, test } from "@playwright/test";
 import { newDocument } from "../web/documents";
 import type { Capture } from "../web/types";
 
+test("a full review page gives every card enough height for its text", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const documents = Array.from({ length: 40 }, (_, index) => {
+    const id = `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`;
+    return {
+      id,
+      revision: 1,
+      vendor: "Synthetic shop",
+      receiptDate: null,
+      reference: null,
+      kind: "receipt",
+      jevRole: null,
+      completenessAudit: null,
+      sourceInterventionFine: false,
+      status: "review",
+      reasons: [
+        "A long synthetic review reason requiring several lines of text",
+      ],
+      pageIds: [id],
+      scannedAt: ["2026-09-27T12:00:00Z"],
+      processing: {
+        has_human_review: false,
+        needs_reparse: false,
+        luna_needs_human_review: false,
+        small_model_certainty: "medium",
+        large_model_confidence: "medium",
+      },
+      duplicateOf: null,
+      filename: `2026-09-27_synthetic_purchase_with_a_long_filename_${index}.pdf`,
+      pdf: null,
+    };
+  });
+  await page.route("**/api/processing/categories?*", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/documents?*", (route) =>
+    route.fulfill({ json: { documents, next: null } }),
+  );
+  await page.goto("/review");
+  await expect(page.locator("#review-list .review-item")).toHaveCount(40);
+  const layout = await page.locator("#review-list").evaluate((list) => ({
+    clientHeight: list.clientHeight,
+    scrollHeight: list.scrollHeight,
+    textOverflowsCard: [...list.querySelectorAll(".review-item")].some((card) =>
+      [...card.children].some(
+        (child) =>
+          child.getBoundingClientRect().bottom >
+          card.getBoundingClientRect().bottom + 1,
+      ),
+    ),
+  }));
+  expect(layout.scrollHeight).toBeGreaterThan(layout.clientHeight);
+  expect(layout.textOverflowsCard).toBe(false);
+});
+
 test("paginates and searches review summaries without requesting the full catalog", async ({
   page,
 }) => {
