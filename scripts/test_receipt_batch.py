@@ -681,6 +681,31 @@ class BatchGuardTests(unittest.TestCase):
             verify.assert_called_once()
             guard.assert_not_called()
 
+    def test_cli_accepts_one_explicit_parallel_lane(self):
+        lease = FakeLease()
+        stdout = io.StringIO()
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'synthetic-task', '--verify', 'a' * 32,
+            '--client-config', str(self.client_config), '--lane', 'parallel-1',
+        ]), patch.object(module, 'ProcessingBatchLease', return_value=lease) as factory, \
+             patch.object(module, 'verify_run', return_value={'verified': True}) as verify, \
+             patch.object(module.sys, 'stdout', stdout):
+            module.main()
+        factory.assert_called_once_with(Path(module.__file__).resolve().parent.parent,
+                                        str(self.client_config), 'parallel-1')
+        self.assertEqual(verify.call_args.kwargs['base'].name, 'receipt-worker-parallel-1')
+        self.assertTrue(json.loads(stdout.getvalue())['verified'])
+
+    def test_cli_rejects_duplicate_parallel_lane(self):
+        with patch.object(module.sys, 'argv', [
+            'receipt_batch.py', '--owner', 'synthetic-task', '--verify', 'a' * 32,
+            '--client-config', str(self.client_config), '--lane', 'parallel-1',
+            '--lane', 'parallel-2',
+        ]), patch.object(module.sys, 'stderr', io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                module.main()
+        self.assertEqual(error.exception.code, 2)
+
     def test_empty_verify_argument_cannot_start_a_batch(self):
         with patch.object(module.sys, 'argv', [
             'receipt_batch.py', '--owner', 'receipt-processing-scheduled', '--verify', '',
