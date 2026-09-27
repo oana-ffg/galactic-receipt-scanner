@@ -158,6 +158,75 @@ interface CaptureRow {
   effective_status?: string;
   owner_notes?: string;
 }
+
+class DependencyStageError extends Error {
+  constructor(
+    readonly dependency: "D1" | "R2",
+    readonly stage: string,
+    cause: unknown,
+  ) {
+    super(`${dependency} operation failed at ${stage}.`, { cause });
+    this.name = "DependencyStageError";
+  }
+}
+
+async function atDependencyStage<T>(
+  dependency: "D1" | "R2",
+  stage: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new DependencyStageError(dependency, stage, error);
+  }
+}
+
+function safeErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Za-z0-9_-]{1,60}$/.test(code)
+    ? code
+    : undefined;
+}
+
+function safeFailureKind(error: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  for (let current = error, depth = 0; depth < 4 && current; depth++) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const description = (
+      current instanceof Error
+        ? `${current.name} ${safeErrorCode(current) ?? ""} ${current.message}`
+        : typeof current === "object"
+          ? (safeErrorCode(current) ?? "")
+          : ""
+    ).replaceAll("_", " ");
+    if (
+      /\b(?:timeout|timeouterror|etimedout|timed out|deadline exceeded)\b/i.test(
+        description,
+      )
+    )
+      return "timeout";
+    if (/\b(?:connection|network|econnreset|econnrefused)\b/i.test(description))
+      return "connection";
+    if (/\b(?:constraint|unique|foreign key)\b/i.test(description))
+      return "constraint";
+    if (/\b(?:busy|locked)\b/i.test(description)) return "busy";
+    if (
+      /\b(?:quota exceeded|rate limit|too many requests)\b/i.test(description)
+    )
+      return "capacity-limit";
+    current =
+      current instanceof Error
+        ? current.cause
+        : typeof current === "object" && "cause" in current
+          ? current.cause
+          : undefined;
+  }
+  return undefined;
+}
+
 function publicCapture(row: CaptureRow) {
   return {
     id: row.id,
@@ -207,11 +276,13 @@ async function captureAcknowledgement(row: CaptureRow) {
 }
 // Keep decisions are separate from immutable upload status and acknowledgement hashes.
 async function captureRow(env: Env, id: string): Promise<CaptureRow> {
-  const row = await env.DB.prepare(
-    `${captureSelection}, (${receiptCount}) AS accepted_count FROM captures WHERE id = ?`,
-  )
-    .bind(id)
-    .first<CaptureRow>();
+  const row = await atDependencyStage("D1", "capture-row-read", () =>
+    env.DB.prepare(
+      `${captureSelection}, (${receiptCount}) AS accepted_count FROM captures WHERE id = ?`,
+    )
+      .bind(id)
+      .first<CaptureRow>(),
+  );
   requireThat(row, 404, "Capture not found.");
   return row;
 }
@@ -227,14 +298,16 @@ interface StationRow {
   preview_requested_until: number;
 }
 async function stationRow(env: Env): Promise<StationRow> {
-  const row = await env.DB.prepare(
-    "SELECT * FROM station WHERE id=1",
-  ).first<StationRow>();
+  const row = await atDependencyStage("D1", "station-read", () =>
+    env.DB.prepare("SELECT * FROM station WHERE id=1").first<StationRow>(),
+  );
   if (row) return row;
-  await env.DB.prepare("INSERT OR IGNORE INTO station(id) VALUES (1)").run();
-  return (await env.DB.prepare(
-    "SELECT * FROM station WHERE id=1",
-  ).first<StationRow>())!;
+  await atDependencyStage("D1", "station-initialize", () =>
+    env.DB.prepare("INSERT OR IGNORE INTO station(id) VALUES (1)").run(),
+  );
+  return (await atDependencyStage("D1", "station-read", () =>
+    env.DB.prepare("SELECT * FROM station WHERE id=1").first<StationRow>(),
+  ))!;
 }
 
 function requireQuality(metadata: Record<string, unknown>) {
@@ -482,37 +555,43 @@ async function route(
       // rejects an ID conflict. Keep those bytes for investigation; never
       // overwrite the canonical source or auto-delete financial source bytes.
       await timing.measure("serverObjectMs", () =>
-        storeOriginal(env.BUCKET, key, data, sha, type),
+        atDependencyStage("R2", "original-object-write", () =>
+          storeOriginal(env.BUCKET, key, data, sha, type),
+        ),
       );
       // The insert is the uniqueness check. A new capture needs no preflight
       // lookup or separate readback; RETURNING is part of this atomic write.
       const inserted = await timing.measure("serverInsertMs", () =>
-        env.DB.prepare(
-          "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(?,COALESCE(MAX(take_number),0)+1) FROM captures WHERE receipt_id=? OR id=? RETURNING *",
-        )
-          .bind(
-            id,
-            restored?.created_at ?? new Date().toISOString(),
-            sha,
-            key,
-            type,
-            data.length,
-            completed ?? "checking",
-            JSON.stringify(metadata),
-            receiptId,
-            retakeOf,
-            restored?.take_number ?? null,
-            receiptId,
-            receiptId,
+        atDependencyStage("D1", "capture-metadata-write", () =>
+          env.DB.prepare(
+            "INSERT OR IGNORE INTO captures(id,created_at,sha256,raw_key,content_type,bytes,status,metadata,receipt_id,retake_of,take_number) SELECT ?,?,?,?,?,?,?,?,?,?,COALESCE(?,COALESCE(MAX(take_number),0)+1) FROM captures WHERE receipt_id=? OR id=? RETURNING *",
           )
-          .first<CaptureRow>(),
+            .bind(
+              id,
+              restored?.created_at ?? new Date().toISOString(),
+              sha,
+              key,
+              type,
+              data.length,
+              completed ?? "checking",
+              JSON.stringify(metadata),
+              receiptId,
+              retakeOf,
+              restored?.take_number ?? null,
+              receiptId,
+              receiptId,
+            )
+            .first<CaptureRow>(),
+        ),
       );
       const row =
         inserted ??
         (await timing.measure("serverRetryReadMs", () =>
-          env.DB.prepare("SELECT * FROM captures WHERE id=?")
-            .bind(id)
-            .first<CaptureRow>(),
+          atDependencyStage("D1", "capture-retry-read", () =>
+            env.DB.prepare("SELECT * FROM captures WHERE id=?")
+              .bind(id)
+              .first<CaptureRow>(),
+          ),
         ));
       requireThat(row, 503, "Capture metadata was not confirmed.");
       requireThat(
@@ -522,7 +601,9 @@ async function route(
       );
       if (row.raw_key !== key)
         await timing.measure("serverReadbackMs", () =>
-          verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes),
+          atDependencyStage("R2", "original-object-readback", () =>
+            verifyOriginal(env.BUCKET, row.raw_key, row.sha256, row.bytes),
+          ),
         );
       if (request.headers.get("x-capture-acknowledgement") === "durable-v1")
         return json(
@@ -637,25 +718,33 @@ async function route(
     }
     const sha = await digest(data);
     const key = `${kind}/${id}/${sha}`;
-    const stored = await env.BUCKET.put(key, data, {
-      onlyIf: { etagDoesNotMatch: "*" },
-      httpMetadata: { contentType: type },
-      customMetadata: { sha256: sha },
-    });
+    const stored = await atDependencyStage("R2", "artifact-object-write", () =>
+      env.BUCKET.put(key, data, {
+        onlyIf: { etagDoesNotMatch: "*" },
+        httpMetadata: { contentType: type },
+        customMetadata: { sha256: sha },
+      }),
+    );
     if (!stored)
       requireThat(
-        await env.BUCKET.head(key),
+        await atDependencyStage("R2", "artifact-object-confirm", () =>
+          env.BUCKET.head(key),
+        ),
         503,
         "Artifact storage not confirmed.",
       );
-    await env.DB.prepare(
-      "INSERT OR IGNORE INTO artifacts(key,capture_id,kind,sha256,created_at,content_type) VALUES(?,?,?,?,?,?)",
-    )
-      .bind(key, id, kind, sha, new Date().toISOString(), type)
-      .run();
+    await atDependencyStage("D1", "artifact-metadata-write", () =>
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO artifacts(key,capture_id,kind,sha256,created_at,content_type) VALUES(?,?,?,?,?,?)",
+      )
+        .bind(key, id, kind, sha, new Date().toISOString(), type)
+        .run(),
+    );
     let jev: { status: string } | null = null;
     if (kind === "ocr" && ocrValue?.provenance?.engine === "PP-OCRv6") {
-      const jobId = await queueJevJob(env, id, sha);
+      const jobId = await atDependencyStage("D1", "jev-queue", () =>
+        queueJevJob(env, id, sha),
+      );
       try {
         const result = await runJevJob(request, env, loadCapture, jobId);
         jev = { status: result.status };
@@ -771,9 +860,9 @@ async function route(
   if (path === "/api/station" && method === "GET") {
     const row = await stationRow(env);
     const fresh = row.expires > Date.now() && row.updated > Date.now() - 5000;
-    const count = await env.DB.prepare(`SELECT (${receiptCount}) AS n`).first<{
-      n: number;
-    }>();
+    const count = await atDependencyStage("D1", "receipt-count-read", () =>
+      env.DB.prepare(`SELECT (${receiptCount}) AS n`).first<{ n: number }>(),
+    );
     return json({
       camera: fresh ? row.camera : null,
       previewSession:
@@ -837,17 +926,19 @@ async function route(
       400,
       "Missing state.",
     );
-    const row = await env.DB.prepare(
-      "UPDATE station SET state=?,updated=?,expires=? WHERE id=1 AND camera=? AND expires>? RETURNING sequence,command,preview_session,preview_requested_until",
-    )
-      .bind(
-        JSON.stringify(info.state),
-        Date.now(),
-        Date.now() + 10000,
-        String(info.camera),
-        Date.now(),
+    const row = await atDependencyStage("D1", "station-heartbeat-write", () =>
+      env.DB.prepare(
+        "UPDATE station SET state=?,updated=?,expires=? WHERE id=1 AND camera=? AND expires>? RETURNING sequence,command,preview_session,preview_requested_until",
       )
-      .first<StationRow>();
+        .bind(
+          JSON.stringify(info.state),
+          Date.now(),
+          Date.now() + 10000,
+          String(info.camera),
+          Date.now(),
+        )
+        .first<StationRow>(),
+    );
     requireThat(row, 409, "Camera lease expired. Enable camera again.");
     return json({
       previewRequestedForMs: Math.max(
@@ -885,11 +976,16 @@ async function route(
       "Invalid preview session.",
     );
     if (info.renew === true) {
-      const result = await env.DB.prepare(
-        "UPDATE station SET preview_session=json_set(preview_session, '$.expires', ?) WHERE id=1 AND camera=? AND expires>? AND json_extract(preview_session, '$.id')=?",
-      )
-        .bind(Date.now() + 30000, String(info.camera), Date.now(), info.id)
-        .run();
+      const result = await atDependencyStage(
+        "D1",
+        "preview-session-renew",
+        () =>
+          env.DB.prepare(
+            "UPDATE station SET preview_session=json_set(preview_session, '$.expires', ?) WHERE id=1 AND camera=? AND expires>? AND json_extract(preview_session, '$.id')=?",
+          )
+            .bind(Date.now() + 30000, String(info.camera), Date.now(), info.id)
+            .run(),
+      );
       requireThat(result.meta.changes === 1, 409, "Preview session changed.");
       return json({ ok: true });
     }
@@ -905,32 +1001,36 @@ async function route(
     );
     let result;
     if (info.offer) {
-      result = await env.DB.prepare(
-        "UPDATE station SET preview_session=? WHERE id=1 AND camera=? AND expires>? AND (preview_session IS NULL OR json_extract(preview_session, '$.expires')<? OR json_extract(preview_session, '$.id')=?)",
-      )
-        .bind(
-          JSON.stringify({
-            id: info.id,
-            offer: info.offer,
-            expires: Date.now() + 30000,
-          }),
-          String(info.camera),
-          Date.now(),
-          Date.now(),
-          info.id,
+      result = await atDependencyStage("D1", "preview-offer-write", () =>
+        env.DB.prepare(
+          "UPDATE station SET preview_session=? WHERE id=1 AND camera=? AND expires>? AND (preview_session IS NULL OR json_extract(preview_session, '$.expires')<? OR json_extract(preview_session, '$.id')=?)",
         )
-        .run();
+          .bind(
+            JSON.stringify({
+              id: info.id,
+              offer: info.offer,
+              expires: Date.now() + 30000,
+            }),
+            String(info.camera),
+            Date.now(),
+            Date.now(),
+            info.id,
+          )
+          .run(),
+      );
     } else {
-      result = await env.DB.prepare(
-        "UPDATE station SET preview_session=json_set(preview_session, '$.answer', json(?)) WHERE id=1 AND camera=? AND expires>? AND json_extract(preview_session, '$.id')=?",
-      )
-        .bind(
-          JSON.stringify(info.answer),
-          String(info.camera),
-          Date.now(),
-          info.id,
+      result = await atDependencyStage("D1", "preview-answer-write", () =>
+        env.DB.prepare(
+          "UPDATE station SET preview_session=json_set(preview_session, '$.answer', json(?)) WHERE id=1 AND camera=? AND expires>? AND json_extract(preview_session, '$.id')=?",
         )
-        .run();
+          .bind(
+            JSON.stringify(info.answer),
+            String(info.camera),
+            Date.now(),
+            info.id,
+          )
+          .run(),
+      );
     }
     requireThat(
       result.meta.changes === 1,
@@ -955,18 +1055,22 @@ async function route(
         "Preview must be JPEG.",
       );
       const key = "preview/latest";
-      await env.BUCKET.put(key, data, {
-        httpMetadata: { contentType: "image/jpeg" },
-        customMetadata: {
-          camera: String(row.camera),
-          capturedAt: String(Date.now()),
-        },
-      });
-      await env.DB.prepare(
-        "UPDATE station SET preview_key=? WHERE id=1 AND camera=?",
-      )
-        .bind(key, row.camera)
-        .run();
+      await atDependencyStage("R2", "preview-frame-write", () =>
+        env.BUCKET.put(key, data, {
+          httpMetadata: { contentType: "image/jpeg" },
+          customMetadata: {
+            camera: String(row.camera),
+            capturedAt: String(Date.now()),
+          },
+        }),
+      );
+      await atDependencyStage("D1", "preview-pointer-write", () =>
+        env.DB.prepare(
+          "UPDATE station SET preview_key=? WHERE id=1 AND camera=?",
+        )
+          .bind(key, row.camera)
+          .run(),
+      );
       return json({ ok: true });
     }
     if (method === "GET") {
@@ -978,7 +1082,10 @@ async function route(
         row.updated > Date.now() - 5000
       ))
         return new Response(null, { status: 204 });
-      const image = await env.BUCKET.get(row.preview_key);
+      const previewKey = row.preview_key;
+      const image = await atDependencyStage("R2", "preview-frame-read", () =>
+        env.BUCKET.get(previewKey),
+      );
       if (!(
         image &&
         image.customMetadata?.camera === row.camera &&
@@ -1103,16 +1210,31 @@ export default {
       );
     } catch (error) {
       const status = error instanceof HttpError ? error.status : 503;
+      const path = new URL(request.url).pathname;
+      const traceId = crypto.randomUUID();
+      const cause = error instanceof DependencyStageError ? error.cause : error;
+      const failureKind = safeFailureKind(cause);
       if (status >= 500)
         console.error(
           JSON.stringify({
             event: "scanner_request_failure",
             method: request.method,
-            path: new URL(request.url).pathname,
+            path,
             status,
-            error_type: error instanceof Error ? error.name : typeof error,
+            trace_id: traceId,
+            dependency:
+              error instanceof DependencyStageError
+                ? error.dependency
+                : undefined,
+            stage:
+              error instanceof DependencyStageError ? error.stage : undefined,
+            error_type: cause instanceof Error ? cause.name : typeof cause,
+            error_code: safeErrorCode(cause),
+            failure_kind: failureKind,
             reason: error instanceof HttpError ? error.message : undefined,
             ray_id: request.headers.get("cf-ray"),
+            elapsed_ms: Math.round(performance.now() - timing.started),
+            timing_stage: timing.data.failedStage,
           }),
         );
       if (
@@ -1138,19 +1260,25 @@ export default {
         );
         return new Response(html, { status: response.status, headers });
       }
-      return finish(
-        secure(
-          json(
-            {
-              detail:
-                error instanceof HttpError
-                  ? error.message
-                  : "Storage temporarily unavailable. Your pending capture is retained; retry.",
-            },
-            status,
-          ),
+      const detail =
+        error instanceof DependencyStageError
+          ? `${request.method} ${path} failed during ${error.dependency} ${error.stage}${failureKind ? ` (${failureKind})` : ""}. Reference ${traceId}.`
+          : error instanceof HttpError
+            ? status >= 500
+              ? `${error.message} Reference ${traceId}.`
+              : error.message
+            : `${request.method} ${path} failed in the scanner service during ${timing.data.failedStage ?? "an unclassified stage"}. Reference ${traceId}.`;
+      const response = secure(
+        json(
+          {
+            detail,
+            ...(status >= 500 ? { traceId } : {}),
+          },
+          status,
         ),
       );
+      if (status >= 500) response.headers.set("X-Scanner-Trace-Id", traceId);
+      return finish(response);
     }
   },
 };

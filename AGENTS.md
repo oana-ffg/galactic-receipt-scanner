@@ -306,6 +306,22 @@ row counts for queue and backfill paths.
 4. Efficient operation: hands-free capture, clear reasons, desktop controls and optional
    audio. Avoid decorative features that compete with the receipt preview.
 
+### Diagnosable failures
+
+Make errors specific enough to investigate without guessing. For an API or worker failure,
+identify the operation and the stage or dependency that failed; distinguish an HTTP error,
+timeout, connection failure and rejected request. Never label an unknown failure as
+"storage unavailable" or name another cause the evidence does not establish. Return a
+safe, actionable message with diagnostic context. For unexpected server failures,
+include a request or trace ID linking the client report to a structured server log. When
+there is no server response, retain the local failure stage, error class/code and time
+in client diagnostics. In protected server logs, record the route, stage, error class/code,
+relevant timings and the same ID. Add a cause or stack only when it can be safely
+sanitized. Do not log credentials, receipt content, personal data or raw request bodies.
+Test representative server failures for end-to-end stage and ID correlation, and test
+client-only failures for useful local diagnostics. Keep diagnostic work off the capture
+and save critical path.
+
 Test persistence failures, retry conflicts, disconnections, stale frames, hand obstruction,
 capture/removal transitions and clipping. Distinguish synthetic checks from physical calibration.
 

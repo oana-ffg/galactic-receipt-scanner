@@ -141,6 +141,24 @@ describe("private diagnostic history", () => {
       "station/heartbeat",
     );
     expect(requestCategory("/api/station/unknown-secret")).toBe("other");
+    expect(requestCategory("/api/documents/private-id/pdf?token=secret")).toBe(
+      "documents",
+    );
+  });
+
+  it("records the local stage and error type when no server response arrives", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new DOMException("timed out", "TimeoutError")),
+    );
+    await expect(api("/api/station")).rejects.toThrow("GET station:");
+    expect(diagnostics.snapshot().at(-1)?.data).toMatchObject({
+      route: "station",
+      method: "GET",
+      status: 0,
+      errorType: "TimeoutError",
+      failedStage: "requestHeadersMs",
+    });
   });
 });
 

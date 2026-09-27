@@ -1,5 +1,5 @@
 import { Timing, serverStages } from "./save-timing";
-import { messageOf, RequestError } from "./errors";
+import { messageOf, RequestError, responseError } from "./errors";
 import { diagnostics, requestCategory } from "./diagnostics";
 
 export async function api<T>(
@@ -32,19 +32,7 @@ export async function api<T>(
       requestTiming.data.failedStage = failed as (typeof serverStages)[number];
     status = response.status;
     if (requestTiming) requestTiming.data.status = status;
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      const message =
-        response.status === 401 || response.status === 403
-          ? "Access could not be verified. Reopen the scanner and sign in with the owner account."
-          : response.status >= 500
-            ? "The scanner service is temporarily unavailable. Please try again shortly."
-            : String(
-                error.detail ??
-                  "The request could not be completed. Please try again.",
-              );
-      throw new RequestError(message, response.status);
-    }
+    if (!response.ok) throw await responseError(response, method, route);
     if (!response.headers.get("Content-Type")?.includes("application/json"))
       throw new RequestError(
         "Your session may have ended. Reopen the scanner and sign in with the owner account.",
@@ -69,6 +57,12 @@ export async function api<T>(
     );
     return result;
   } catch (error) {
+    const rawCode = (error as { code?: unknown } | null)?.code;
+    const errorCode =
+      (typeof rawCode === "string" && /^[A-Za-z0-9_-]{1,60}$/.test(rawCode)) ||
+      (typeof rawCode === "number" && Number.isFinite(rawCode))
+        ? rawCode
+        : undefined;
     if (requestTiming)
       requestTiming.data.failedStage ??=
         status >= 400
@@ -76,6 +70,13 @@ export async function api<T>(
           : status
             ? "responseParseMs"
             : "requestHeadersMs";
+    const failedStage =
+      requestTiming?.data.failedStage ??
+      (status >= 400
+        ? "requestMs"
+        : status
+          ? "responseParseMs"
+          : "requestHeadersMs");
     diagnostics.record(
       "request",
       {
@@ -84,12 +85,16 @@ export async function api<T>(
         status,
         ok: false,
         ms: performance.now() - started,
+        traceId: error instanceof RequestError ? error.traceId : undefined,
+        errorType: error instanceof Error ? error.name : typeof error,
+        errorCode,
+        failedStage,
       },
       2000,
       `${route}:${method}:${status}:failed`,
     );
     if (error instanceof RequestError) throw error;
-    throw new RequestError(messageOf(error));
+    throw new RequestError(`${method} ${route}: ${messageOf(error)}`);
   } finally {
     requestTiming?.set("requestMs", performance.now() - started);
     if (timing && requestTiming) {

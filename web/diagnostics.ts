@@ -122,7 +122,16 @@ export function requestCategory(path: string): string {
       return `station/${action}`;
   }
   if (route === "/api/station") return "station";
-  for (const category of ["captures", "issues", "files", "control"])
+  for (const category of [
+    "captures",
+    "issues",
+    "files",
+    "control",
+    "documents",
+    "processing",
+    "jev",
+    "connections",
+  ])
     if (route === `/api/${category}` || route.startsWith(`/api/${category}/`))
       return category;
   return "other";

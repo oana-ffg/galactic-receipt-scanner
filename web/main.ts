@@ -5,7 +5,7 @@ import { api } from "./api";
 import { StateOrder } from "./state-order";
 import { PhoneCamera } from "./camera";
 import { DirectPreview, type PreviewSession } from "./direct-preview";
-import { messageOf, RequestError } from "./errors";
+import { messageOf, RequestError, responseError } from "./errors";
 // Reporting must stay available when a deployment replaces lazy asset URLs.
 import { mountIssues, reportIssue } from "./issues";
 import type { ScanState } from "./types";
@@ -575,7 +575,8 @@ function mountDashboard(): void {
         }
         if (status === 204)
           throw new Error("Waiting for a fresh phone preview.");
-        if (!response.ok) throw new Error("Waiting for a fresh phone preview.");
+        if (!response.ok)
+          throw await responseError(response, "GET", "station/preview");
         const blob = await response.blob();
         if (accessDenied) return;
         let newFrame = false;
@@ -612,7 +613,14 @@ function mountDashboard(): void {
           denyAccess(problem);
         diagnostics.record(
           "preview.http",
-          { ok: false, status, ms: performance.now() - started },
+          {
+            ok: false,
+            status,
+            ms: performance.now() - started,
+            traceId:
+              problem instanceof RequestError ? problem.traceId : undefined,
+            errorType: problem instanceof Error ? problem.name : typeof problem,
+          },
           2000,
           `failure-${status}`,
         );

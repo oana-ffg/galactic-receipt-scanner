@@ -74,7 +74,7 @@ test("capture survives preview delays and a lost acknowledgement without creatin
     timeout: 25000,
   });
   await expect(phone.locator("#status")).toContainText(
-    "connection was interrupted",
+    "POST captures: The request was interrupted or timed out",
   );
   const interrupted = (await (await request.get("/api/captures")).json())
     .captures;

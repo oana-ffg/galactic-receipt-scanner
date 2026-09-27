@@ -297,7 +297,14 @@ it("fails closed without owner configuration and never acknowledges a failed obj
     },
   } as never);
   expect(response.status).toBe(503);
-  expect(await response.text()).not.toContain("accepted");
+  const failure = (await response.json()) as {
+    detail: string;
+    traceId: string;
+  };
+  expect(failure.detail).toContain("R2 original-object-write");
+  expect(failure.detail).toContain(failure.traceId);
+  expect(response.headers.get("X-Scanner-Trace-Id")).toBe(failure.traceId);
+  expect(failure.detail).not.toContain("accepted");
 });
 
 it("cannot accept an original with missing quality or a failed original write", async () => {
@@ -380,15 +387,68 @@ it("logs server failures with routing context but no response or request payload
       { APP_ORIGIN: origin, OWNER_EMAIL: "" } as never,
     );
     expect(response.status).toBe(503);
-    expect(JSON.parse(String(logged.mock.lastCall?.[0]))).toEqual({
+    const failure = (await response.json()) as {
+      detail: string;
+      traceId: string;
+    };
+    expect(failure.detail).toContain("Instance is not configured.");
+    expect(failure.detail).toContain(failure.traceId);
+    expect(JSON.parse(String(logged.mock.lastCall?.[0]))).toMatchObject({
       event: "scanner_request_failure",
       method: "GET",
       path: "/api/me",
       status: 503,
+      trace_id: failure.traceId,
       error_type: "Error",
       reason: "Instance is not configured.",
       ray_id: "1234567890abcdef",
+      elapsed_ms: expect.any(Number),
     });
+  } finally {
+    logged.mockRestore();
+  }
+});
+
+it("classifies nested dependency failures without exposing private error text", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    for (const [cause, kind] of [
+      [
+        new Error("wrapper", {
+          cause: new Error("D1 timed out: private text"),
+        }),
+        "timeout",
+      ],
+      [new Error("SQLITE_CONSTRAINT on private text"), "constraint"],
+    ] as const) {
+      const response = await worker.fetch(
+        new Request(origin + "/api/station", { headers: ownerHeaders }),
+        {
+          APP_ORIGIN: origin,
+          OWNER_EMAIL: "owner@example.test",
+          DB: {
+            prepare: () => {
+              throw cause;
+            },
+          },
+        } as never,
+      );
+      expect(response.status).toBe(503);
+      const failure = (await response.json()) as {
+        detail: string;
+        traceId: string;
+      };
+      expect(failure.detail).toContain(`D1 station-read (${kind})`);
+      expect(failure.detail).not.toContain("private text");
+      const log = JSON.parse(String(logged.mock.lastCall?.[0]));
+      expect(log).toMatchObject({
+        trace_id: failure.traceId,
+        dependency: "D1",
+        stage: "station-read",
+        failure_kind: kind,
+      });
+      expect(JSON.stringify(log)).not.toContain("private text");
+    }
   } finally {
     logged.mockRestore();
   }

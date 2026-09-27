@@ -790,7 +790,7 @@ test("human review edits structured values and detaches a wrong page into the po
   );
   await page.getByRole("button", { name: "Generate PDF" }).click();
   await expect(page.locator("#review-message")).toContainText(
-    "The scanner service is temporarily unavailable",
+    "POST documents returned HTTP 503 without a scanner diagnostic response",
   );
   expect(retryWrites.filter((url) => url.endsWith("/api/documents"))).toEqual(
     [],
