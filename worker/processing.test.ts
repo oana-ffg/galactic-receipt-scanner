@@ -2213,6 +2213,45 @@ it("allows exactly one winner when different connections claim the same document
   expect(values.filter((v) => v.reason === "busy-or-changed")).toHaveLength(1);
 });
 
+it("claims ten distinct ready documents through concurrent lane selections", async () => {
+  for (let index = 0; index < 10; index += 1) await capture();
+  const processors = await Promise.all(
+    Array.from({ length: 10 }, (_, index) =>
+      independentProcessor(String.fromCharCode(98 + index)),
+    ),
+  );
+  const requests = processors.map((_, index) => ({
+    stage: "small",
+    claim_token: crypto.randomUUID(),
+    selection_offset: index,
+  }));
+  const responses = await Promise.all(
+    processors.map((processor, index) =>
+      processor("/api/processing/claim", requests[index]),
+    ),
+  );
+  const results = await Promise.all(
+    responses.map((response) => response.json()),
+  );
+  expect(
+    responses.map((response) => response.status),
+    JSON.stringify(results),
+  ).toEqual(Array(10).fill(200));
+  const ids = results.map((result) => result.claim?.document.id);
+  expect(ids.every(Boolean), JSON.stringify(results)).toBe(true);
+  expect(new Set(ids).size).toBe(10);
+  const replay = await processors[0]("/api/processing/claim", requests[0]);
+  expect((await replay.json()).claim.document.id).toBe(ids[0]);
+  expect(
+    (
+      await processors[0]("/api/processing/claim", {
+        ...requests[0],
+        selection_offset: 1,
+      })
+    ).status,
+  ).toBe(409);
+});
+
 it("isolates concurrent sessions sharing one configured credential", async () => {
   const old = await capture();
   const first = await claim();

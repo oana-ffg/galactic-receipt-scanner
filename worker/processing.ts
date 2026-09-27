@@ -936,6 +936,19 @@ export async function processingRoute(
       "A claim token must be a UUID.",
     );
     const targeted = input.document_id !== undefined;
+    const requestedOffset = input.selection_offset;
+    requireThat(
+      requestedOffset === undefined ||
+        (typeof requestedOffset === "number" &&
+          Number.isSafeInteger(requestedOffset) &&
+          requestedOffset >= 0 &&
+          requestedOffset <= 9 &&
+          (!targeted || requestedOffset === 0)),
+      400,
+      "A claim selection offset must be 0 to 9 for untargeted work.",
+    );
+    const selectionOffset = (requestedOffset ?? 0) as number;
+    const stage = input.stage as "small" | "large";
     requireThat(
       targeted
         ? input.stage === "large" &&
@@ -958,6 +971,10 @@ export async function processingRoute(
                 revision: targeted ? input.revision : null,
                 review_all: input.review_all === true,
                 exclude_document_ids: [...excluded].sort(),
+                selection_offset:
+                  input.selection_offset === undefined
+                    ? undefined
+                    : selectionOffset,
               }),
             ),
           ),
@@ -1051,12 +1068,7 @@ export async function processingRoute(
       const began = await env.DB.prepare(
         "INSERT INTO processing_claim_requests(token,request_sha256,stage,document_id,revision,outcome_reason,created_at) VALUES(?,?,?,NULL,NULL,'pending',?) ON CONFLICT(token) DO NOTHING RETURNING token",
       )
-        .bind(
-          requestedToken,
-          requestSha256,
-          input.stage,
-          new Date().toISOString(),
-        )
+        .bind(requestedToken, requestSha256, stage, new Date().toISOString())
         .first<{ token: string }>();
       requireThat(
         began,
@@ -1068,27 +1080,41 @@ export async function processingRoute(
       "SELECT COUNT(*) AS total FROM captures",
     ).first<{ total: number }>();
     const captureCount = count?.total ?? 0;
-    let d: ReceiptDocument | null = null;
-    let currentPages: Capture[] = [];
-    if (targeted) {
-      const selected = excluded.has(input.document_id as string)
-        ? null
-        : await claimDocument(env, input.document_id as string, loadCapture);
-      d = selected?.document ?? null;
-      currentPages = selected?.captures ?? [];
-    } else {
-      const openTail = await jevOpenTailDocumentId(env);
+    const openTail = targeted ? null : await jevOpenTailDocumentId(env);
+    const selectDocument = async (tried: Set<string>) => {
+      if (targeted) {
+        const selected = tried.has(input.document_id as string)
+          ? null
+          : await claimDocument(env, input.document_id as string, loadCapture);
+        return selected;
+      }
       let cursor: ClaimCandidate | null = null;
       for (;;) {
         const rows = await claimCandidateRows(
           env,
-          input.stage,
-          excluded,
+          stage,
+          tried,
           cursor,
           captureCount,
         );
         if (!rows.length) break;
-        for (const row of rows) {
+        // Separate lanes prefer different ready candidates. The offset is only
+        // a starting point: wrap around so older work is never stranded.
+        const firstPriority = rows[0].priority;
+        const groupLength = rows.findIndex(
+          (row) => row.priority !== firstPriority,
+        );
+        const firstGroup = rows.slice(
+          0,
+          groupLength < 0 ? rows.length : groupLength,
+        );
+        const offset = selectionOffset % firstGroup.length;
+        const ordered = [
+          ...firstGroup.slice(offset),
+          ...firstGroup.slice(0, offset),
+          ...rows.slice(firstGroup.length),
+        ];
+        for (const row of ordered) {
           if (row.id === openTail) continue;
           const selected = await claimDocument(env, row.id, loadCapture);
           if (!selected) continue;
@@ -1115,46 +1141,41 @@ export async function processingRoute(
                   ? ["extracted", "model-review", "broken"]
                   : ["model-review", "broken"]
                 ).includes(processingDisposition(candidate.processing));
-          if (eligible && (await jevSummary(env, candidate)).ready) {
-            d = candidate;
-            currentPages = selected.captures;
-            break;
-          }
+          if (eligible && (await jevSummary(env, candidate)).ready)
+            return selected;
         }
-        if (d || rows.length < 25) break;
+        if (rows.length < 25) break;
         cursor = rows.at(-1)!;
       }
-    }
-    if (targeted) {
-      requireThat(d, 404, "Review document not found.");
-      requireThat(
-        d.revision === input.revision &&
-          !d.mergedInto &&
-          !d.duplicateOf &&
-          currentPages.some((capture) => capture.is_current) &&
-          !!d.processing &&
-          !d.processing.has_human_review,
-        409,
-        "Targeted review requires a current, processed, non-human-reviewed document at the expected revision.",
-      );
-    }
-    if (!d) {
-      if (requestedToken)
-        await env.DB.prepare(
-          "UPDATE processing_claim_requests SET outcome_reason='queue-empty' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
-        )
-          .bind(requestedToken, requestSha256)
-          .run();
-      return json({ claim: null, reason: "queue-empty" });
-    }
+      return null;
+    };
     const token = requestedToken ?? crypto.randomUUID();
     const credential = await processingClient(request);
     const batchId = await processingBatch(request, env);
-    // Both selection and acquisition exclude reservations; the SQL predicate is
-    // authoritative when another worker wins between these two operations.
-    const results = await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO processing_lock(token,request_sha256,stage,document_id,revision,expires,draft,client_sha256,batch_id)
+    const tried = new Set(excluded);
+    let contention = false;
+    for (let attempt = 0; attempt < (targeted ? 1 : 10); attempt += 1) {
+      const selected = await selectDocument(tried);
+      const d = selected?.document;
+      if (targeted) {
+        requireThat(d, 404, "Review document not found.");
+        requireThat(
+          d.revision === input.revision &&
+            !d.mergedInto &&
+            !d.duplicateOf &&
+            selected!.captures.some((capture) => capture.is_current) &&
+            !!d.processing &&
+            !d.processing.has_human_review,
+          409,
+          "Targeted review requires a current, processed, non-human-reviewed document at the expected revision.",
+        );
+      }
+      if (!d) break;
+      // Selection is advisory. The atomic insert decides who owns this
+      // document; a loser tries another candidate before settling its token.
+      const results = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO processing_lock(token,request_sha256,stage,document_id,revision,expires,draft,client_sha256,batch_id)
         SELECT ?,?,?,?,?,unixepoch()*1000+?,NULL,?,?
         WHERE COALESCE((SELECT revision FROM document_heads WHERE id=?),0)=?
         AND (?=1 OR EXISTS(SELECT 1 FROM jev_document_heads WHERE document_id=?))
@@ -1163,57 +1184,62 @@ export async function processingRoute(
         AND NOT EXISTS(SELECT 1 FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id=? AND b.expires>unixepoch()*1000)
         ON CONFLICT(document_id) DO UPDATE SET token=excluded.token,request_sha256=excluded.request_sha256,stage=excluded.stage,revision=excluded.revision,expires=excluded.expires,draft=NULL,client_sha256=excluded.client_sha256,batch_id=excluded.batch_id
         WHERE processing_lock.expires<=unixepoch()*1000 RETURNING token,expires`,
-      ).bind(
-        token,
-        requestSha256,
-        input.stage,
-        d.id,
-        d.revision,
-        LEASE_MS,
-        credential,
-        batchId,
-        d.id,
-        d.revision,
-        targeted ? 1 : 0,
-        d.id,
-        credential,
-        d.id,
-      ),
-      env.DB.prepare(
-        `INSERT INTO processing_batch_documents(document_id,batch_id)
+        ).bind(
+          token,
+          requestSha256,
+          input.stage,
+          d.id,
+          d.revision,
+          LEASE_MS,
+          credential,
+          batchId,
+          d.id,
+          d.revision,
+          targeted ? 1 : 0,
+          d.id,
+          credential,
+          d.id,
+        ),
+        env.DB.prepare(
+          `INSERT INTO processing_batch_documents(document_id,batch_id)
         SELECT document_id,batch_id FROM processing_lock WHERE token=? AND batch_id IS NOT NULL
         ON CONFLICT(document_id) DO UPDATE SET batch_id=excluded.batch_id`,
-      ).bind(token),
-    ]);
-    const result = results[0].results[0] as
-      { token: string; expires: number } | undefined;
-    if (!result) {
+        ).bind(token),
+      ]);
+      const result = results[0].results[0] as
+        { token: string; expires: number } | undefined;
+      if (!result) {
+        contention = true;
+        tried.add(d.id);
+        continue;
+      }
+      const lock = {
+        token,
+        request_sha256: requestSha256,
+        client_sha256: credential,
+        batch_id: batchId,
+        stage: input.stage,
+        document_id: d.id,
+        revision: d.revision,
+        expires: result.expires,
+        draft: null,
+      } as Lock;
       if (requestedToken)
         await env.DB.prepare(
-          "UPDATE processing_claim_requests SET outcome_reason='busy-or-changed' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
+          "UPDATE processing_claim_requests SET document_id=?,revision=?,outcome_reason='active' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
         )
-          .bind(requestedToken, requestSha256)
+          .bind(d.id, d.revision, requestedToken, requestSha256)
           .run();
-      return json({ claim: null, reason: "busy-or-changed" });
+      return claimResponse(lock);
     }
-    const lock = {
-      token,
-      request_sha256: requestSha256,
-      client_sha256: credential,
-      batch_id: batchId,
-      stage: input.stage,
-      document_id: d.id,
-      revision: d.revision,
-      expires: result.expires,
-      draft: null,
-    } as Lock;
+    const reason = contention ? "busy-or-changed" : "queue-empty";
     if (requestedToken)
       await env.DB.prepare(
-        "UPDATE processing_claim_requests SET document_id=?,revision=?,outcome_reason='active' WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
+        "UPDATE processing_claim_requests SET outcome_reason=? WHERE token=? AND request_sha256=? AND outcome_reason='pending'",
       )
-        .bind(d.id, d.revision, requestedToken, requestSha256)
+        .bind(reason, requestedToken, requestSha256)
         .run();
-    return claimResponse(lock);
+    return json({ claim: null, reason });
   }
   if (path === "/api/processing/batch-lease" && method === "POST") {
     requireThat(

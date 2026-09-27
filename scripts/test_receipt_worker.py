@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -554,41 +553,31 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.state['phase'], 'claimed')
         self.assertEqual(self.batch.handle(dict(op='block', reason='Claim response received'))['phase'], 'blocked')
 
-    def test_backend_claim_holds_shared_lock_only_during_request(self):
+    def test_backend_claim_does_not_hold_shared_lock(self):
         claim_lock = self.repo / '.local' / 'processing-claim.lock'
         self.assertFalse(receipt_locks.lock_held(claim_lock))
         original = self.worker.post
         def check_lock(endpoint, body):
             self.assertEqual(endpoint, 'claim')
-            self.assertTrue(receipt_locks.lock_held(claim_lock))
+            self.assertFalse(receipt_locks.lock_held(claim_lock))
+            self.assertEqual(body['selection_offset'], 0)
             return original(endpoint, body)
         with patch.object(self.worker, 'post', side_effect=check_lock):
             self.send('claim', viewer_checked=True)
         self.assertFalse(receipt_locks.lock_held(claim_lock))
 
-    def test_backend_claim_waits_without_uncertain_state_or_request(self):
+    def test_backend_claim_is_not_delayed_by_another_lane(self):
         claim_lock = self.repo / '.local' / 'processing-claim.lock'
-        holder = receipt_locks.acquire_lock(claim_lock)
-        observations = []
-        def release_holder():
-            time.sleep(0.05)
-            observations.append((self.worker.state['phase'], len(self.fake.claim_bodies)))
-            holder.close()
-        releaser = threading.Thread(target=release_holder)
-        releaser.start()
-        try:
+        with receipt_locks.acquire_lock(claim_lock):
             self.send('claim', viewer_checked=True)
-        finally:
-            holder.close()
-            releaser.join(timeout=1)
-        self.assertEqual(observations, [('ready', 0)])
+            self.assertEqual(len(self.fake.claim_bodies), 1)
         self.assertEqual(self.worker.state['phase'], 'claimed')
 
-    def test_failed_backend_claim_releases_shared_lock(self):
+    def test_failed_backend_claim_preserves_exact_uncertain_request(self):
         self.fake.lost_claim = 3
         self.worker.handle({'op': 'claim', 'viewer_checked': True})
         self.assertEqual(self.worker.state['phase'], 'claim-uncertain')
-        self.assertFalse(receipt_locks.lock_held(self.repo / '.local' / 'processing-claim.lock'))
+        self.assertEqual(self.worker.state['claim_request']['selection_offset'], 0)
 
     def test_busy_claim_is_durably_distinct_from_empty_queue(self):
         with patch.object(self.worker, 'post', return_value={'claim': None, 'reason': 'busy-or-changed'}):
