@@ -19,7 +19,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import receipt_qwen
-from receipt_locks import LockBusy, acquire_lock, lock_held
+from receipt_locks import LockBusy, acquire_lock, is_worker_batch_directory, lock_held
 from receipt_api import ScannerClient, ScannerConnectionError, ClientError, OCRRequired, AUTO_CROP, UUID, artifact_directory, credentials, diagnostic_text, failure_report, write_new_file
 
 MAX_INPUT = 512 * 1024
@@ -185,16 +185,16 @@ def disable_console_echo():
 
 
 class Worker:
-    def __init__(self, profile, resume=None, profile_path=None):
+    def __init__(self, profile, resume=None, profile_path=None, work_base=None):
         self.lock = None
         try:
-            self.initialize(profile, resume, profile_path)
+            self.initialize(profile, resume, profile_path, work_base)
         except Exception:
             if self.lock is not None:
                 self.lock.close()
             raise
 
-    def initialize(self, profile, resume, profile_path=None):
+    def initialize(self, profile, resume, profile_path=None, work_base=None):
         self.repo = Path(__file__).resolve().parent.parent
         require(Path(profile["repository"]).resolve() == self.repo, "Profile repository does not match this helper.")
         for key, names in (("node", {"node", "node.exe"}), ("renderer", {"pdftoppm", "pdftoppm.exe"})):
@@ -217,7 +217,9 @@ class Worker:
         os.environ.update(self.env)
         for key in ("NODE_OPTIONS", "NODE_PATH", "PYTHONPATH"):
             os.environ.pop(key, None)
-        base = self.repo / ".local" / "receipt-worker"
+        base = work_base if work_base is not None else self.repo / ".local" / "receipt-worker"
+        require(is_worker_batch_directory(self.repo, base),
+                "Worker directory must be a supported private batch lane.")
         require(all(not p.is_symlink() and not p.is_junction() for p in (self.repo / ".local", base)), "Worker cache must not be a symlink or junction.")
         artifact_directory(base)
         try:
@@ -248,6 +250,7 @@ class Worker:
             require(not self.work.exists(), "Worker run already exists.")
             artifact_directory(self.work)
             self.state = {"run_id": run_id, "batch_id": batch["batch_id"], "origin": self.client.origin, "phase": "ready", "claim": None,
+                          "claim_reason": None,
                           "model": "gpt-6-luna",
                           "confirmation_provider": self.confirmation_provider,
                           "capture_ids": [], "capture_hashes": {}, "document_ids": [], "sources": {}, "prepared": {}, "sequence": 0}
@@ -363,6 +366,20 @@ class Worker:
                 if attempt == 3:
                     raise
                 self.record("claim-connection-retry", {"attempt": attempt})
+
+    def accept_claim_response(self, result):
+        """Persist the exact claim outcome, including a confirmed reason for no claim."""
+        require(isinstance(result, dict) and "claim" in result
+                and (result["claim"] is not None or result.get("reason") in {"queue-empty", "busy-or-changed"}),
+                "Scanner returned an unrecognized claim response.")
+        self.state["claim"] = result["claim"]
+        self.state["claim_reason"] = result.get("reason") if result["claim"] is None else None
+        self.state["phase"] = "claimed" if result["claim"] else "empty"
+        if result["claim"]:
+            self.discover(result["claim"]["document"])
+        self.checkpoint()
+        self.record("claim-response", result)
+        return {**clean(result), **self.summary()}
 
     def active(self):
         require(self.state["phase"] in {"claimed", "drafted"}, "This operation needs the active document claim.")
@@ -1458,13 +1475,8 @@ class Worker:
                 claim_request = self.state.get("claim_request")
                 if claim_request:
                     result = self.claim_with_retry(claim_request)
-                    self.state["claim"] = result["claim"]
-                    self.state["phase"] = "claimed" if result["claim"] else "empty"
                     self.state.pop("failed", None)
-                    if result["claim"]:
-                        self.discover(result["claim"]["document"])
-                    self.record("claim-response", result)
-                    return {**clean(result), **self.summary()}
+                    return self.accept_claim_response(result)
                 # Compatibility for an unfinished run created before idempotent claims.
                 require(time.time() >= self.state["claim_started"] + 20*60 + 90 + 120,
                         "Legacy unknown claim may still be active; wait until its maximum lease window has elapsed.")
@@ -1518,14 +1530,10 @@ class Worker:
                 }
                 self.checkpoint_intent(previous_state)
                 result = self.claim_with_retry(self.state["claim_request"])
-                self.state["claim"] = result["claim"]
-                self.state["phase"] = "claimed" if result["claim"] else "empty"
-                if result["claim"]:
-                    self.discover(result["claim"]["document"])
-                self.record("claim-response", result)
+                response = self.accept_claim_response(result)
                 verify(not result.get("claim") or result["claim"]["document"]["id"] not in excluded,
                        "Scanner returned a document already verified by this batch; preserve the lease for reconciliation.")
-                return {**clean(result), **self.summary()}
+                return response
         if op == "document":
             require(self.state["phase"] in {"claimed", "drafted", "submitted", "pdf", "complete"}, "No confirmed document is available.")
             if self.state["phase"] in {"claimed", "drafted"}:

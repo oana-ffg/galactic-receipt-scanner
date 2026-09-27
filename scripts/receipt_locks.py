@@ -3,6 +3,21 @@ import errno
 import os
 
 
+PARALLEL_LANES = tuple(f"parallel-{number}" for number in range(1, 10))
+PROCESSING_LANES = ("primary", *PARALLEL_LANES)
+
+
+def worker_batch_directory(repo, lane):
+    if lane not in PROCESSING_LANES:
+        raise ValueError("Unknown processing lane.")
+    suffix = "" if lane == "primary" else "-" + lane
+    return repo / ".local" / ("receipt-worker" + suffix)
+
+
+def is_worker_batch_directory(repo, base):
+    return any(base == worker_batch_directory(repo, lane) for lane in PROCESSING_LANES)
+
+
 class LockBusy(Exception):
     """Another process holds this lock."""
 

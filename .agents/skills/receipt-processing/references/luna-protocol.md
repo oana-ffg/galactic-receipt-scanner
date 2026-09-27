@@ -112,16 +112,23 @@ document claim, verifies live saved state and updates the unique batch count.
 `next:"correct-luna-result"` requires the same Luna to rewrite only its result file;
 `next:"retry-controller"` sends the returned exact content-free `retry_request` so the
 controller can replay its pinned idempotent checkpoint or terminal lease release without Luna; `next:"dispatch"`
-requests another task. Terminal `phase:"complete"` means the target
-was reached or a recorded empty claim proved exhaustion, and the batch lease is released.
+requests another task. For scheduled parallel lanes, serialize all `next` requests
+across lane controllers while Luna workers run concurrently. A `retry-contention`
+response has no claim; wait its returned delay and retry that same lane after any other
+pending claim preparations. Five contentions end that lane with `claim-contention`,
+which is a busy stop, not evidence of an empty queue. Terminal `phase:"complete"` means
+the target was reached, a recorded empty claim proved exhaustion, or repeated contention
+stopped that lane; the batch lease is released.
 The standalone `verify` operation remains recovery-only.
 
 The coordinator uses the prepared Python executable to launch the checkout's absolute
 `scripts/receipt_batch.py` with `--owner` set to its task ID/name, `tty: true`, `login: false`,
 and the authorized `sandbox_permissions: require_escalated` context for its protected
 profile reads during verification. Scheduled runs use `receipt-processing-scheduled`.
-Pass `--client-config CLIENT_CONFIG` from the host descriptor.
-Default count is 10; append `--count N` for an explicitly different count. The guard
+Pass `--client-config CLIENT_CONFIG` from the host descriptor. The scheduled hourly run
+launches ten controllers, one per configured lane: primary and `parallel-1` through
+`parallel-9`. Pass the lane's exact config and `--lane LANE --count 10` to each.
+An interactive default uses the primary lane and count 10. The guard
 loads that config and owns its internal worker without exposing credentials to model output.
 It rejects any legacy Qwen profile before preflight or claim; normal Luna requires the
 saved-PP consumer profile and never invokes OCR inference.
@@ -137,8 +144,9 @@ cell ID, resume that same cell with `functions.wait` to obtain the launch result
 Confirm a live session ID and the expected ready/acquired response before proceeding.
 Wait for `acquired: true` before dispatch. `busy: true` means another batch owns the lock:
 finish this invocation without claiming, replacing, or interrupting it. `blocking: true`
-means investigate preserved state; do not spawn Luna. If that session dies, stop; do not
-restart the controller or continue under an unverified lock. Keep every task sequential.
+means investigate preserved state; do not spawn Luna. If that lane's session dies, stop
+that lane; do not restart the controller or continue under an unverified lock. Keep
+tasks sequential within each lane and use the scheduled run's lanes concurrently.
 The controller checks batch state and locks immediately before each claim; never treat
 contention as success or route a retry through a second controller.
 

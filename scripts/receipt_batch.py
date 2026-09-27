@@ -11,7 +11,8 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from receipt_api import ClientError, ScannerClient, credentials, diagnostic_text, failure_report
-from receipt_locks import LockBusy as BatchBusy, acquire_lock, lock_held
+from receipt_locks import (LockBusy as BatchBusy, PARALLEL_LANES, PROCESSING_LANES,
+                           acquire_lock, lock_held, worker_batch_directory)
 from receipt_batch_verify import regular_path, verify_run
 from receipt_worker import InputError, Once, Worker, artifact_directory, replace_journal_file, require, write_new_file
 
@@ -51,7 +52,7 @@ class BatchLeaseStartError(Exception):
 class ProcessingBatchLease:
     """Keep retroactive Jev merges out of a live Luna verification batch."""
 
-    def __init__(self, repo, client_config):
+    def __init__(self, repo, client_config, lane="primary"):
         host_path = regular_path(regular_path(repo / ".local") / "processing-host.json")
         host = json.loads(host_path.read_text(encoding="utf-8"))
         profile_path = regular_path(Path(host["worker_profile"]))
@@ -61,6 +62,16 @@ class ProcessingBatchLease:
         config_path = regular_path(Path(client_config))
         require(config_path.is_absolute() and config_path.is_file(),
                 "Use the configured private client configuration for this batch.")
+        if lane in PARALLEL_LANES:
+            require(host.get(lane.replace("-", "_") + "_client_config") == str(config_path),
+                    "Parallel processing requires its configured private client configuration.")
+            parallel_session = json.loads(config_path.read_text(encoding="utf-8")).get("processing_session")
+            other_paths = [host["client_config"]] + [host.get(other.replace("-", "_") + "_client_config")
+                                                     for other in PARALLEL_LANES if other != lane]
+            other_sessions = {json.loads(regular_path(Path(path)).read_text(encoding="utf-8")).get("processing_session")
+                              for path in other_paths if path is not None}
+            require(isinstance(parallel_session, str) and parallel_session not in other_sessions,
+                    "Parallel processing requires a distinct processing session.")
         profile = {**profile, "client_config": str(config_path)}
         self.client = ScannerClient(credentials(config_path))
         require(self.client.origin == profile["origin"], "Batch lease destination differs from the prepared profile.")
@@ -152,6 +163,7 @@ class BatchGuard:
             run_id,
             self.owner,
             client=getattr(self.lease, "client", None),
+            base=self.base,
         )
 
     def finish_lease(self, require_healthy=True):
@@ -223,7 +235,8 @@ class BatchGuard:
         require(self.lease is not None, "Exact-batch recovery requires a backend lease.")
         self.lease.start(batch_id, self.owner)
         try:
-            worker = Worker(self.lease.profile, resume=run_id, profile_path=self.lease.profile_path)
+            worker = Worker(self.lease.profile, resume=run_id, profile_path=self.lease.profile_path,
+                            work_base=self.base)
             self.worker = worker
             require(worker.confirmation_provider == "ppocr"
                     and worker.state.get("batch_id") == batch_id,
@@ -268,7 +281,7 @@ class BatchGuard:
                 return self.try_finish_batch("target-reached")
             require(self.worker is None, "Complete the prepared Luna task before requesting another document.")
             self.check_worker_closed()
-            worker = Worker(self.lease.profile, profile_path=self.lease.profile_path)
+            worker = Worker(self.lease.profile, profile_path=self.lease.profile_path, work_base=self.base)
             self.worker = worker
             try:
                 require(worker.confirmation_provider == "ppocr",
@@ -280,12 +293,20 @@ class BatchGuard:
                     self.categories = worker.client.get("/api/processing/categories")
                 prepared = worker.prepare_luna_task(self.categories)
                 if worker.state["phase"] == "empty" and not worker.state.get("failed"):
+                    reason = worker.state.get("claim_reason")
                     self.close_worker()
-                    return self.try_finish_batch("queue-empty-or-busy", task=None)
+                    if reason == "busy-or-changed":
+                        attempts = self.state.get("contention_count", 0) + 1
+                        state = self.save({**self.state, "contention_count": attempts})
+                        if attempts >= 5:
+                            return self.try_finish_batch("claim-contention", task=None)
+                        return {**state, "next": "retry-contention", "retry_after_ms": 500}
+                    require(reason == "queue-empty", "Empty claim needs a confirmed queue result.")
+                    return self.try_finish_batch("queue-empty", task=None)
                 require(prepared.get("ok") is True and worker.state["phase"] == "claimed",
                         "Deterministic task preparation failed; preserve the worker journal for recovery.")
                 self.start_worker_heartbeat()
-                self.save({**self.state, "active_run_id": worker.state["run_id"],
+                self.save({**self.state, "contention_count": 0, "active_run_id": worker.state["run_id"],
                            "active_task_path": prepared["task_path"]})
                 return {**self.state, "task": prepared, "next": "spawn-luna"}
             except Exception:
@@ -376,12 +397,13 @@ class BatchGuard:
             # Only an actual claim response from this batch establishes exhaustion.
             exhausted = bool(worker and worker.get("batch_id") == self.state["batch_id"]
                              and worker["phase"] == "empty" and worker.get("claim") is None
+                             and worker.get("claim_reason") == "queue-empty"
                              and worker.get("claim_started", 0) >= self.state["started_at"])
             if worker and worker.get("batch_id") == self.state["batch_id"] and worker["phase"] == "complete":
                 require(worker["run_id"] in runs, "Verify the last completed worker through this guard before finishing.")
             require(len(runs) >= self.state.get("requested_count", 10) or exhausted,
                     "Batch target not reached. Dispatch the next worker; only a recorded empty/busy claim can finish early.")
-            return self.try_finish_batch("queue-empty-or-busy" if exhausted else "target-reached")
+            return self.try_finish_batch("queue-empty" if exhausted else "target-reached")
         raise InputError("Expected status, next, complete, verify, finish, or block.")
 
     def record_verification(self, proof):
@@ -501,8 +523,12 @@ class BatchGuard:
 
 
 
-def batch_directory(repo, workflow, resolve=None):
-    base = repo / ".local" / "receipt-worker"
+def batch_directory(repo, workflow, resolve=None, lane="primary"):
+    require(lane in PROCESSING_LANES, "Unknown processing lane.")
+    require(workflow != "astra" or lane == "primary", "Astra uses its own batch guard.")
+    if lane != "primary":
+        return worker_batch_directory(repo, lane)
+    base = worker_batch_directory(repo, lane)
     if workflow != "astra":
         return base
     previous = base / "batch-state.json"
@@ -526,6 +552,7 @@ def main():
     parser.add_argument("--recovery-by", action=Once)
     parser.add_argument("--count", type=int, action=Once)
     parser.add_argument("--workflow", choices=("luna", "astra"), action=Once)
+    parser.add_argument("--lane", choices=PROCESSING_LANES, default="primary", action=Once)
     parser.add_argument("--client-config", required=True, action=Once)
     args = parser.parse_args()
     # Standing scheduled approval covers new work, never recovery. A named
@@ -537,9 +564,9 @@ def main():
     require(args.owner != "receipt-processing-scheduled" or not recovering or args.recovery_by is not None,
             "Scheduled processing cannot recover an unfinished batch without an interactive recovery task.")
     repo = Path(__file__).resolve().parent.parent
-    base = batch_directory(repo, args.workflow, args.resolve)
+    base = batch_directory(repo, args.workflow, args.resolve, args.lane)
     try:
-        lease = ProcessingBatchLease(repo, args.client_config)
+        lease = ProcessingBatchLease(repo, args.client_config, args.lane)
     except EXPECTED_BATCH_LEASE_ERRORS as error:
         print(json.dumps(batch_lease_failure("batch-lease-setup", error, repo)), flush=True)
         raise SystemExit(1) from None
@@ -547,7 +574,7 @@ def main():
         require(args.resolve is None and args.reason is None
                 and args.resume_batch is None and args.resume_run is None,
                 "Verification cannot request recovery.")
-        print(json.dumps(verify_run(repo, args.verify, args.owner, client=lease.client)), flush=True)
+        print(json.dumps(verify_run(repo, args.verify, args.owner, client=lease.client, base=base)), flush=True)
         return
     try:
         guard = BatchGuard(base, args.owner, lease)

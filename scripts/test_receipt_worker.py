@@ -543,6 +543,14 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker.state['phase'], 'claimed')
         self.assertEqual(self.batch.handle(dict(op='block', reason='Claim response received'))['phase'], 'blocked')
 
+    def test_busy_claim_is_durably_distinct_from_empty_queue(self):
+        with patch.object(self.worker, 'post', return_value={'claim': None, 'reason': 'busy-or-changed'}):
+            self.send('claim', viewer_checked=True)
+        self.assertEqual(self.worker.state['phase'], 'empty')
+        self.assertEqual(self.worker.state['claim_reason'], 'busy-or-changed')
+        saved = json.loads((self.worker.work / 'state.json').read_text())
+        self.assertEqual(saved['claim_reason'], 'busy-or-changed')
+
     def test_in_progress_batch_transition_rejects_claim_before_network(self):
         with module.acquire_lock(self.worker.work.parent / 'batch-transition.lock'), \
                 patch.object(self.worker, 'post') as post:
@@ -1491,11 +1499,26 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(self.fake.claim_bodies), 4)
         self.assertEqual(self.fake.claim_bodies[-1], claim_request)
 
+    def test_reconciled_empty_claim_can_finish_batch(self):
+        self.fake.lost_claim = 3
+        result = self.worker.handle({"op": "claim", "viewer_checked": True})
+        self.assertEqual(result["phase"], "claim-uncertain")
+        run_id = self.worker.state["run_id"]
+        self.worker.lock.close()
+        self.worker = self.make_worker(run_id)
+        with patch.object(self.worker, 'post', return_value={'claim': None, 'reason': 'queue-empty'}):
+            recovered = self.send('reconcile')
+        self.assertEqual(recovered['phase'], 'empty')
+        self.assertEqual(self.worker.state['claim_reason'], 'queue-empty')
+        self.assertEqual(json.loads((self.worker.work / 'state.json').read_text())['claim_reason'], 'queue-empty')
+        self.worker.lock.close()
+        self.assertEqual(self.batch.handle({'op': 'finish'})['stop_reason'], 'queue-empty')
+
     def test_transient_windows_claim_checkpoint_retries_before_the_request(self):
         with windows_replace_failure(fail_at=2, retry_once=True) as calls:
             self.send("claim", viewer_checked=True)
 
-        self.assertEqual(calls(), 5)  # input, failed intent, retry, result, response
+        self.assertEqual(calls(), 6)  # input, failed intent, retry, claim state, result, response
         self.assertEqual(self.fake.calls.count(("POST", "/api/processing/claim")), 1)
         self.assertEqual(self.worker.state["phase"], "claimed")
 

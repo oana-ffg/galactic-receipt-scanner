@@ -11,7 +11,9 @@ For second-pass visual review of low/medium-confidence results, use the separate
 ## Start when invoked
 
 A bare `$receipt-processing` invocation means **run the saved-receipt workflow now**.
-Default to one batch of up to **10 oldest pending documents in the Luna small stage**.
+Default to one batch of up to **10 oldest pending documents in the Luna small stage**
+for an interactive invocation. The scheduled hourly run uses ten lanes and may process
+up to 100 documents per invocation.
 An explicit count/stage in the user's request overrides that default. The claim API
 selects the next eligible document for routine batches. For an owner-requested page,
 grouping or field correction, use the versioned direct API edit described in
@@ -155,19 +157,36 @@ but remains unverified there until an actual cloud run is completed.
 ## Coordinator
 
 The task running this skill is the coordinator; the hourly task currently uses Luna 6.
-It launches one deterministic batch controller and dispatches fresh Luna workers from the
+It launches deterministic batch controllers and dispatches fresh Luna workers from each
 controller's prepared task paths. The coordinator sees only content-free run IDs, paths, page counts, validation errors and completion
 proofs. It never loads receipt images, OCR text or extraction payloads into its context.
 Do not delegate coordination or switch models merely to run this skill.
 
-Launch `receipt_batch.py` once as described in
+For an interactive default batch, launch `receipt_batch.py` once as described in
 [batch coordination](references/luna-protocol.md#batch-coordination). That same process
 owns the batch guard, document claim/renewal, task preparation, submission, PDF work and
 verification. A busy guard ends this invocation without claiming work; a blocked/unclean
 prior batch requires owner-directed investigation. Never launch `receipt_worker.py`
 separately in the normal Luna flow.
 
-Send `{"op":"next"}` to the same controller. On `next:"spawn-luna"`, spawn exactly one
+For the **scheduled hourly run**, use the configured primary lane and `parallel-1` through
+`parallel-9`, each with its own tokenless `client_config` from
+`.local/processing-host.json`. Launch one controller per lane with `--lane LANE` and
+`--count 10`. The nine parallel configs must have distinct `processing_session` UUIDs;
+the primary config may omit that field. Never copy a credential into these files. Each
+controller owns a separate local guard, journal and backend batch lease. Dispatch one
+fresh Luna per acquired lane, up to ten active Luna workers at once. Within a lane,
+finish and verify the current document before requesting its next task. A busy lane
+has another live controller; do not replace it. **Send `next` to only one lane at a time
+and await its prepared claim response before sending `next` to another lane.** Luna
+workers may continue in parallel while those brief claims are prepared. This avoids
+multiple lanes selecting the same oldest document before any has claimed it. An empty
+lane is terminal, even when
+other lanes still have work. If this task has fewer than ten available subagent slots,
+run only as many lanes as it can actively coordinate and report the actual concurrency.
+Do not leave an acquired controller idle or close its stdin merely to free an agent slot.
+
+Send `{"op":"next"}` to the same lane's controller. On `next:"spawn-luna"`, spawn exactly one
 fresh `gpt-6-luna` with `fork_turns:none` and provide only the returned task/result paths
 plus [the short flow](references/luna-flow.md). Luna reads the private prepared task and
 writes one semantic result; it never launches a helper or returns receipt contents to the coordinator.
@@ -177,9 +196,15 @@ batch count. On `next:"correct-luna-result"`, give only the bounded errors to th
 Luna and repeat `complete`. On `next:"retry-controller"`, send the returned exact
 `retry_request` through the same controller without involving Luna; it replays only its
 pinned idempotent checkpoint or terminal lease release.
+On `next:"retry-contention"`, wait the returned `retry_after_ms`, then send `next` to
+that same lane after any other pending lane claim preparation. It has no active document.
+After five confirmed contention responses, that controller terminates with
+`stop_reason:"claim-contention"`; report it as busy, not as an empty queue.
 On `next:"dispatch"`, request the next task. Terminal
-`phase:"complete"` means the target was reached or the queue was exhausted and the
-controller already released its leases. Workers remain sequential; default batch size is 10.
+`phase:"complete"` means the target was reached, the queue was exhausted, or repeated
+claim contention stopped that lane; the controller already released its leases.
+Workers remain sequential within each lane;
+the scheduled run executes lanes concurrently.
 
 Retain coordination until terminal controller state or a real unresolved failure. A quiet
 Luna or tool wait timeout is not a deadline. Do not start a replacement controller, task or

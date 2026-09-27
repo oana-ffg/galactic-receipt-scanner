@@ -33,6 +33,30 @@ class FakeLease:
 
 
 class BatchGuardTests(unittest.TestCase):
+    def test_parallel_lanes_hold_independent_guards_and_journals(self):
+        repo = self.base.parent.parent
+        primary = module.BatchGuard(module.batch_directory(repo, 'luna'), 'primary', FakeLease())
+        parallel = module.BatchGuard(module.batch_directory(repo, 'luna', lane='parallel-1'),
+                                     'parallel', FakeLease())
+        self.addCleanup(primary.close)
+        self.addCleanup(parallel.close)
+        first = primary.start(10)
+        second = parallel.start(10)
+        self.assertNotEqual(first['batch_id'], second['batch_id'])
+        self.assertEqual(json.loads((primary.base / 'batch-state.json').read_text())['batch_id'], first['batch_id'])
+        self.assertEqual(json.loads((parallel.base / 'batch-state.json').read_text())['batch_id'], second['batch_id'])
+        with self.assertRaises(module.BatchBusy):
+            module.BatchGuard(primary.base, 'duplicate', FakeLease())
+
+    def test_ten_lanes_have_unique_supported_directories(self):
+        repo = self.base.parent.parent
+        paths = [module.batch_directory(repo, 'luna', lane=lane)
+                 for lane in module.PROCESSING_LANES]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(len(paths), 10)
+        with self.assertRaisesRegex(module.InputError, 'Unknown processing lane'):
+            module.batch_directory(repo, 'luna', lane='parallel-10')
+
     def test_astra_guard_is_separate_but_preserves_legacy_unfinished_astra(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -107,7 +131,8 @@ class BatchGuardTests(unittest.TestCase):
             result = guard.resume(state['batch_id'], run_id)
             self.assertEqual(result['next'], 'complete-active-run')
             self.assertTrue(result['resumed'])
-            worker_class.assert_called_once_with(lease.profile, resume=run_id, profile_path=lease.profile_path)
+            worker_class.assert_called_once_with(lease.profile, resume=run_id,
+                                                 profile_path=lease.profile_path, work_base=guard.base)
             with self.assertRaisesRegex(module.InputError, 'Complete the prepared Luna task'):
                 guard.handle({'op': 'next'})
         worker.prepare_luna_task.assert_not_called()
@@ -173,7 +198,8 @@ class BatchGuardTests(unittest.TestCase):
         state = first.start()
         with self.assertRaises(module.BatchBusy):
             self.guard()
-        self.worker_state(phase='empty', claim=None, batch_id=state['batch_id'], claim_started=state['started_at'] + 1)
+        self.worker_state(phase='empty', claim=None, claim_reason='queue-empty',
+                          batch_id=state['batch_id'], claim_started=state['started_at'] + 1)
         first.handle(dict(op='finish'))
         first.close()
         self.assertEqual(self.guard().start()['phase'], 'active')
@@ -477,7 +503,7 @@ class BatchGuardTests(unittest.TestCase):
         worker.lock = Mock()
 
         def empty(_categories):
-            worker.state.update(phase="empty", claim=None)
+            worker.state.update(phase="empty", claim=None, claim_reason="queue-empty")
             return {"ok": True}
 
         worker.prepare_luna_task.side_effect = empty
@@ -498,7 +524,7 @@ class BatchGuardTests(unittest.TestCase):
             self.assertEqual(retry["retry_request"], {"op": "finish"})
             completed = guard.handle(retry["retry_request"])
         self.assertEqual(completed["phase"], "complete")
-        self.assertEqual(completed["stop_reason"], "queue-empty-or-busy")
+        self.assertEqual(completed["stop_reason"], "queue-empty")
         worker.lock.close.assert_called_once_with()
 
     def test_unclean_exit_requires_exact_owner_resolution(self):
@@ -812,7 +838,7 @@ class BatchGuardTests(unittest.TestCase):
             with patch.object(module, 'verify_run', return_value=dict(verified=True, run_id=run, document_id=f'doc-{index}')):
                 result = guard.handle(dict(op='verify', run_id=run))
         self.assertEqual(result['next'], 'finish')
-        with patch.object(module, 'verify_run', side_effect=lambda repo, rid, owner, client: guard.state['verified_runs'][rid]):
+        with patch.object(module, 'verify_run', side_effect=lambda repo, rid, owner, client, base: guard.state['verified_runs'][rid]):
             self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'target-reached')
 
     def test_verification_is_idempotent_and_different_run_cannot_double_count_document(self):
@@ -892,8 +918,41 @@ class BatchGuardTests(unittest.TestCase):
     def test_current_queue_exhaustion_finishes_early_with_reason(self):
         guard = self.guard()
         state = guard.start()
-        self.worker_state(phase='empty', claim=None, batch_id=state['batch_id'], claim_started=state['started_at'] + 1)
-        self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'queue-empty-or-busy')
+        self.worker_state(phase='empty', claim=None, claim_reason='queue-empty',
+                          batch_id=state['batch_id'], claim_started=state['started_at'] + 1)
+        self.assertEqual(guard.handle(dict(op='finish'))['stop_reason'], 'queue-empty')
+
+    def test_claim_contention_retries_without_reporting_queue_exhaustion(self):
+        guard = module.BatchGuard(self.base, 'synthetic-task', FakeLease())
+        self.addCleanup(guard.close)
+        guard.start(10)
+        created = []
+
+        def busy_worker(*args, **kwargs):
+            worker = Mock()
+            worker.confirmation_provider = 'ppocr'
+            worker.state = {'run_id': f'{len(created) + 1:032x}', 'phase': 'empty',
+                            'claim': None, 'claim_reason': 'busy-or-changed'}
+            worker.client.get.return_value = []
+            worker.prepare_luna_task.return_value = {'ok': True}
+            worker.lock = Mock()
+            worker.stop_heartbeat = threading.Event()
+            created.append(worker)
+            return worker
+
+        with patch.object(module, 'Worker', side_effect=busy_worker):
+            for attempt in range(1, 5):
+                result = guard.handle({'op': 'next'})
+                self.assertEqual(result['phase'], 'active')
+                self.assertEqual(result['next'], 'retry-contention')
+                self.assertEqual(result['contention_count'], attempt)
+                with self.assertRaisesRegex(module.InputError, 'target not reached'):
+                    guard.handle({'op': 'finish'})
+            completed = guard.handle({'op': 'next'})
+        self.assertEqual(completed['phase'], 'complete')
+        self.assertEqual(completed['stop_reason'], 'claim-contention')
+        self.assertEqual(len(created), 5)
+        self.assertTrue(all(worker.lock.close.called for worker in created))
 
     def test_astra_retains_its_separate_verification_workflow(self):
         guard = self.guard()

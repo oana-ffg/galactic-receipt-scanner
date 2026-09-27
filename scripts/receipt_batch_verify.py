@@ -8,6 +8,7 @@ import uuid
 
 from receipt_api import UUID
 from receipt_worker import require, write_new_file
+from receipt_locks import is_worker_batch_directory
 
 
 def read_json(path):
@@ -72,10 +73,12 @@ def superseded_documents(base, batch, run_id, document, affected_documents):
     return superseded
 
 
-def verify_run(repo, run_id, owner, *, client):
+def verify_run(repo, run_id, owner, *, client, base=None):
     require(isinstance(run_id, str) and len(run_id) == 32
             and all(c in "0123456789abcdef" for c in run_id), "Invalid worker run ID.")
-    base = regular_path(regular_path(repo / ".local") / "receipt-worker")
+    base = regular_path(base if base is not None else regular_path(repo / ".local") / "receipt-worker")
+    require(is_worker_batch_directory(repo, base),
+            "Verification directory must be a supported private batch lane.")
     batch = read_json(regular_path(base / "batch-state.json"))
     batch_id = batch["batch_id"]
     require(isinstance(batch_id, str) and len(batch_id) == 32
