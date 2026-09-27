@@ -156,16 +156,24 @@ in progress while you work. This is not a disposable development instance.**
   safe during active scanning needs no additional approval.
 - Before deploying, assess compatibility with already-open phone and desktop clients,
   in-flight captures, pending upload retries, camera connections, and database changes.
-  Keep migrations additive and compatible with active clients. Do not force a page
-  reload or assume the operator has stopped because the dashboard looks idle.
-- If deployment or activation could interrupt scanning, lose an upload, or require
-  coordinated client reloads, give the owner a clear, prominent warning explaining
-  the impact and exactly when to pause. **Wait for an explicit acknowledgement before
-  the disruptive step. Silence or elapsed time is not acknowledgement.** If the impact
-  is uncertain, investigate first; do not treat uncertainty as proof of no effect.
+  Keep migrations additive and compatible with active clients. Routine deployment does
+  not instruct already-open camera pages to reload or stop. Deploy compatible updates
+  during scanning without asking the operator to pause solely for deployment, and leave
+  the active phone untouched. A request failure can temporarily delay capture or require
+  retrying a retained upload; do not infer that every deploy causes one or that Sites
+  guarantees every in-flight request will complete. Verify operation through read-only
+  checks and normal operator captures, never synthetic writes to production.
+- If a specific change or deployment operation presents a concrete risk to old clients,
+  active captures, uploads, camera ownership, or database availability, or requires a
+  coordinated reload, give the owner a clear warning explaining the impact and exactly
+  when to pause. **Wait for explicit acknowledgement before that disruptive step.**
+  Investigate any unresolved specific compatibility risk before proceeding; do not
+  assume the operator has stopped because the dashboard looks idle. Silence or elapsed
+  time is not acknowledgement.
 - Verify the deployed revision, owner-only access and preservation of existing capture
   metadata using read-only production checks. Report when reloading is needed to use
-  new features, and have the operator wait for a saved acknowledgement before reloading.
+  new features. For a phone reload, have the operator pause between receipts and confirm
+  that the current capture is saved and no upload is pending.
 
 ## Private issue reports
 
