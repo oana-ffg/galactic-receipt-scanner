@@ -227,6 +227,14 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await page.route("**/api/documents/*/pdf?*", (route) =>
     route.fulfill({ contentType: "application/pdf", body: pdfBytes }),
   );
+  await page.route(/\/api\/documents\/[0-9a-f-]{36}$/, (route) =>
+    route.fulfill({
+      json: {
+        document: docs.find((doc) => route.request().url().endsWith(doc.id)),
+        captures,
+      },
+    }),
+  );
   await page.route("**/api/documents", (route) =>
     route.fulfill({ json: { documents: docs, captures } }),
   );
@@ -587,8 +595,9 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await form.getByLabel("Line amount", { exact: true }).fill("12.34");
   await form.getByRole("button", { name: "Accept human review" }).click();
   await expect(page.locator("#review-message")).toContainText(
-    "Receipt changes saved",
+    "Human review accepted",
   );
+  await expect(page.locator("#review-filter")).toHaveValue("human-reviewed");
   expect(writes).toBe(1);
   expect(docs[0].processing!.extraction.category_id).toBe(categoryB);
   expect(
@@ -620,6 +629,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     }),
   ).toContainText("12.34 DKK");
   await page.getByRole("button", { name: "Edit receipt", exact: true }).click();
+  await page.locator("#review-filter").selectOption("all");
   await page.locator("#review-model").selectOption("luna-only");
   await expect(page.locator("#review-list button")).toHaveCount(1);
   await page.locator("#review-list button").click();

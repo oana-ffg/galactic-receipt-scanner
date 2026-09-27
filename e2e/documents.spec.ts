@@ -617,6 +617,38 @@ test("human review edits structured values and detaches a wrong page into the po
     .getByLabel("Review findings", { exact: true })
     .fill("Human checked every synthetic source.");
   await page.getByRole("button", { name: "Accept human review" }).click();
+  await expect(page.locator("#review-filter")).toHaveValue("human-reviewed");
+  await expect(
+    page.getByRole("link", { name: "Download saved PDF" }),
+  ).toBeVisible();
+  await expect(page.locator("#review-message")).toContainText(
+    /Human review accepted.*PDF saved/,
+  );
+  await page.locator("#review-filter").selectOption("review");
+  await expect(page.locator("#review-list button")).toHaveCount(0);
+  await page.locator("#review-filter").selectOption("human-reviewed");
+  await expect(page.locator("#review-list button")).toHaveCount(1);
+  expect(
+    (await (await isolatedRequest.get(`/api/documents/${target.id}`)).json())
+      .document.processing.has_human_review,
+  ).toBe(true);
+  const retryWrites: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST") retryWrites.push(request.url());
+  });
+  await page.route(`${origin}/api/documents/${target.id}/pdf?*`, (route) =>
+    route.fulfill({ status: 503, body: "Synthetic PDF retry failure" }),
+  );
+  await page.getByRole("button", { name: "Generate PDF" }).click();
+  await expect(page.locator("#review-message")).toContainText(
+    "The scanner service is temporarily unavailable",
+  );
+  expect(retryWrites.filter((url) => url.endsWith("/api/documents"))).toEqual([]);
+  expect(
+    (await (await isolatedRequest.get(`/api/documents/${target.id}`)).json())
+      .document.processing.has_human_review,
+  ).toBe(true);
+  await page.unroute(`${origin}/api/documents/${target.id}/pdf?*`);
   // Wait for the saved document to replace the old form before expanding its notes.
   await expect(page.getByText(/Human reviewed: yes/)).toBeAttached();
   await page

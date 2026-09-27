@@ -67,7 +67,7 @@ function amount(value: string): number {
 
 export async function mountReview(app: HTMLElement) {
   app.innerHTML =
-    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><p id="review-intervention-alert" role="alert"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="payment-matches">Payment matches</option><option value="source-intervention">Needs source intervention</option><option value="scan-review">Completeness scan review</option><option value="luna-reparse">Needs Luna reparse</option><option value="non-receipt">Non-receipt documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
+    '<header><div><h1>Receipt review</h1><p>Originals and earlier decisions stay intact.</p></div><a href="/">Capture station</a><a href="/issues">Private issues</a><a href="/agent-access">Agent access</a></header><p id="review-message" role="status"></p><p id="review-intervention-alert" role="alert"></p><div class="review-toolbar"><label>Show <select id="review-filter"><option value="all">All documents</option><option value="human-reviewed">Human reviewed</option><option value="payment-matches">Payment matches</option><option value="source-intervention">Needs source intervention</option><option value="scan-review">Completeness scan review</option><option value="luna-reparse">Needs Luna reparse</option><option value="non-receipt">Non-receipt documents</option><option value="attention">Human review and broken</option><option value="processing">Awaiting processing</option><option value="awaiting-pages">Waiting for pages</option><option value="model-review">Astra review</option><option value="review">Human review</option><option value="ready">Ready</option><option value="broken">Broken</option><option value="duplicate">Duplicates</option></select></label><label>Confidence <select id="review-confidence"><option value="low-medium">Low or medium</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="unknown">Not assessed</option><option value="all">Any confidence</option></select></label><label>Model review <select id="review-model"><option value="astra">Astra available</option><option value="luna">Luna available</option><option value="luna-only">Luna only</option><option value="none">No model review</option><option value="all">Any model</option></select></label><label>Human review <select id="review-human"><option value="pending">Not yet reviewed</option><option value="reviewed">Reviewed</option><option value="all">Any</option></select></label><label>Search <input id="review-search" type="search"></label><button id="review-refresh" class="secondary">Refresh</button></div><div id="review-categories"></div><p id="review-counts"></p><div class="review-workspace"><nav id="review-list" aria-label="Receipt documents"></nav><section id="review-detail"><p>Select a document to review.</p></section></div>';
   let catalog: DocumentCatalog = { documents: [], captures: [] };
   let paymentMatches: PaymentMatch[] = [];
   let selected = new URL(location.href).searchParams.get("document");
@@ -86,6 +86,7 @@ export async function mountReview(app: HTMLElement) {
       "scan-review",
       "luna-reparse",
       "non-receipt",
+      "human-reviewed",
     ].includes(initialView ?? "")
   )
     filter.value = initialView!;
@@ -97,6 +98,8 @@ export async function mountReview(app: HTMLElement) {
   if (selected) {
     confidence.value = model.value = human.value = "all";
   }
+  if (filter.value === "human-reviewed")
+    confidence.value = model.value = human.value = "all";
   const setMessage = (text: string) => {
     message.textContent = text;
   };
@@ -158,6 +161,11 @@ export async function mountReview(app: HTMLElement) {
         const slip = catalog.documents.find(
           (item) => item.id === match.payment_document_id,
         );
+        if (
+          receipt?.processing?.has_human_review ||
+          slip?.processing?.has_human_review
+        )
+          continue;
         const receiptLabel =
           receipt?.filename ??
           receipt?.vendor ??
@@ -194,7 +202,10 @@ export async function mountReview(app: HTMLElement) {
       return;
     }
     const interventionCount = catalog.documents.filter(
-      (d) => needsSourceIntervention(d) && !d.mergedInto,
+      (d) =>
+        needsSourceIntervention(d) &&
+        !d.mergedInto &&
+        !d.processing?.has_human_review,
     ).length;
     const interventionAlert = app.querySelector("#review-intervention-alert")!;
     interventionAlert.replaceChildren();
@@ -209,19 +220,31 @@ export async function mountReview(app: HTMLElement) {
         ". Inspect the saved scans and page grouping before looking for paper.",
       );
     }
-    const counts = catalog.documents.reduce<Record<string, number>>(
-      (a, d) => ((a[d.status] = (a[d.status] ?? 0) + 1), a),
-      {},
-    );
+    const counts = catalog.documents.reduce<Record<string, number>>((a, d) => {
+      if (!d.processing?.has_human_review) a[d.status] = (a[d.status] ?? 0) + 1;
+      return a;
+    }, {});
+    const reviewedCount = catalog.documents.filter(
+      (d) => d.processing?.has_human_review && !d.mergedInto,
+    ).length;
     let shown = 0;
     for (const d of catalog.documents) {
       if (d.status === "merged") continue;
+      if (filter.value === "human-reviewed" && !d.processing?.has_human_review)
+        continue;
+      if (
+        filter.value !== "all" &&
+        filter.value !== "human-reviewed" &&
+        d.processing?.has_human_review
+      )
+        continue;
       if (
         ![
           "source-intervention",
           "scan-review",
           "luna-reparse",
           "non-receipt",
+          "human-reviewed",
         ].includes(filter.value) &&
         !matchesReviewFilters(d, confidence.value, model.value, human.value)
       )
@@ -258,6 +281,7 @@ export async function mountReview(app: HTMLElement) {
           "scan-review",
           "luna-reparse",
           "non-receipt",
+          "human-reviewed",
         ].includes(filter.value) &&
         d.status !== filter.value
       )
@@ -275,19 +299,24 @@ export async function mountReview(app: HTMLElement) {
       )
         continue;
       const button = el("button", undefined, `review-item ${d.status}`);
+      const reviewed = d.processing?.has_human_review === true;
       button.setAttribute("aria-current", String(d.id === selected));
       button.append(
         el("strong", label),
         el(
           "span",
-          `${d.processing?.needs_reparse ? "Needs Luna reparse · " : needsSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}${d.processing?.has_human_review ? " · Human reviewed" : ""}`,
+          reviewed
+            ? `Human reviewed · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · ${d.pdf ? "PDF ready for download" : "PDF needs retry"}`
+            : `${d.processing?.needs_reparse ? "Needs Luna reparse · " : needsSourceIntervention(d) ? "Needs source intervention · " : completenessUncertain(d) ? "Completeness needs scan review · " : ""}${d.processing?.luna_needs_human_review ? "Luna requests human review · " : ""}${d.kind}${d.kind === "unknown" && d.completenessAudit?.result === "not_receipt" ? " · Jev: not a receipt" : ""}${d.kind === "unknown" && d.jevRole ? ` · Jev: ${d.jevRole.replaceAll("_", " ")}` : ""} · ${d.status} · ${d.pages.length} page${d.pages.length === 1 ? "" : "s"} · Luna: ${d.processing?.small_model_certainty ?? "—"} · Astra: ${d.processing?.large_model_confidence ?? "—"}`,
         ),
         el(
           "small",
-          d.reasons[0] ??
-            (d.duplicateOf
-              ? "Original retained; excluded from output"
-              : "Checks complete"),
+          reviewed
+            ? "Open to edit values or download the PDF"
+            : (d.reasons[0] ??
+                (d.duplicateOf
+                  ? "Original retained; excluded from output"
+                  : "Checks complete")),
         ),
       );
       button.onclick = () => {
@@ -308,7 +337,7 @@ export async function mountReview(app: HTMLElement) {
     }
     if (!shown) list.append(el("p", "No documents match this view."));
     app.querySelector("#review-counts")!.textContent =
-      `${shown} documents in current list · ${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
+      `${shown} documents in current list · ${reviewedCount} human reviewed · ${counts.ready ?? 0} ready · ${counts.processing ?? 0} awaiting processing · ${counts["awaiting-pages"] ?? 0} waiting for pages · ${counts["model-review"] ?? 0} queued for Astra · ${counts.review ?? 0} need human review · ${counts.broken ?? 0} broken · ${counts.duplicate ?? 0} duplicates`;
   }
   function renderDetail(original: DocumentView) {
     const doc = structuredClone(original);
@@ -334,7 +363,7 @@ export async function mountReview(app: HTMLElement) {
       );
       detail.append(notice);
     }
-    if (needsSourceIntervention(doc))
+    if (needsSourceIntervention(doc) && !doc.processing?.has_human_review)
       detail.append(
         el(
           "p",
@@ -342,7 +371,7 @@ export async function mountReview(app: HTMLElement) {
           "review-intervention-warning",
         ),
       );
-    else if (completenessUncertain(doc))
+    else if (completenessUncertain(doc) && !doc.processing?.has_human_review)
       detail.append(
         el(
           "p",
@@ -698,10 +727,17 @@ export async function mountReview(app: HTMLElement) {
         doc,
         categories,
         action,
-        async () => {
+        async (outcome?: string) => {
           await refresh();
+          const reviewed = catalog.documents.find((item) => item.id === doc.id)
+            ?.processing?.has_human_review;
+          if (reviewed) {
+            filter.value = "human-reviewed";
+            renderList();
+          }
           setMessage(
-            "Receipt changes saved. Agent readings and originals are preserved.",
+            outcome ??
+              "Receipt changes saved. Agent readings and originals are preserved.",
           );
         },
         ocrSource,
@@ -728,16 +764,24 @@ export async function mountReview(app: HTMLElement) {
           (d) => d.id === doc.id,
         )!;
         try {
-          const result = await generateDocumentPdf(current);
+          const result = await generateDocumentPdf(
+            current,
+            current.processing?.has_human_review === true,
+          );
           setMessage(
-            `Saved ${result.filename}. Inspect it before confirming the PDF check.`,
+            `Saved ${result.filename}${result.imageOnlyPages ? ` with ${result.imageOnlyPages} image-only page${result.imageOnlyPages === 1 ? "" : "s"}` : ""}. Inspect it before confirming the PDF check.`,
           );
         } catch (error) {
           if (error instanceof OcrPendingError) throw error;
-          current.broken = [
-            ...new Set([...current.broken, `PDF failed: ${messageOf(error)}`]),
-          ];
-          await saveDocuments([current]);
+          if (!current.processing?.has_human_review) {
+            current.broken = [
+              ...new Set([
+                ...current.broken,
+                `PDF failed: ${messageOf(error)}`,
+              ]),
+            ];
+            await saveDocuments([current]);
+          }
           throw error;
         } finally {
           await refresh();
@@ -967,6 +1011,7 @@ export async function mountReview(app: HTMLElement) {
         "scan-review",
         "luna-reparse",
         "non-receipt",
+        "human-reviewed",
       ].includes(filter.value)
     )
       url.searchParams.set("view", filter.value);

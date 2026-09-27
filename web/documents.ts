@@ -84,7 +84,8 @@ export interface DocumentView extends ReceiptDocument {
     | "duplicate"
     | "merged"
     | "awaiting-pages"
-    | "model-review";
+    | "model-review"
+    | "human-reviewed";
   reasons: string[];
   scannedAt: string[];
   pdf: { sha256: string; revision: number } | null;
@@ -249,6 +250,7 @@ export function documentReasons(doc: ReceiptDocument): {
           : (p.ocr_comparison?.disagreements ?? [])),
       ]),
     ];
+    if (p.has_human_review) return { status: "human-reviewed", reasons };
     if (doc.broken.length) return { status: "broken", reasons };
     if (doc.uncertainties.length && disposition === "extracted")
       return { status: "review", reasons };
@@ -377,14 +379,19 @@ export function requiredMergeReviewReasons(
 }
 
 export function filenameBase(doc: ReceiptDocument): string | null {
-  if (!doc.receiptDate || !doc.vendor) return null;
+  if (!doc.receiptDate || !doc.vendor)
+    return doc.processing?.has_human_review ? `human_reviewed_${doc.id}` : null;
   const vendor = doc.vendor
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 100);
-  return vendor ? `${doc.receiptDate}_${vendor}` : null;
+  return vendor
+    ? `${doc.receiptDate}_${vendor}`
+    : doc.processing?.has_human_review
+      ? `human_reviewed_${doc.id}`
+      : null;
 }
 
 export function validDate(value: string): boolean {

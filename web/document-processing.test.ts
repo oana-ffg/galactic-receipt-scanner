@@ -87,6 +87,15 @@ it("treats historical Tesseract as PP pending instead of silently reusing it", a
   expect(mocks.addPage).not.toHaveBeenCalled();
   expect(mocks.api.mock.calls.every(([, options]) => !options)).toBe(true);
 });
+it("allows a human accepted document to produce an image-only PDF when OCR is absent", async () => {
+  await stored(null);
+  await expect(generateDocumentPdf(doc, true)).resolves.toMatchObject({
+    filename: "synthetic.pdf",
+    imageOnlyPages: 1,
+  });
+  expect(mocks.addPage.mock.calls[0][5]).toBeUndefined();
+  expect(mocks.addPage.mock.calls[0][7]).toBe(true);
+});
 it.each(["missing", "source", "crop", "rotation", "layer"])(
   "requires processing when saved OCR has a %s mismatch",
   async (reason) => {

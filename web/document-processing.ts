@@ -28,8 +28,12 @@ export async function saveDocuments(documents: ReceiptDocument[]) {
   });
 }
 
-export async function generateDocumentPdf(doc: ReceiptDocument) {
+export async function generateDocumentPdf(
+  doc: ReceiptDocument,
+  allowImageOnly = false,
+) {
   const pdf = await PDFDocument.create();
+  let imageOnlyPages = 0;
   for (const page of doc.pages) {
     const { capture, blob } = await readOriginal(page.captureId);
     if (capture.sha256 !== page.sha256)
@@ -89,17 +93,20 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
         artifactFailure ||= messageOf(error);
       }
     }
-    if (!ocr)
+    if (!ocr && (!allowImageOnly || artifactFailure))
       throw new (artifactFailure ? Error : OcrPendingError)(
-        `No usable saved OCR matches this page layout. Run the Luna processing flow with PP-OCR before generating the searchable PDF.${artifactFailure ? ` Saved OCR could not be read: ${artifactFailure}` : ""}`,
+        `No usable saved OCR matches this page layout. ${allowImageOnly ? "Saved OCR could not be used for this PDF." : "Run the Luna processing flow with PP-OCR before generating the searchable PDF."}${artifactFailure ? ` Saved OCR could not be read: ${artifactFailure}` : ""}`,
       );
+    if (!ocr) imageOnlyPages++;
     await addReceiptPage(
       pdf,
       new Uint8Array(await blob.arrayBuffer()),
       blob.type,
       page.rotation,
       crop,
-      ocr,
+      ocr ?? undefined,
+      undefined,
+      !ocr,
     );
   }
   const data = await pdf.save();
@@ -123,5 +130,5 @@ export async function generateDocumentPdf(doc: ReceiptDocument) {
     throw new Error("PDF save checksum mismatch.");
   if (result.revision !== doc.revision)
     throw Error("PDF save revision mismatch.");
-  return result;
+  return { ...result, imageOnlyPages };
 }

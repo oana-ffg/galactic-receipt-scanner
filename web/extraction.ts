@@ -349,6 +349,7 @@ export function processingDisposition(
   | "review"
   | "broken"
   | "extracted" {
+  if (p.has_human_review) return "extracted";
   if (p.needs_reparse) return "processing";
   const e = p.extraction;
   if (
@@ -360,7 +361,6 @@ export function processingDisposition(
   )
     return "broken";
   if (e.completeness === "fragment") return "awaiting-pages";
-  if (p.has_human_review) return "extracted";
   if (
     p.large_model_confidence !== null &&
     (p.luna_needs_human_review ?? e.needs_human_review)

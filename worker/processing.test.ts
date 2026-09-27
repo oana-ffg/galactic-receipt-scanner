@@ -1423,6 +1423,12 @@ it("requires interactive human approval and invalidates it when an old client ed
   expect(d.processing.has_human_review).toBe(true);
   expect(d.processing.human_review_revision).toBe(d.revision);
   expect(
+    (await ok("/api/processing/claim", { stage: "small" }, true)).claim,
+  ).toBeNull();
+  expect(
+    (await ok("/api/processing/claim", { stage: "large" }, true)).claim,
+  ).toBeNull();
+  expect(
     (
       await req(
         "/api/processing/claim",
@@ -1448,6 +1454,15 @@ it("requires interactive human approval and invalidates it when an old client ed
   expect((await req("/api/documents", { documents: [forged] })).status).toBe(
     400,
   );
+  const unchanged = structuredClone(d);
+  unchanged.evidence = "Synthetic owner note after acceptance.";
+  await ok("/api/documents", { documents: [unchanged] });
+  d = (await ok(`/api/documents/${c.id}`)).document;
+  expect(d.processing.has_human_review).toBe(true);
+  expect(d.processing.human_review_revision).toBe(d.revision);
+  expect(
+    (await ok("/api/processing/claim", { stage: "small" }, true)).claim,
+  ).toBeNull();
   delete d.processing;
   d.vendor = "Edited synthetic shop";
   await ok("/api/documents", { documents: [d] });
@@ -1457,6 +1472,46 @@ it("requires interactive human approval and invalidates it when an old client ed
     human_review_revision: null,
     needs_reparse: true,
   });
+});
+it("names and serves an accepted PDF without inventing a missing vendor or date", async () => {
+  const c = await capture();
+  const lease = await claim();
+  await ok(
+    "/api/processing/submit",
+    { token: lease.token, model: "gpt-5.6-luna", extraction: extraction() },
+    true,
+  );
+  const d = (await ok(`/api/documents/${c.id}`)).document;
+  await ok("/api/processing/human-review", {
+    document_id: d.id,
+    revision: d.revision,
+    extraction: { ...extraction(), vendor: null, receipt_date: null },
+  });
+  const reviewed = (await ok(`/api/documents/${c.id}`)).document;
+  expect(reviewed.status).toBe("human-reviewed");
+  expect(reviewed.filename).toBe(`human_reviewed_${c.id}.pdf`);
+  const pdf = await mf.dispatchFetch(
+    origin + `/api/documents/${c.id}/pdf?revision=${reviewed.revision}`,
+    {
+      method: "POST",
+      headers: {
+        ...ownerHeaders,
+        Origin: origin,
+        "X-Scanner-Request": "1",
+      },
+      body: "%PDF-synthetic-reviewed-document",
+    },
+  );
+  expect(pdf.status).toBe(200);
+  const saved = await pdf.json();
+  expect(saved.filename).toBe(`human_reviewed_${c.id}.pdf`);
+  const download = await mf.dispatchFetch(
+    origin +
+      `/api/documents/${c.id}/pdf?version=${saved.sha256}&revision=${saved.revision}`,
+    { headers: ownerHeaders },
+  );
+  expect(download.status).toBe(200);
+  expect(await download.text()).toBe("%PDF-synthetic-reviewed-document");
 });
 it("rolls back document and provenance writes when a lease expires after the initial read", async () => {
   const c = await capture(),
@@ -1889,7 +1944,7 @@ it("pins PDF attestation to current pages/hash and approves humans only at the f
   d = (await ok(`/api/documents/${c.id}`)).document;
   expect(d.processing.human_review_revision).toBe(d.revision);
   expect(d.checks.pdf).toBe(true);
-  expect(d.status).toBe("ready");
+  expect(d.status).toBe("human-reviewed");
   await ok(
     "/api/processing/pdf-review",
     {
@@ -1900,9 +1955,9 @@ it("pins PDF attestation to current pages/hash and approves humans only at the f
     },
     true,
   );
-  expect(
-    (await ok(`/api/documents/${c.id}`)).document.processing.has_human_review,
-  ).toBe(false);
+  d = (await ok(`/api/documents/${c.id}`)).document;
+  expect(d.processing.has_human_review).toBe(true);
+  expect(d.processing.human_review_revision).toBe(d.revision);
 });
 
 it("finds an undated exact-amount receipt for a slip and exposes chronological predecessors", async () => {

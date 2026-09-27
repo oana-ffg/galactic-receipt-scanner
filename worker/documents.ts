@@ -914,9 +914,11 @@ export async function documentRoute(
             d.processing.has_human_review = false;
             d.processing.human_review_revision = null;
             d.processing.large_model_confidence = null;
+          } else if (d.processing.has_human_review) {
+            // PDF uploads and check updates advance the document revision without
+            // reopening an owner's unchanged, accepted extraction.
+            d.processing.human_review_revision = d.revision + 1;
           }
-          d.processing.has_human_review = false;
-          d.processing.human_review_revision = null;
         } else delete d.processing;
       }
     }

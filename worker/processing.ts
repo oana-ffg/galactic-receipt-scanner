@@ -171,6 +171,7 @@ async function claimCandidateRows(
            OR page.capture_id=json_extract(v.payload,'$.pages[0].captureId'))
          AND json_extract(v.payload,'$.mergedInto') IS NULL
          AND json_extract(v.payload,'$.duplicateOf') IS NULL
+         AND COALESCE(json_extract(v.payload,'$.processing.has_human_review'),0)=0
          AND NOT EXISTS(SELECT 1 FROM processing_lock l WHERE l.document_id=COALESCE(page.document_id,captures.id) AND l.expires>unixepoch()*1000)
          AND NOT EXISTS(SELECT 1 FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id=COALESCE(page.document_id,captures.id) AND b.expires>unixepoch()*1000)
          AND ${eligibility}
@@ -1101,10 +1102,11 @@ export async function processingRoute(
           const eligible =
             input.stage === "small"
               ? !candidate.processing ||
-                candidate.processing.needs_reparse ||
-                (processingDisposition(candidate.processing) ===
-                  "awaiting-pages" &&
-                  captureCount > candidate.processing.seen_capture_count)
+                (!candidate.processing.has_human_review &&
+                  (candidate.processing.needs_reparse ||
+                    (processingDisposition(candidate.processing) ===
+                      "awaiting-pages" &&
+                      captureCount > candidate.processing.seen_capture_count)))
               : !!candidate.processing &&
                 !candidate.processing.needs_reparse &&
                 candidate.processing.large_model_confidence === null &&
