@@ -26,6 +26,42 @@ def result():
 
 
 class NightlyTests(unittest.TestCase):
+    def test_finish_jev_runs_completeness_after_successful_backfill(self):
+        with patch.object(nightly, 'run_jev_backfill', return_value=dict(complete=True, remaining=0)) as backfill, \
+                patch.object(nightly, 'run_jev_completeness', return_value=dict(
+                    complete=True, counts={'no': 2}, needs_human_document_ids=['private'])) as completeness:
+            finished = nightly.finish_jev(self.client)
+        backfill.assert_called_once_with(self.client)
+        completeness.assert_called_once()
+        self.assertTrue(finished['complete'])
+        self.assertTrue(finished['backfill_complete'])
+        self.assertEqual(finished['completeness'], dict(complete=True, counts={'no': 2}))
+        self.assertNotIn('private', json.dumps(finished))
+
+    def test_finish_jev_preserves_incomplete_completeness(self):
+        with patch.object(nightly, 'run_jev_backfill', return_value=dict(complete=True)), \
+                patch.object(nightly, 'run_jev_completeness', return_value=dict(
+                    complete=False, counts={'not_ready': 1})):
+            finished = nightly.finish_jev(self.client)
+        self.assertTrue(finished['backfill_complete'])
+        self.assertFalse(finished['complete'])
+
+    def test_finish_jev_skips_completeness_until_backfill_finishes(self):
+        with patch.object(nightly, 'run_jev_backfill', return_value=dict(complete=False, deferred=True)), \
+                patch.object(nightly, 'run_jev_completeness') as completeness:
+            finished = nightly.finish_jev(self.client)
+        completeness.assert_not_called()
+        self.assertFalse(finished['complete'])
+        self.assertEqual(finished['completeness']['reason'], 'backfill_incomplete')
+
+    def test_finish_jev_reports_completeness_failure_without_losing_backfill(self):
+        with patch.object(nightly, 'run_jev_backfill', return_value=dict(complete=True)), \
+                patch.object(nightly, 'run_jev_completeness', side_effect=ClientError('Scanner returned HTTP 503')):
+            finished = nightly.finish_jev(self.client)
+        self.assertTrue(finished['backfill_complete'])
+        self.assertFalse(finished['complete'])
+        self.assertEqual(finished['completeness']['error'], 'Scanner returned HTTP 503')
+
     def test_deferred_jev_backfill_keeps_full_pipeline_incomplete(self):
         self.client.origin = 'https://synthetic.example'
         self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}

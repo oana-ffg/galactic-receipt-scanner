@@ -121,10 +121,8 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("diagnostic_file", report)
 
     def test_completeness_race_does_not_count_an_unready_receipt_as_not_receipt(self):
-        document = {"document_id": self.id, "kind": "receipt", "ready": True,
-                    "jev": {"role": "purchase_document"},
-                    "completeness_audit": None, "ocr_characters": 1000,
-                    "ocr_truncated": False}
+        document = {"id": self.id, "kind": "receipt", "jevRole": "purchase_document",
+                    "completenessAudit": None}
         self.client.get = Mock(return_value={"documents": [document], "next": None})
         self.client.request = Mock(return_value=json.dumps(
             {"assessed": False, "result": "not_ready"}).encode())
@@ -134,10 +132,8 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["needs_human_document_ids"], [])
 
     def test_completeness_retries_a_temporary_server_failure(self):
-        document = {"document_id": self.id, "kind": "receipt", "ready": True,
-                    "jev": {"role": "purchase_document"},
-                    "completeness_audit": None, "ocr_characters": 1000,
-                    "ocr_truncated": False}
+        document = {"id": self.id, "kind": "receipt", "jevRole": "purchase_document",
+                    "completenessAudit": None}
         self.client.get = Mock(return_value={"documents": [document], "next": None})
         self.client.request = Mock(side_effect=[ScannerHTTPError(503, "Scanner returned HTTP 503"),
                                                 json.dumps({"assessed": True, "result": "yes",
@@ -149,15 +145,77 @@ class ClientTests(unittest.TestCase):
         sleep.assert_called_once_with(1)
 
     def test_completeness_skips_explicit_non_receipt_kind(self):
-        document = {"document_id": self.id, "kind": "payment-slip", "ready": True,
-                    "jev": {"role": "purchase_document"},
-                    "completeness_audit": None, "ocr_characters": 1000,
-                    "ocr_truncated": False}
+        document = {"id": self.id, "kind": "payment-slip", "jevRole": "purchase_document",
+                    "completenessAudit": None}
         self.client.get = Mock(return_value={"documents": [document], "next": None})
         self.client.request = Mock()
         result = run_jev_completeness(self.client)
         self.assertEqual(result["counts"]["not_purchase"], 1)
         self.client.request.assert_not_called()
+
+    def test_completeness_reads_summaries_and_reuses_only_current_assessments(self):
+        document = {'id': self.id, 'kind': 'receipt', 'jevRole': 'purchase_document',
+                    'completenessAudit': {'result': 'yes', 'confidence': 0.6}}
+        duplicate = {**document, 'duplicateOf': 'synthetic-target'}
+        self.client.get = Mock(return_value={'documents': [document, duplicate], 'next': None})
+        self.client.request = Mock()
+        progress = Mock()
+        result = run_jev_completeness(self.client, emit=progress)
+        self.client.get.assert_called_once_with('/api/documents?summary=1&limit=100')
+        self.client.request.assert_not_called()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['counts']['already_assessed'], 1)
+        self.assertEqual(result['counts']['low_confidence_yes'], 1)
+        self.assertEqual(result['needs_human_document_ids'], [self.id])
+        progress.assert_called_once()
+
+    def test_completeness_pending_classification_is_incomplete(self):
+        self.client.get = Mock(return_value={'documents': [
+            {'id': self.id, 'kind': 'receipt', 'jevRole': None}], 'next': None})
+        self.client.request = Mock(return_value=json.dumps(
+            {'assessed': False, 'result': 'not_ready'}).encode())
+        result = run_jev_completeness(self.client)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['counts']['not_ready'], 1)
+        self.client.request.assert_called_once()
+
+    def test_completeness_assesses_unknown_summary_role_when_server_evidence_is_ready(self):
+        self.client.get = Mock(return_value={'documents': [
+            {'id': self.id, 'kind': 'receipt', 'jevRole': None}], 'next': None})
+        self.client.request = Mock(return_value=json.dumps(
+            {'assessed': True, 'result': 'yes', 'confidence': 0.9}).encode())
+        result = run_jev_completeness(self.client)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['counts']['yes'], 1)
+        self.assertEqual(result['counts']['assessed_via_endpoint'], 1)
+        self.client.request.assert_called_once()
+
+    def test_completeness_reused_negative_verdict_stays_visible_in_counts(self):
+        self.client.get = Mock(return_value={'documents': [
+            {'id': self.id, 'kind': 'receipt', 'jevRole': 'purchase_document',
+             'completenessAudit': {'result': 'no', 'confidence': 1}}], 'next': None})
+        self.client.request = Mock()
+        result = run_jev_completeness(self.client)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['counts']['no'], 1)
+        self.assertEqual(result['counts']['already_assessed'], 1)
+        self.assertEqual(result['counts']['assessed_via_endpoint'], 0)
+        self.assertEqual(result['needs_human_document_ids'], [self.id])
+        self.client.request.assert_not_called()
+
+    def test_completeness_cli_exits_unsuccessfully_when_evidence_is_not_ready(self):
+        with patch('sys.argv', ['receipt_api.py', 'jev-completeness']), \
+                patch('receipt_api.credentials', return_value={}), \
+                patch('receipt_api.ScannerClient', return_value=self.client), \
+                patch('receipt_api.run_jev_completeness', return_value={'complete': False, 'counts': {'not_ready': 1}}), \
+                redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit_status:
+            main()
+        self.assertEqual(exit_status.exception.code, 1)
+
+    def test_completeness_repeated_cursor_fails_instead_of_claiming_completion(self):
+        self.client.get = Mock(return_value={'documents': [], 'next': 'synthetic-cursor'})
+        with self.assertRaisesRegex(ClientError, 'Repeated document cursor'):
+            run_jev_completeness(self.client)
 
     def test_pp_profile_binds_matching_destination_and_runtimes(self):
         with tempfile.TemporaryDirectory() as directory:

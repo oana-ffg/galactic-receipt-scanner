@@ -683,39 +683,38 @@ def run_jev_backfill(client, *, sleep=time.sleep):
     }
 
 
-def run_jev_completeness(client, *, sleep=time.sleep):
+def run_jev_completeness(client, *, sleep=time.sleep, emit=None):
     """Screen current Jev purchase documents without changing their grouping or Luna claims."""
     after = None
+    seen_cursors = set()
     counts = {"yes": 0, "no": 0, "not_receipt": 0, "already_assessed": 0,
-              "low_confidence_yes": 0, "not_purchase": 0, "not_ready": 0,
-              "oversized_ocr": 0}
-    largest_ocr_chars = 0
+              "assessed_via_endpoint": 0, "low_confidence_yes": 0, "not_purchase": 0, "not_ready": 0}
     needs_human = []
     while True:
-        path = "/api/jev/documents?limit=25"
+        path = "/api/documents?summary=1&limit=100"
         if after:
             path += "&after=" + quote(after, safe="")
         page = client.get(path)
         for document in page["documents"]:
-            chars = document.get("ocr_characters")
-            if isinstance(chars, int):
-                largest_ocr_chars = max(largest_ocr_chars, chars)
-            if document.get("ocr_truncated"):
-                counts["oversized_ocr"] += 1
-            if (document["jev"]["role"] != "purchase_document"
+            if document.get("duplicateOf") or document.get("mergedInto"):
+                continue
+            role = document.get("jevRole")
+            # Metadata-only revisions can hide a still-valid role in summaries;
+            # the completeness endpoint verifies current Jev/PP readiness itself.
+            if ((role and role != "purchase_document")
                     or document["kind"] not in {"unknown", "receipt", "invoice", "credit-note"}):
                 counts["not_purchase"] += 1
                 continue
-            if not document["ready"]:
-                counts["not_ready"] += 1
-                continue
-            prior = document.get("completeness_audit")
+            prior = document.get("completenessAudit")
             if prior:
                 counts["already_assessed"] += 1
+                counts[prior["result"]] += 1
                 if prior["result"] == "no" or (prior["result"] == "yes" and prior["confidence"] < 0.75):
-                    needs_human.append(document["document_id"])
+                    needs_human.append(document["id"])
+                    if prior["result"] == "yes":
+                        counts["low_confidence_yes"] += 1
                 continue
-            payload = json.dumps({"document_id": document["document_id"]}).encode()
+            payload = json.dumps({"document_id": document["id"]}).encode()
             for attempt in range(3):
                 try:
                     result = json.loads(client.request("/api/jev/completeness", payload))
@@ -736,14 +735,20 @@ def run_jev_completeness(client, *, sleep=time.sleep):
             if outcome not in {"yes", "no", "not_receipt"}:
                 raise ClientError("Jev completeness returned an invalid outcome.")
             counts[outcome] += 1
+            counts["assessed_via_endpoint"] += 1
             if outcome == "no" or (outcome == "yes" and result["confidence"] < 0.75):
-                needs_human.append(document["document_id"])
+                needs_human.append(document["id"])
                 if outcome == "yes":
                     counts["low_confidence_yes"] += 1
+        if emit:
+            emit({"event": "jev_completeness_progress", "counts": dict(counts)})
         after = page.get("next")
         if not after:
             break
-    return {"counts": counts, "largest_ocr_characters": largest_ocr_chars,
+        if after in seen_cursors:
+            raise ClientError("Repeated document cursor; Jev completeness inventory is incomplete.")
+        seen_cursors.add(after)
+    return {"complete": counts["not_ready"] == 0, "counts": counts,
             "needs_human_document_ids": needs_human}
 
 
@@ -803,7 +808,7 @@ def main():
     elif args.command == "jev-backfill":
         result = run_jev_backfill(client)
     elif args.command == "jev-completeness":
-        result = run_jev_completeness(client)
+        result = run_jev_completeness(client, emit=lambda value: print(json.dumps(value), flush=True))
     elif args.command == "get":
         result = client.get(args.path)
     elif args.command == "captures":
@@ -843,6 +848,8 @@ def main():
             json.loads(data)
         result = json.loads(client.request(path, data, content_type))
     print(json.dumps(result, ensure_ascii=False))
+    if args.command == "jev-completeness" and not result["complete"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

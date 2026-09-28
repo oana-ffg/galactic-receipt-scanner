@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from receipt_api import (ClientError, OCRRequired, ScannerClient, ScannerConnectionError, ScannerHTTPError, SHA,
                          UUID, artifact_directory, credentials, diagnostic_text, failure_report,
-                         matches_prepared_ocr, run_jev_backfill, write_new_file)
+                         matches_prepared_ocr, run_jev_backfill, run_jev_completeness, write_new_file)
 from receipt_locks import acquire_lock, LockBusy
 from receipt_ppocr_setup import REPO, discover, ensure_profile
 
@@ -211,10 +211,22 @@ def prepare_requirement(client, value, root):
 
 
 def finish_jev(client):
-    """Drain hosted Jev work without copying document identifiers into the OCR summary."""
-    result = run_jev_backfill(client)
+    """Finish grouping/payment matching, then assess completeness on current documents."""
+    backfill = run_jev_backfill(client)
     fields = ('complete', 'deferred', 'waiting', 'settling_jobs', 'processed', 'remaining', 'phase', 'blocked')
-    return {key: result[key] for key in fields if key in result}
+    result = {key: backfill[key] for key in fields if key in backfill}
+    result['backfill_complete'] = backfill.get('complete') is True
+    if not result['backfill_complete']:
+        result['completeness'] = dict(complete=False, skipped=True, reason='backfill_incomplete')
+        return result
+    try:
+        assessment = run_jev_completeness(client,
+            emit=lambda value: print(json.dumps(value), flush=True))
+        result['completeness'] = {key: assessment[key] for key in ('complete', 'counts')}
+    except ClientError as error:
+        result['completeness'] = dict(complete=False, error=str(error))
+    result['complete'] = result['completeness']['complete']
+    return result
 
 
 def ocr_failure(error, root, label):

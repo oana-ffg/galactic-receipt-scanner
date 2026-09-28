@@ -1,6 +1,6 @@
 ---
 name: receipt-ocr-nightly
-description: Run unattended PP-OCRv6 using the saved scan crop for current scans missing OCR. Use for nightly OCR or OCR backlog recovery, independently of Luna grouping and extraction.
+description: Run unattended PP-OCRv6 and finish Jev continuity, payment-slip matching, document classification and receipt completeness. Use for nightly OCR or backlog recovery, independently of Luna extraction.
 ---
 
 # Nightly receipt OCR
@@ -21,8 +21,11 @@ or detected scan outline (the whole image if no outline exists), reuses PP artif
 OCR region covers that scan crop, performs inference
 locally, uploads immutable OCR including positions/confidences/search text, and verifies
 the uploaded artifact. After all OCR attempts, the deterministic runner drains the hosted,
-serialized Jev pipeline to two stable zero-work responses. Jev owns page grouping and
-document classification; the OCR model and agent do not. The runner does not alter extracted
+serialized Jev pipeline to two stable zero-work responses, including continuity and
+detached payment-slip matching. It then runs the separate Jev completeness pass across
+all current purchase documents, reusing only assessments that still match their current
+pages and OCR. Jev owns page grouping, document classification and completeness;
+the OCR model and agent do not. The runner does not alter extracted
 accounting values or regenerate document PDFs. Older artifacts and originals are preserved.
 
 ## Explicit request recovery on the OCR host
@@ -44,7 +47,11 @@ claim alive while inference runs elsewhere.
 The OCR runner has its own lock. If it reports another OCR run active, wait for that run
 to end, then rerun; do not kill it or launch competing inference. Return the actual summary
 path, completion status, remaining failures and `required_ocr.verified`. Full success
-requires `complete: true`, `limited: false` and `jev.complete: true`. Access/approval
+requires `complete: true`, `limited: false`, `jev.backfill_complete: true`,
+`jev.completeness.complete: true` and `jev.complete: true`. A completed backfill alone
+does not establish that completeness was assessed. A completeness verdict of missing
+or uncertain source evidence is a finished assessment requiring follow-up, not a reason
+to invent receipt content or rerun it indefinitely. Access/approval
 failures, an unresolved required artifact, or incomplete Jev work are never success.
 
 ## Scheduled automation contract
@@ -109,13 +116,17 @@ wrapper finishes. The wrapper, not the chat turn, owns and waits for the OCR chi
    After the OCR attempts it invokes the existing Jev backfill endpoint until two stable
    zero-work responses. A current `waiting-for-ocr` tail remains incomplete and retryable;
    it is never mistaken for an idle completed pipeline. Backend pipeline ownership prevents
-   overlapping Jev mutations.
+   overlapping Jev mutations. After backfill finishes, run the completeness pass even
+   when this invocation found no new OCR. Do not stop at OCR completion or pipeline
+   `phase: "complete"`; completeness is a separate persisted assessment.
 4. Inspect the wrapper state and final summary plus private `last-run.json`/`failures.json` under
    `.local/receipt-ocr-nightly/`. Require `complete: true`, `remaining: 0`, `limited: false`,
-   and `jev.complete: true`
+   `jev.backfill_complete: true`, `jev.completeness.complete: true`, and `jev.complete: true`
    before reporting full completion. Report inventory `ocr_available`/`ocr_missing`, newly
    verified scans and unresolved failures separately. An empty OCR reading is preserved
-   honestly and remains reviewable.
+   honestly and remains reviewable. Report completeness assessment counts and missing,
+   uncertain or not-ready evidence separately from scans processed. Preserve all source
+   intervention findings; assessment completion is not a claim that every receipt is whole.
 
 ## Keep working through failures
 
