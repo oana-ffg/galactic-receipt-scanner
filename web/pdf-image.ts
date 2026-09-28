@@ -1,5 +1,5 @@
 /** PDF copies retain source resolution; JPEG crops use high-quality re-encoding. */
-export const PDF_JPEG_QUALITY = 95;
+export const PDF_JPEG_QUALITY = 85;
 
 export type PdfImageCropper = (
   bytes: Uint8Array,
