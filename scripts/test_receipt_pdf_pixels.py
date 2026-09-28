@@ -27,6 +27,7 @@ import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {PDFDocument, StandardFonts, setTextRenderingMode, TextRenderingMode} from 'pdf-lib';
 import {addReceiptPage} from './web/receipt-pdf.ts';
+import {cropPdfImage} from './scripts/pdf_image.mjs';
 const directory=process.argv[1];
 const layer=await PDFDocument.create();
 const page=layer.addPage([32,32]);
@@ -40,7 +41,7 @@ for (const name of ['draft','searchable','reordered','cropped','rotated','visibl
   for (const index of name==='reordered' ? [1,0] : [0,1]) {
     await addReceiptPage(pdf,await readFile(join(directory,`source-${index}.png`)), 'image/png',
       name==='rotated'?90:0, name==='cropped'?[2,2,28,28]:[1,1,31,31],
-      name==='draft'?undefined:ocr, undefined, name==='draft');
+      name==='draft'?undefined:ocr, undefined, name==='draft', cropPdfImage);
   }
   if(name==='visible') pdf.getPage(0).drawText('VISIBLE', {x:18,y:25,size:5});
   await writeFile(join(directory,`${name}.pdf`),await pdf.save());
@@ -62,10 +63,7 @@ class PdfPixelsTests(unittest.TestCase):
         self.work = Path(self.tmp.name)
         for i, red in enumerate((0, 255)):
             (self.work / f"source-{i}.png").write_bytes(test_image(red))
-        program = ("import {build} from 'esbuild'; const built=await build({stdin:{contents:"
-                   + json.dumps(GENERATE) + ",resolveDir:process.cwd()},bundle:true,platform:'node',format:'esm',write:false});"
-                   "await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));")
-        result = subprocess.run([self.node, "--input-type=module", "-e", program, str(self.work)],
+        result = subprocess.run([self.node, "--input-type=module", "-e", GENERATE, str(self.work)],
                                 cwd=self.repo, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         worker = self.worker = Worker.__new__(Worker)

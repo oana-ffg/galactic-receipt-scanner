@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { PDFDocument } from "pdf-lib";
 import { addReceiptPage } from "../web/receipt-pdf.ts";
+import { cropPdfImage } from "./pdf_image.mjs";
 const [manifestPath, outputPath] = process.argv.slice(2);
 if (!manifestPath || !outputPath)
   throw Error(
@@ -36,6 +37,7 @@ for (const page of manifest.pages) {
     ocr,
     page.quad,
     manifest.mode === "image-only",
+    cropPdfImage,
   );
   layouts.push({ captureId: page.captureId, sha256: page.sha256, ...layout });
 }
