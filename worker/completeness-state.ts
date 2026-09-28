@@ -11,7 +11,6 @@ export const COMPLETENESS_TASK = "receipt-completeness-v1";
 type AssessmentRow = {
   id: string;
   subject_id: string;
-  subject_revision: number;
   payload: string;
   created_at: string;
 };
@@ -77,12 +76,12 @@ export async function loadCompletenessAudits(
       ? selectChunks<AssessmentRow>(
           "jev_assessments",
           (ids) =>
-            `SELECT id,subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
+            `SELECT id,subject_id,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
           documentIds,
         )
       : runQuery("jev_assessments", () =>
           env.DB.prepare(
-            "SELECT id,subject_id,subject_revision,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
+            "SELECT id,subject_id,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
           )
             .bind(COMPLETENESS_TASK)
             .all<AssessmentRow>(),
@@ -127,9 +126,7 @@ export async function loadCompletenessAudits(
   );
   const legacyCandidates = documents.flatMap((document) => {
     const head = headById.get(document.id);
-    return head &&
-      (head.document_revision !== document.revision ||
-        head.page_fingerprint !== fingerprints.get(document.id))
+    return head && head.page_fingerprint !== fingerprints.get(document.id)
       ? [head]
       : [];
   });
@@ -160,8 +157,7 @@ export async function loadCompletenessAudits(
     const head = headById.get(document.id);
     if (!head) continue;
     const currentHead =
-      (head.document_revision === document.revision &&
-        head.page_fingerprint === fingerprints.get(document.id)) ||
+      head.page_fingerprint === fingerprints.get(document.id) ||
       (await legacyHeadMatches(document, head, savedVersions.get(document.id)));
     if (!currentHead) continue;
     validHeads.set(document.id, head);
@@ -181,7 +177,6 @@ export async function loadCompletenessAudits(
       !canAssessReceiptCompleteness(document.kind) ||
       document.mergedInto ||
       document.duplicateOf ||
-      document.revision !== row.subject_revision ||
       head.role !== "purchase_document"
     )
       continue;

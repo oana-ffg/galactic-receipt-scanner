@@ -3106,6 +3106,103 @@ it("leaves the open tail unclassified until the following raw capture has PP OCR
   ).toEqual({ document_id: captures[1].id });
 });
 
+it("retains Jev classification and completeness through a metadata save in both document views", async () => {
+  const processingToken = `rsc_${"r".repeat(43)}`;
+  await mf.dispose();
+  mf = await runtime({
+    processingTokenSha256: await processingTokenHash(processingToken),
+    typesafeApiKey: "synthetic-key",
+    outboundService: syntheticJevResponse,
+  });
+  const capture = await saveCapture();
+  const db = await mf.getD1Database("DB");
+  await db
+    .prepare("UPDATE captures SET created_at=? WHERE id=?")
+    .bind("2026-01-01T00:00:00.000Z", capture.id)
+    .run();
+  await seedHistoricalOcr(
+    capture,
+    "SYNTHETIC SHOP RECEIPT TOTAL 10.00",
+    "2026-01-01T00:00:00.000Z",
+  );
+  await drainBackfill(processingToken);
+  const assessed = await mf.dispatchFetch(`${origin}/api/jev/completeness`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${processingToken}`,
+    },
+    body: JSON.stringify({ document_id: capture.id }),
+  });
+  expect(assessed.status, await assessed.clone().text()).toBe(200);
+  const read = async () =>
+    (
+      await (
+        await mf.dispatchFetch(`${origin}/api/documents/${capture.id}`, {
+          headers: ownerHeaders,
+        })
+      ).json<any>()
+    ).document;
+  const before = await read();
+  expect(before.completenessAudit).toMatchObject({ result: "yes" });
+  const updated = {
+    ...before,
+    vendor: "Synthetic extracted vendor",
+    receiptDate: "2026-01-01",
+    kind: "receipt",
+  };
+  const saved = await mf.dispatchFetch(`${origin}/api/documents`, {
+    method: "POST",
+    headers: {
+      ...ownerHeaders,
+      Origin: origin,
+      "X-Scanner-Request": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ documents: [updated] }),
+  });
+  expect(saved.status, await saved.clone().text()).toBe(200);
+  const after = await read();
+  expect(after.revision).toBe(before.revision + 1);
+  expect(after.pages).toEqual(before.pages);
+  expect(after.jevRole).toBe(before.jevRole);
+  expect(after.completenessAudit).toEqual(before.completenessAudit);
+  for (const route of [
+    "/api/documents?summary=1&limit=100",
+    "/api/jev/documents?limit=100",
+  ]) {
+    const response = await mf.dispatchFetch(`${origin}${route}`, {
+      headers: {
+        ...ownerHeaders,
+        Authorization: `Bearer ${processingToken}`,
+      },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const catalog = await response.json<any>();
+    expect(catalog.documents[0]).toMatchObject(
+      route.startsWith("/api/jev/")
+        ? {
+            ready: true,
+            jev: { role: "purchase_document" },
+            completeness_audit: before.completenessAudit,
+          }
+        : {
+            jevRole: before.jevRole,
+            completenessAudit: before.completenessAudit,
+          },
+    );
+  }
+  expect(
+    await db
+      .prepare("SELECT COUNT(*) AS count FROM jev_assessments WHERE task=?")
+      .bind("receipt-completeness-v1")
+      .first(),
+  ).toEqual({ count: 1 });
+});
+
 it("withholds a previously terminal document as soon as a newer raw capture exists", async () => {
   const processingToken = `rsc_${"t".repeat(43)}`;
   await mf.dispose();
