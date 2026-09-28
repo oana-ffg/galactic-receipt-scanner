@@ -54,6 +54,27 @@ or uncertain source evidence is a finished assessment requiring follow-up, not a
 to invent receipt content or rerun it indefinitely. Access/approval
 failures, an unresolved required artifact, or incomplete Jev work are never success.
 
+## Update before starting OCR
+
+Before starting any new task, wrapper or direct OCR run through this skill, inspect the
+current scheduler/process state and OCR lock ownership. If OCR is already active, observe
+that run without changing its checkout; wait until it finishes before updating for a new
+run. A persistent lock file alone does not establish activity.
+
+Require the repository to be on `main` with a clean working tree, then run
+`git pull --ff-only origin main`. Require the pull to succeed and verify that `HEAD` equals
+`origin/main`; an ahead or diverged local branch is not the latest published source.
+If Git access fails, the branch/tree is unsuitable, or the revisions differ, report the
+blocker and do not start OCR from stale or unpublished source. Never stash, reset, discard
+changes, switch branches or delete private files to make the update succeed. Preserve
+ignored `.local/` configuration, checkpoints and originals.
+
+After a successful update, reread `AGENTS.md` and this skill from the updated checkout
+before following its run instructions. Apply this preflight to normal runs, explicit
+request recovery and retries that start a new OCR process. Keep the automation prompt
+and OS schedule unchanged: this is a skill preflight, not a guarantee that an independently
+started Windows task pulled before it began.
+
 ## Scheduled automation contract
 
 The Codex automation's entire prompt is exactly `/receipt-ocr-nightly`. Do not add setup,
@@ -75,9 +96,10 @@ When this skill is invoked by Codex on that host:
    private log, the OCR lock, and the authoritative nightly `last-run.json`.
 2. If the task is already running, observe that same process until it finishes. Never
    launch a direct competitor, replace its lock, or call a quiet wait an OCR failure.
-3. If today's scheduled attempt did not start, start the existing Windows task once and
-   observe it. If the task is absent or misconfigured, repair it to the reviewed contract
-   above before starting it; preserve any live OCR process.
+3. If today's scheduled attempt did not start, complete the update preflight above,
+   start the existing Windows task once and observe it. If the task is absent or
+   misconfigured, repair it to the reviewed contract above before starting it;
+   preserve any live OCR process.
 4. Require Task Scheduler result `0`, wrapper `phase: "finished"`, wrapper
    `outcome: "success"`, and wrapper exit code `0`, in addition to the nightly completion
    checks below. A chat/tool timeout is never evidence that the owned process stopped.
@@ -88,7 +110,8 @@ wrapper finishes. The wrapper, not the chat turn, owns and waits for the OCR chi
 
 ## Run
 
-1. Work from the receipt-scanner repository. Read `AGENTS.md` and
+1. Work from the receipt-scanner repository and complete the update preflight above
+   before starting OCR. Read `AGENTS.md` and
    [receipt-data-access](../receipt-data-access/SKILL.md) for authorized connection setup.
    Reuse `.local/receipt-ocr-host.json` when present; its worker profile identifies the
    existing client config and inference runtime. A legacy `.local/processing-host.json`
