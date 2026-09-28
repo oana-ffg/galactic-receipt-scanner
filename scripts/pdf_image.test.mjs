@@ -57,15 +57,15 @@ function images(pdf) {
 }
 
 for (const format of ["png", "jpeg"])
-  test(`${format} PDF embeds only the full-resolution crop and preserves original bytes`, async () => {
+  test(`${format} PDF embeds only the half-resolution crop and preserves original bytes`, async () => {
     const bytes = await source(format);
     const before = hash(bytes);
     const { pdf, layout } = await generate(bytes, `image/${format}`, crop);
     const embedded = images(pdf);
     assert.equal(embedded.length, 1);
     const image = embedded[0];
-    assert.equal(image.dict.get(PDFName.of("Width")).asNumber(), 80);
-    assert.equal(image.dict.get(PDFName.of("Height")).asNumber(), 180);
+    assert.equal(image.dict.get(PDFName.of("Width")).asNumber(), 40);
+    assert.equal(image.dict.get(PDFName.of("Height")).asNumber(), 90);
     assert.deepEqual(layout, { pixels: [width, height], crop, rotation: 90 });
     assert.deepEqual(pdf.getPage(0).getSize(), { width: 116, height: 216 });
     assert.equal(pdf.getPage(0).getRotation().angle, 90);
@@ -78,6 +78,7 @@ for (const format of ["png", "jpeg"])
       const actual = decodePDFRawStream(image).decode();
       const expected = await sharp(bytes)
         .extract({ left: 40, top: 30, width: 80, height: 180 })
+        .resize(40, 90, { fit: "fill", kernel: "lanczos3" })
         .removeAlpha()
         .raw()
         .toBuffer();
@@ -90,8 +91,8 @@ test("fractional crop bounds round outward while the reviewed layout stays uncha
   const bounds = [40.25, 30.75, 119.5, 209.25];
   const { pdf, layout } = await generate(bytes, "image/png", bounds);
   const [image] = images(pdf);
-  assert.equal(image.dict.get(PDFName.of("Width")).asNumber(), 80);
-  assert.equal(image.dict.get(PDFName.of("Height")).asNumber(), 180);
+  assert.equal(image.dict.get(PDFName.of("Width")).asNumber(), 40);
+  assert.equal(image.dict.get(PDFName.of("Height")).asNumber(), 90);
   assert.deepEqual(layout.crop, bounds);
   assert.deepEqual(pdf.getPage(0).getSize(), {
     width: 115.25,
@@ -99,10 +100,13 @@ test("fractional crop bounds round outward while the reviewed layout stays uncha
   });
 });
 
-test("uncropped JPEGs retain their original encoding without invoking a codec", async () => {
+test("uncropped JPEGs also use the half-resolution derivative", async () => {
   const bytes = await source("jpeg");
   const { pdf } = await generate(bytes, "image/jpeg", null);
-  assert.equal(hash(images(pdf)[0].contents), hash(bytes));
+  const [image] = images(pdf);
+  assert.equal(image.dict.get(PDFName.of("Width")).asNumber(), width / 2);
+  assert.equal(image.dict.get(PDFName.of("Height")).asNumber(), height / 2);
+  assert.notEqual(hash(image.contents), hash(bytes));
 });
 
 test("searchable crops keep the full-source OCR coordinate transform", async () => {

@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, PDFName, PDFRawStream } from "pdf-lib";
+import sharp from "sharp";
 
 test("PDF drafts preserve baselines and recent captures show both versions without writes", async ({
   page,
@@ -76,6 +77,7 @@ test("PDF drafts preserve baselines and recent captures show both versions witho
       source: canvas.toDataURL("image/jpeg", 0.98).split(",")[1],
       quality: next.quality,
       pdf: Array.from(new Uint8Array(await first.pdf.arrayBuffer())),
+      imagePixels: [output.width, output.height],
       redCount: red.length,
       slopeRange:
         (Math.max(...ys) - Math.min(...ys)) /
@@ -84,9 +86,28 @@ test("PDF drafts preserve baselines and recent captures show both versions witho
   }, worker);
   expect(fixture.redCount).toBeGreaterThan(1000);
   expect(fixture.slopeRange).toBeLessThan(0.02);
-  expect(
-    (await PDFDocument.load(new Uint8Array(fixture.pdf))).getPageCount(),
-  ).toBe(1);
+  const draft = await PDFDocument.load(new Uint8Array(fixture.pdf));
+  expect(draft.getPageCount()).toBe(1);
+  const images = draft.context
+    .enumerateIndirectObjects()
+    .map(([, object]) => object)
+    .filter(
+      (object): object is PDFRawStream =>
+        object instanceof PDFRawStream &&
+        object.dict.get(PDFName.of("Subtype")) === PDFName.of("Image"),
+    );
+  expect(images).toHaveLength(1);
+  const encoded = await sharp(images[0].contents).metadata();
+  expect([encoded.width, encoded.height]).toEqual(
+    fixture.imagePixels.map((n) => Math.round(n / 2)),
+  );
+  expect(encoded.chromaSubsampling).toBe("4:4:4");
+  expect(draft.getPage(0).getWidth()).toBeCloseTo(
+    (fixture.imagePixels[0] * 72) / 300,
+  );
+  expect(draft.getPage(0).getHeight()).toBeCloseTo(
+    (fixture.imagePixels[1] * 72) / 300,
+  );
   const bytes = Buffer.from(fixture.source, "base64");
   const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const capture = {

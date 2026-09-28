@@ -3,6 +3,7 @@ import { hasReceiptResolution } from "./capture-resolution";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import type CV from "@techstark/opencv-js";
 import { PDFDocument } from "pdf-lib";
+import { encodePdfJpeg, pdfImageSize } from "./pdf-image";
 import type { Quality, RemovalDiagnostics } from "./types";
 import { measurePrint } from "./print-quality";
 import { measureCapturedBlur } from "./blur-image";
@@ -614,10 +615,18 @@ async function process(
       quality: 0.95,
     });
     const pdf = await PDFDocument.create();
-    const embedded = await pdf.embedJpg(await image.arrayBuffer());
+    const [pdfWidth, pdfHeight] = pdfImageSize(frame.width, frame.height);
+    const pdfCanvas = new OffscreenCanvas(pdfWidth, pdfHeight);
+    const pdfContext = pdfCanvas.getContext("2d")!;
+    pdfContext.imageSmoothingEnabled = true;
+    pdfContext.imageSmoothingQuality = "high";
+    pdfContext.drawImage(frame, 0, 0, pdfWidth, pdfHeight);
+    const embedded = await pdf.embedJpg(
+      await encodePdfJpeg(pdfContext.getImageData(0, 0, pdfWidth, pdfHeight)),
+    );
     const page = pdf.addPage([
-      (embedded.width * 72) / 300,
-      (embedded.height * 72) / 300,
+      (frame.width * 72) / 300,
+      (frame.height * 72) / 300,
     ]);
     page.drawImage(embedded, {
       x: 0,

@@ -60,6 +60,7 @@ describe("saved detector outlines in document layouts", () => {
       undefined,
       undefined,
       true,
+      async () => image,
     );
     const loaded = await PDFDocument.load(await blind.save());
     expect(layout).toEqual({
@@ -126,6 +127,9 @@ it("accepts the full-source OCR canvas and rejects a crop-sized canvas", async (
       0,
       [0, 0, 1, 1],
       await artifact(100, 100),
+      undefined,
+      false,
+      async () => image,
     ),
   ).toEqual({ pixels: [1, 1], crop: [0, 0, 1, 1], rotation: 0 });
   await expect(
@@ -136,6 +140,9 @@ it("accepts the full-source OCR canvas and rejects a crop-sized canvas", async (
       0,
       [0, 0, 1, 1],
       await artifact(50, 100),
+      undefined,
+      false,
+      async () => image,
     ),
   ).rejects.toThrow("canvas");
   await expect(

@@ -3,6 +3,7 @@ import { build } from "esbuild";
 import { PDFDocument, PDFName, PDFRawStream } from "pdf-lib";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import sharp from "sharp";
+import { readFile } from "node:fs/promises";
 
 test("browser PDFs embed receipt pixels only and keep searchable text aligned", async ({
   page,
@@ -18,7 +19,30 @@ test("browser PDFs embed receipt pixels only and keep searchable text aligned", 
     format: "esm",
     platform: "browser",
     write: false,
+    plugins: [
+      {
+        name: "synthetic-mozjpeg-url",
+        setup(build) {
+          build.onResolve({ filter: /mozjpeg_enc\.wasm\?url$/ }, () => ({
+            path: "synthetic-mozjpeg",
+            namespace: "synthetic",
+          }));
+          build.onLoad({ filter: /.*/, namespace: "synthetic" }, () => ({
+            contents: 'export default "/synthetic-mozjpeg.wasm";',
+            loader: "js",
+          }));
+        },
+      },
+    ],
   });
+  await page.route("**/synthetic-mozjpeg.wasm", async (route) =>
+    route.fulfill({
+      body: await readFile(
+        "node_modules/@jsquash/jpeg/codec/enc/mozjpeg_enc.wasm",
+      ),
+      contentType: "application/wasm",
+    }),
+  );
   await page.route("**/synthetic-pdf-crop.js", (route) =>
     route.fulfill({
       body: bundle.outputFiles[0].text,
@@ -117,8 +141,13 @@ test("browser PDFs embed receipt pixels only and keep searchable text aligned", 
           object.dict.get(PDFName.of("Subtype")) === PDFName.of("Image"),
       );
     expect(images).toHaveLength(1);
-    expect(images[0].dict.get(PDFName.of("Width"))?.toString()).toBe("128");
-    expect(images[0].dict.get(PDFName.of("Height"))?.toString()).toBe("288");
+    expect(images[0].dict.get(PDFName.of("Width"))?.toString()).toBe("64");
+    expect(images[0].dict.get(PDFName.of("Height"))?.toString()).toBe("144");
+    if (fixture.type === "image/jpeg") {
+      expect(
+        (await sharp(images[0].contents).metadata()).chromaSubsampling,
+      ).toBe("4:4:4");
+    }
     expect(pdf.getPage(0).getRotation().angle).toBe(fixture.rotation);
     expect(pdf.getPage(0).getSize()).toEqual({ width: 164, height: 324 });
     const loading = getDocument({ data: bytes, useSystemFonts: true });
@@ -168,11 +197,12 @@ test("browser PDFs embed receipt pixels only and keep searchable text aligned", 
         .toBuffer({ resolveWithObject: true });
       const expected = await sharp(source)
         .extract({ left: 10, top: 20, width: 50, height: 80 })
+        .resize(25, 40)
         .removeAlpha()
         .raw()
         .toBuffer();
-      expect(info.width).toBe(50);
-      expect(info.height).toBe(80);
+      expect(info.width).toBe(25);
+      expect(info.height).toBe(40);
       const meanError =
         actual.reduce(
           (sum, value, index) => sum + Math.abs(value - expected[index]),

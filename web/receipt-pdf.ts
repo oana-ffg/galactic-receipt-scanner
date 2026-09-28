@@ -1,5 +1,9 @@
 import { detectedReceiptCrop } from "./receipt-crop.ts";
-import { cropPdfImage, type PdfImageCropper } from "./pdf-image.ts";
+import {
+  cropPdfImage,
+  pdfImageSize,
+  type PdfImageCropper,
+} from "./pdf-image.ts";
 import {
   PDFDocument,
   JpegEmbedder,
@@ -75,22 +79,15 @@ export async function addReceiptPage(
     throw Error(
       "Receipt is too long for a standard PDF page; prepare a reviewed split layout.",
     );
-  const fullSource =
-    imageCrop[0] === 0 &&
-    imageCrop[1] === 0 &&
-    imageCrop[2] === pixels[0] &&
-    imageCrop[3] === pixels[1];
-  const embeddedBytes = fullSource
-    ? imageBytes
-    : await cropImage(imageBytes, type, imageCrop);
+  const cropWidth = imageCrop[2] - imageCrop[0];
+  const cropHeight = imageCrop[3] - imageCrop[1];
+  const [embeddedWidth, embeddedHeight] = pdfImageSize(cropWidth, cropHeight);
+  const embeddedBytes = await cropImage(imageBytes, type, imageCrop);
   const image =
     type === "image/png"
       ? await pdf.embedPng(embeddedBytes)
       : await pdf.embedJpg(Uint8Array.from(embeddedBytes));
-  if (
-    image.width !== imageCrop[2] - imageCrop[0] ||
-    image.height !== imageCrop[3] - imageCrop[1]
-  )
+  if (image.width !== embeddedWidth || image.height !== embeddedHeight)
     throw Error(
       "PDF image crop dimensions differ from the requested source region.",
     );
@@ -104,8 +101,8 @@ export async function addReceiptPage(
   sheet.drawImage(image, {
     x: 18 - (left - imageCrop[0]) * scale,
     y: 18 - (imageCrop[3] - bottom) * scale,
-    width: image.width * scale,
-    height: image.height * scale,
+    width: cropWidth * scale,
+    height: cropHeight * scale,
   });
   const textPosition = {
     x: 18 - left * scale,

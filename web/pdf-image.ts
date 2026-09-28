@@ -1,5 +1,35 @@
-/** PDF copies retain source resolution; JPEG crops use high-quality re-encoding. */
+/** PDF derivatives use the approved half-resolution, color-preserving JPEG settings. */
 export const PDF_JPEG_QUALITY = 85;
+
+export function pdfImageSize(width: number, height: number): [number, number] {
+  return [
+    Math.max(1, Math.round(width / 2)),
+    Math.max(1, Math.round(height / 2)),
+  ];
+}
+
+let jpegEncoder:
+  Promise<typeof import("@jsquash/jpeg/encode.js").default> | undefined;
+function loadJpegEncoder() {
+  return (jpegEncoder ??= Promise.all([
+    import("@jsquash/jpeg/encode.js"),
+    import("@jsquash/jpeg/codec/enc/mozjpeg_enc.wasm?url"),
+  ]).then(async ([{ default: encode, init }, { default: wasmUrl }]) => {
+    await init({ locateFile: () => wasmUrl });
+    return encode;
+  }));
+}
+
+export async function encodePdfJpeg(pixels: ImageData): Promise<Uint8Array> {
+  const encode = await loadJpegEncoder();
+  return new Uint8Array(
+    await encode(pixels, {
+      quality: PDF_JPEG_QUALITY,
+      auto_subsample: false,
+      chroma_subsample: 1,
+    }),
+  );
+}
 
 export type PdfImageCropper = (
   bytes: Uint8Array,
@@ -74,21 +104,28 @@ export const cropPdfImage: PdfImageCropper = async (bytes, type, crop) => {
   );
   try {
     const canvas = document.createElement("canvas");
-    canvas.width = right - left;
-    canvas.height = bottom - top;
+    [canvas.width, canvas.height] = pdfImageSize(right - left, bottom - top);
     const context = canvas.getContext("2d");
     if (!context) throw Error("PDF image crop could not create a canvas.");
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     context.drawImage(
       bitmap,
       left,
       top,
-      canvas.width,
-      canvas.height,
+      right - left,
+      bottom - top,
       0,
       0,
       canvas.width,
       canvas.height,
     );
+    if (type === "image/jpeg") {
+      // Load only during downstream PDF creation, never in the capture path.
+      return encodePdfJpeg(
+        context.getImageData(0, 0, canvas.width, canvas.height),
+      );
+    }
     const result = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob(
         (blob) =>
