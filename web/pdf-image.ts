@@ -35,6 +35,7 @@ export type PdfImageCropper = (
   bytes: Uint8Array,
   type: string,
   crop: [number, number, number, number],
+  rectification?: ReceiptRectification | null,
 ) => Promise<Uint8Array>;
 
 /** Decode in encoded pixel coordinates, matching PDF/OCR rather than EXIF orientation.
@@ -96,7 +97,12 @@ export function pdfPixelBytes(bytes: Uint8Array, type: string): Uint8Array {
 }
 
 /** Browser codec. Only PDF derivatives pass through this canvas. */
-export const cropPdfImage: PdfImageCropper = async (bytes, type, crop) => {
+export const cropPdfImage: PdfImageCropper = async (
+  bytes,
+  type,
+  crop,
+  rectification,
+) => {
   const [left, top, right, bottom] = crop;
   const bitmap = await createImageBitmap(
     new Blob([pdfPixelBytes(bytes, type) as Uint8Array<ArrayBuffer>], { type }),
@@ -104,22 +110,41 @@ export const cropPdfImage: PdfImageCropper = async (bytes, type, crop) => {
   );
   try {
     const canvas = document.createElement("canvas");
-    [canvas.width, canvas.height] = pdfImageSize(right - left, bottom - top);
+    if (rectification) {
+      const outputPixels = pdfImageSize(
+        rectification.outputPixels[0],
+        rectification.outputPixels[1],
+      );
+      const rectified = await rectifyReceiptCanvas(
+        bitmap,
+        rectification,
+        outputPixels,
+      );
+      [canvas.width, canvas.height] = outputPixels;
+      const context = canvas.getContext("2d");
+      if (!context) throw Error("PDF image crop could not create a canvas.");
+      context.drawImage(rectified as unknown as CanvasImageSource, 0, 0);
+      rectified.width = rectified.height = 0;
+    } else {
+      [canvas.width, canvas.height] = pdfImageSize(right - left, bottom - top);
+    }
     const context = canvas.getContext("2d");
     if (!context) throw Error("PDF image crop could not create a canvas.");
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
-    context.drawImage(
-      bitmap,
-      left,
-      top,
-      right - left,
-      bottom - top,
-      0,
-      0,
-      canvas.width,
-      canvas.height,
-    );
+    if (!rectification) {
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.drawImage(
+        bitmap,
+        left,
+        top,
+        right - left,
+        bottom - top,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+    }
     if (type === "image/jpeg") {
       // Load only during downstream PDF creation, never in the capture path.
       return encodePdfJpeg(
@@ -141,3 +166,5 @@ export const cropPdfImage: PdfImageCropper = async (bytes, type, crop) => {
     bitmap.close();
   }
 };
+import { rectifyReceiptCanvas } from "./receipt-rectification.ts";
+import type { ReceiptRectification } from "./receipt-rectification.ts";

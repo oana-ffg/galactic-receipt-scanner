@@ -140,6 +140,16 @@ class VerificationTests(unittest.TestCase):
         self.save('claim-request.json', {'stage': 'large'})
         with self.assertRaisesRegex(ClientError, 'targeted claim'): self.verify()
 
+    def test_idempotent_targeted_claim_requires_exact_returned_token(self):
+        request = dict(stage='large', document_id='doc', revision=3, claim_token=self.claim['token'])
+        self.save('claim-request.json', request)
+        self.assertTrue(self.verify()['verified'])
+        for changed in ({'claim_token': 'different-token'}, {'document_id': 'other'},
+                        {'revision': 2}, {'stage': 'small'}, {'unexpected': True}):
+            with self.subTest(changed=changed):
+                self.save('claim-request.json', {**request, **changed})
+                with self.assertRaisesRegex(ClientError, 'targeted claim'): self.verify()
+
     def test_unsupported_confidence_increase_and_wrong_submit_revision_fail(self):
         self.extraction['certainty'] = 'low'
         self.save('astra-reconciled-extraction.json', self.extraction)

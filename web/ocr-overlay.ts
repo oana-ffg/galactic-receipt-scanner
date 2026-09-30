@@ -21,7 +21,10 @@ export function positionedOcr(value: unknown): PositionedOcr | null {
     rotation = source?.rotation ?? 0,
     lines = data?.lines;
   if (
-    source?.coordinates !== "original image pixels; top-left origin" ||
+    ![
+      "original image pixels; top-left origin",
+      "rectified receipt pixels; top-left origin",
+    ].includes(String(source?.coordinates)) ||
     !Array.isArray(pixels) ||
     pixels.length !== 2 ||
     !pixels.every((n) => finite(n) && n > 0) ||

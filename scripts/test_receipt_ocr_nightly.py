@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 
 from receipt_api import ClientError, OCRRequired, ScannerClient, ScannerConnectionError, ScannerHTTPError
 import receipt_ocr_nightly as nightly
-from receipt_ocr_nightly import CachedBackend, baseline_scan_fingerprints, current_page_layouts, day_window, drain, fingerprint, inventory, needs_layout_recheck, needs_ocr, read_requirement, prepare_requirement, scan_window
+from receipt_ocr_nightly import CachedBackend, current_page_layouts, day_window, drain, fingerprint, inventory, needs_layout_recheck, needs_ocr, read_requirement, prepare_requirement, scan_window
 from receipt_ppocr_setup import install_models, MODELS, check_node
 
 
@@ -143,22 +143,22 @@ class NightlyTests(unittest.TestCase):
             prepare_requirement(self.client, value, self.root)
         self.client.prepare.assert_not_called()
 
-    def test_legacy_ocr_gets_scan_baseline_without_requeue_until_outline_changes(self):
+    def test_existing_ocr_without_geometry_fingerprint_is_rechecked(self):
         saved = {**capture('one'), 'ocr_status': 'unverified'}
         state = dict(completed={})
-        self.assertTrue(baseline_scan_fingerprints([saved], {}, state))
+        self.assertTrue(needs_layout_recheck(saved, {}, state))
+        state['completed']['one'] = {'scan_fingerprint': fingerprint(saved)}
         self.assertFalse(needs_layout_recheck(saved, {}, state))
-        self.assertFalse(baseline_scan_fingerprints([saved], {}, state))
         changed = {**saved, 'manual_outline': dict(source_sha256=saved['sha256'],
                      quad=[[0, 0], [1, 0], [1, 1], [0, 1]])}
         self.assertTrue(needs_layout_recheck(changed, {}, state))
 
-    def test_main_does_not_requeue_existing_ocr_without_a_scan_change(self):
+    def test_main_requeues_existing_ocr_without_a_geometry_fingerprint(self):
         completed = {**capture('completed'), 'ocr_status': 'unverified'}
         missing = capture('missing')
         self.client.origin = 'https://synthetic.example'
         self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}
-        summary = dict(complete=True, selected=1, verified=1, reused=0, retired=0,
+        summary = dict(complete=True, selected=2, verified=2, reused=0, retired=0,
                        failures={}, remaining=0)
 
         with patch.object(nightly, 'REPO', self.root), patch.object(nightly.os, 'chdir'), \
@@ -175,12 +175,12 @@ class NightlyTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(nightly.main(), 0)
 
-        self.assertEqual(drained.call_args.args[1], [missing])
+        self.assertEqual(drained.call_args.args[1], [completed, missing])
         saved = json.loads(next((self.root / '.local' / 'receipt-ocr-nightly').glob('*/last-run.json')).read_text())
         self.assertEqual(saved['eligible'], 2)
         self.assertEqual(saved['ocr_available'], 1)
         self.assertEqual(saved['ocr_missing'], 1)
-        self.assertEqual(saved['layout_rechecks'], 0)
+        self.assertEqual(saved['layout_rechecks'], 1)
         self.assertTrue(saved['jev']['complete'])
         jev.assert_called_once_with(self.client)
 
@@ -197,7 +197,7 @@ class NightlyTests(unittest.TestCase):
         self.client.get.return_value = {'layouts': [row]}
         self.assertEqual(current_page_layouts(self.client), {capture_id: row})
 
-    def test_main_does_not_treat_a_legacy_document_crop_as_new_ocr_work(self):
+    def test_main_rechecks_legacy_ocr_without_a_versioned_scan_fingerprint(self):
         scan = {**capture('completed'), 'ocr_status': 'unverified'}
         self.client.origin = self.state['origin']
         self.client.get.return_value = {'capabilities': ['save_ocr_artifacts', 'jev_classification']}
@@ -229,8 +229,9 @@ class NightlyTests(unittest.TestCase):
                 patch.object(nightly, 'finish_jev', side_effect=finish), \
                 patch('sys.argv', ['receipt_ocr_nightly.py']), redirect_stdout(io.StringIO()):
             self.assertEqual(nightly.main(), 0)
-        self.assertEqual(drained.call_args.args[1], [])
+        self.assertEqual(drained.call_args.args[1], [scan])
         saved = json.loads((root / 'last-run.json').read_text())
+        self.assertEqual(saved['layout_rechecks'], 1)
         self.assertNotIn('layout_changed', saved)
 
     def test_incomplete_jev_makes_an_ocr_complete_run_fail_for_retry(self):
@@ -359,7 +360,7 @@ class NightlyTests(unittest.TestCase):
     def test_saved_rotation_is_used_and_a_scan_outline_change_requeues_existing_ocr(self):
         scan = {**capture(), 'ocr_status': 'unverified', 'artifacts': [dict(kind='ocr', sha256='b' * 64)]}
         first = dict(capture_id='one', source_sha256=scan['sha256'], rotation=90)
-        self.assertFalse(needs_layout_recheck(scan, {'one': first}, self.state))
+        self.assertTrue(needs_layout_recheck(scan, {'one': first}, self.state))
         self.client.get.return_value = scan
         self.run_drain([scan], layouts={'one': first})
         self.client.prepare.assert_called_once_with('one', self.root / 'artifacts',
@@ -373,7 +374,7 @@ class NightlyTests(unittest.TestCase):
         self.client.get.return_value = scan
         self.client.saved_ocr.side_effect = None
         self.client.saved_ocr.return_value = result()
-        self.assertFalse(needs_layout_recheck(scan, {}, self.state))
+        self.assertTrue(needs_layout_recheck(scan, {}, self.state))
         self.assertEqual(self.run_drain([scan])['verified'], 1)
         self.client.prepare.assert_not_called()
 
@@ -427,9 +428,12 @@ class NightlyTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'failures.json').read_text()), {})
 
     def test_pending_ocr_is_reused_after_restart_and_corruption_is_detected(self):
-        source = dict(capture_id='one', sha256='a' * 64, crop=[0, 0, 100, 200], rotation=0)
+        source = dict(capture_id='one', sha256='a' * 64, sourcePixels=[100, 200],
+                      crop=[0, 0, 100, 200], geometry=None, rotation=0)
         value = dict(text='Synthetic', source=dict(captureId='one', sha256='a' * 64,
-                     pixels=[100, 200], region=dict(left=0, top=0, width=100, height=200), rotation=0),
+                     pixels=[100, 200], sourcePixels=[100, 200], geometryVersion=1, rectification=None,
+                     sourceCrop=[0, 0, 100, 200],
+                     region=dict(left=0, top=0, width=100, height=200), rotation=0),
                      provenance=dict(engine='PP-OCRv6'), text_only_pdf_layers=[dict(base64='eA==', sha256='f' * 64)])
         manifest = self.root / 'source.json'
         manifest.write_text(json.dumps(source))

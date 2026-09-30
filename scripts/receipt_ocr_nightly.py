@@ -28,6 +28,7 @@ def save_json(path, value):
 def fingerprint(capture, layout=None):
     value = {key: capture.get(key) for key in ('id', 'sha256', 'manual_outline')}
     value['quad'] = ((capture.get('metadata') or {}).get('quality') or {}).get('quad')
+    value['ocr_geometry_version'] = 1
     if layout and layout['rotation'] != 0:
         value['page_rotation'] = {key: layout[key] for key in ('source_sha256', 'rotation')}
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -73,24 +74,9 @@ def page_layout(capture, layouts):
 def needs_layout_recheck(capture, layouts, state):
     layout = page_layout(capture, layouts)
     prior = state['completed'].get(capture['id'])
-    return bool(prior and prior.get('scan_fingerprint') and
-                prior['scan_fingerprint'] != fingerprint(capture, layout))
-
-
-def baseline_scan_fingerprints(captures, layouts, state):
-    """Start tracking scan outline changes without re-OCRing legacy artifacts."""
-    changed = False
-    for capture in captures:
-        if needs_ocr(capture):
-            continue
-        cid = capture['id']
-        prior = state['completed'].get(cid) or {}
-        if prior.get('scan_fingerprint'):
-            continue
-        state['completed'][cid] = {**prior, 'scan_fingerprint': fingerprint(capture, page_layout(capture, layouts))}
-        state['completed'][cid].pop('fingerprint', None)
-        changed = True
-    return changed
+    if not prior or not prior.get('scan_fingerprint'):
+        return capture.get('ocr_status') == 'unverified'
+    return prior['scan_fingerprint'] != fingerprint(capture, layout)
 
 
 def utc(value):
@@ -152,7 +138,11 @@ class CachedBackend:
 
     def run(self, manifest, output):
         source = json.loads(Path(manifest).read_text(encoding='utf-8'))
-        key = {k: source.get(k) for k in ('capture_id', 'sha256', 'crop', 'rotation')}
+        source_pixels = source.get('sourcePixels')
+        if (not isinstance(source_pixels, list) or len(source_pixels) != 2 or
+                any(type(value) is not int or value <= 0 for value in source_pixels)):
+            raise ClientError('Pending OCR source dimensions are missing or invalid.')
+        key = {k: source.get(k) for k in ('capture_id', 'sha256', 'sourcePixels', 'crop', 'geometry', 'rotation')}
         digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
         pointer = self.directory / (digest + '.json')
         if pointer.exists():
@@ -162,7 +152,10 @@ class CachedBackend:
             if hashlib.sha256(data).hexdigest() != saved['sha256']:
                 raise ClientError('Pending OCR checksum mismatch; preserve the cache and investigate.')
             if not matches_prepared_ocr(json.loads(data), source['capture_id'], source['sha256'],
-                                        source['crop'], self, source['rotation']):
+                                        {'pixels': source_pixels,
+                                         'crop': source['crop'],
+                                         'rectification': source.get('geometry')},
+                                        self, source['rotation']):
                 raise ClientError('Pending OCR does not match the current source layout.')
             write_new_file(Path(output), data)
             return
@@ -367,8 +360,6 @@ def main():
         if state['origin'] != client.origin:
             raise ClientError('OCR progress belongs to a different Site.')
         layouts = current_page_layouts(client)
-        if baseline_scan_fingerprints(captures, layouts, state):
-            save_json(state_path, state)
         candidates = [capture for capture in captures if needs_ocr(capture) or needs_layout_recheck(capture, layouts, state)]
         summary['layout_rechecks'] = len(candidates) - len(awaiting_ocr)
         selected = candidates[:args.limit] if args.limit else candidates

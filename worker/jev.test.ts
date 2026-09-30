@@ -19,6 +19,8 @@ import {
   ocrArtifactMatchesPage,
   ocrTextArtifactHasValidGeometry,
 } from "../web/ocr-data";
+import { receiptRectification } from "../web/receipt-rectification";
+import { detectedReceiptCrop } from "../web/receipt-crop";
 
 let mf: Awaited<ReturnType<typeof runtime>>;
 
@@ -339,6 +341,10 @@ it("accepts OCR covering the scan crop and rejects a smaller region", () => {
       captureId: "capture",
       sha256: "a".repeat(64),
       pixels: [1000, 1600],
+      sourcePixels: [1000, 1600],
+      sourceCrop: [0, 0, 1000, 1600],
+      geometryVersion: 1,
+      rectification: null,
       rotation: 0,
       region: { left: 0, top: 0, width: 1000, height: 1600 },
     },
@@ -352,9 +358,29 @@ it("accepts OCR covering the scan crop and rejects a smaller region", () => {
     [0.9, 0.9],
     [0.1, 0.9],
   ];
-  artifact.source.region = { left: 0, top: 0, width: 1000, height: 1600 };
+  const rectification = receiptRectification(
+    [1000, 1600],
+    capture.metadata.quality.quad,
+  )!;
+  artifact.source.pixels = rectification.outputPixels;
+  artifact.source.sourceCrop = detectedReceiptCrop(
+    [1000, 1600],
+    capture.metadata.quality.quad,
+  );
+  artifact.source.rectification = rectification;
+  artifact.source.region = {
+    left: 0,
+    top: 0,
+    width: rectification.outputPixels[0],
+    height: rectification.outputPixels[1],
+  };
   expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(true);
-  artifact.source.region = { left: 110, top: 0, width: 890, height: 1600 };
+  artifact.source.region = {
+    left: 10,
+    top: 0,
+    width: rectification.outputPixels[0] - 10,
+    height: rectification.outputPixels[1],
+  };
   expect(ocrArtifactMatchesPage(artifact, fullPage, capture)).toBe(false);
 });
 

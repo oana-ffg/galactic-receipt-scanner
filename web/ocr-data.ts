@@ -1,4 +1,5 @@
-import { detectedReceiptCrop, scanCrop } from "./receipt-crop.ts";
+import { scanCrop } from "./receipt-crop.ts";
+import { receiptRectification } from "./receipt-rectification.ts";
 import { PSM, type Worker, type Page, type ImageLike } from "tesseract.js";
 import type { DocumentPage } from "./documents";
 import type { Capture } from "./types";
@@ -22,41 +23,25 @@ function linesOf(data: Page) {
 export async function recognizeReceipt(
   worker: Worker,
   image: ImageLike,
-  source: { captureId: string; sha256: string; pixels: number[] },
+  source: {
+    captureId: string;
+    sha256: string;
+    pixels: number[];
+    sourcePixels: [number, number];
+    sourceCrop: [number, number, number, number];
+    geometryVersion?: number;
+    rectification?:
+      import("./receipt-rectification.ts").ReceiptRectification | null;
+  },
   models: { dan: string; eng: string },
-  quad?: number[][] | null,
-  reviewedCrop?: [number, number, number, number] | null,
 ) {
-  const crop =
-    reviewedCrop === undefined
-      ? detectedReceiptCrop(source.pixels, quad)
-      : reviewedCrop;
-  if (
-    crop &&
-    (!crop.every(Number.isFinite) ||
-      crop[0] < 0 ||
-      crop[1] < 0 ||
-      crop[2] > source.pixels[0] ||
-      crop[3] > source.pixels[1] ||
-      crop[2] <= crop[0] ||
-      crop[3] <= crop[1])
-  )
-    throw Error("Invalid OCR crop.");
-  const rectangle = crop
-    ? {
-        left: crop[0],
-        top: crop[1],
-        width: crop[2] - crop[0],
-        height: crop[3] - crop[1],
-      }
-    : undefined;
   await worker.setParameters({
     tessedit_pageseg_mode: PSM.AUTO,
     preserve_interword_spaces: "1",
   });
   const { data: layout } = await worker.recognize(
     image,
-    { rectangle, pdfTextOnly: true },
+    { pdfTextOnly: true },
     { text: true, blocks: true, pdf: true },
   );
   await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK });
@@ -64,7 +49,7 @@ export async function recognizeReceipt(
   try {
     ({ data } = await worker.recognize(
       image,
-      { rectangle, pdfTextOnly: true },
+      { pdfTextOnly: true },
       { text: true, blocks: true, pdf: true },
     ));
   } finally {
@@ -109,8 +94,8 @@ export async function recognizeReceipt(
     language: ["da", "en"],
     source: {
       ...source,
-      coordinates: "original image pixels; top-left origin",
-      region: rectangle ?? {
+      coordinates: "rectified receipt pixels; top-left origin",
+      region: {
         left: 0,
         top: 0,
         width: source.pixels[0],
@@ -148,6 +133,10 @@ export function ocrArtifactMatchesPage(
 ) {
   const source = value.source as OcrArtifact["source"] & {
     rotation?: number;
+    geometryVersion?: number;
+    sourcePixels?: [number, number];
+    rectification?:
+      import("./receipt-rectification.ts").ReceiptRectification | null;
     region?: { left: number; top: number; width: number; height: number };
   };
   if (!source || (source.rotation ?? 0) !== page.rotation) return false;
@@ -155,12 +144,34 @@ export function ocrArtifactMatchesPage(
   if (!region || !ocrTextArtifactHasValidGeometry(value, page)) return false;
   if (capture.sha256 !== page.sha256 || capture.id !== page.captureId)
     return false;
+  const originalPixels = capture.metadata.sourcePixels as
+    [number, number] | undefined;
+  if (!originalPixels) return false;
+  const quad = capture.manual_outline?.quad ?? capture.metadata.quality?.quad;
+  const rectification = receiptRectification(originalPixels, quad);
+  const crop = scanCrop(capture, originalPixels);
+  const expectedPixels = rectification?.outputPixels ?? [
+    crop[2] - crop[0],
+    crop[3] - crop[1],
+  ];
+  const expectedCrop = scanCrop(capture, originalPixels);
   if (
-    capture.metadata.sourcePixels?.[0] !== source.pixels[0] ||
-    capture.metadata.sourcePixels?.[1] !== source.pixels[1]
+    source.geometryVersion !== 1 ||
+    source.sourcePixels?.[0] !== originalPixels[0] ||
+    source.sourcePixels[1] !== originalPixels[1] ||
+    source.sourceCrop?.some((value, index) => value !== expectedCrop[index]) ||
+    source.sourceCrop?.length !== 4 ||
+    source.pixels[0] !== expectedPixels[0] ||
+    source.pixels[1] !== expectedPixels[1] ||
+    JSON.stringify(source.rectification ?? null) !==
+      JSON.stringify(rectification) ||
+    region.left !== 0 ||
+    region.top !== 0 ||
+    region.width !== expectedPixels[0] ||
+    region.height !== expectedPixels[1]
   )
     return false;
-  const expected = scanCrop(capture, source.pixels);
+  const expected: [number, number, number, number] = [0, 0, ...expectedPixels];
   return (
     region.left <= expected[0] &&
     region.top <= expected[1] &&
@@ -176,6 +187,9 @@ export function ocrTextArtifactHasValidGeometry(
 ) {
   const source = value.source as OcrArtifact["source"] & {
     rotation?: number;
+    geometryVersion?: number;
+    rectification?:
+      import("./receipt-rectification.ts").ReceiptRectification | null;
     region?: { left: number; top: number; width: number; height: number };
   };
   if (!source || (source.rotation ?? 0) !== page.rotation) return false;

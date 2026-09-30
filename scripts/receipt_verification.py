@@ -65,7 +65,11 @@ def verify(client, work, expected_id, expected_revision):
     document_id = claim['document']['id']
     require(document_id == expected_id and claim['document']['revision'] == expected_revision,
             'Worker reviewed a different target than the coordinator assigned.')
-    require(load('claim-request.json') == dict(stage='large', document_id=expected_id, revision=expected_revision),
+    claim_request = load('claim-request.json')
+    expected_request = dict(stage='large', document_id=expected_id, revision=expected_revision)
+    if 'claim_token' in claim_request:
+        expected_request['claim_token'] = claim['token']
+    require(claim_request == expected_request,
             'Expected a targeted claim for the assigned document and revision.')
     draft = load('draft-request.json')
     request = load('submit-request.json')

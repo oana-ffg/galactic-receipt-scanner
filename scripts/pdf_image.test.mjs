@@ -11,6 +11,10 @@ import {
 import { addReceiptPage } from "../web/receipt-pdf.ts";
 import { cropPdfImage } from "./pdf_image.mjs";
 import { detectedReceiptCrop } from "../web/receipt-crop.ts";
+import {
+  RECEIPT_GEOMETRY_VERSION,
+  receiptRectification,
+} from "../web/receipt-rectification.ts";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -160,23 +164,21 @@ test("a codec returning the uncropped image fails instead of embedding the desk"
   );
 });
 
-test("tilted outline rotates image and OCR together and retains reviewed page rotation", async () => {
+test("perspective outline rectifies image and OCR together and retains reviewed page rotation", async () => {
   const bytes = await source("png");
-  const angle = 0.2;
   const quad = [
-    [-25, -65],
-    [25, -65],
-    [25, 65],
-    [-25, 65],
-  ].map(([x, y]) => [
-    (80 + Math.cos(angle) * x - Math.sin(angle) * y) / width,
-    (120 + Math.sin(angle) * x + Math.cos(angle) * y) / height,
-  ]);
+    [0.28, 0.12],
+    [0.73, 0.16],
+    [0.68, 0.86],
+    [0.32, 0.82],
+  ];
   const bounds = detectedReceiptCrop([width, height], quad);
+  const rectification = receiptRectification([width, height], quad);
+  assert.ok(rectification);
   const text = await PDFDocument.create();
   text
-    .addPage([width, height])
-    .drawText("SYNTHETIC", { x: 60, y: 130, size: 8 });
+    .addPage(rectification.outputPixels)
+    .drawText("SYNTHETIC", { x: 10, y: 20, size: 8 });
   const textBytes = await text.save();
   const originalHash = hash(bytes);
   const pdf = await PDFDocument.create();
@@ -187,7 +189,13 @@ test("tilted outline rotates image and OCR together and retains reviewed page ro
     270,
     bounds,
     {
-      source: { pixels: [width, height] },
+      source: {
+        pixels: rectification.outputPixels,
+        sourcePixels: [width, height],
+        sourceCrop: bounds,
+        geometryVersion: RECEIPT_GEOMETRY_VERSION,
+        rectification,
+      },
       text_only_pdf_layers: [
         {
           base64: Buffer.from(textBytes).toString("base64"),
@@ -201,8 +209,8 @@ test("tilted outline rotates image and OCR together and retains reviewed page ro
   );
   const page = (await PDFDocument.load(await pdf.save())).getPage(0);
   assert.equal(page.getRotation().angle, 270);
-  assert.ok(Math.abs(page.getWidth() - 89.2) < 0.001);
-  assert.ok(Math.abs(page.getHeight() - 169.2) < 0.001);
+  assert.equal(page.getWidth(), rectification.outputPixels[0] + 36);
+  assert.equal(page.getHeight(), rectification.outputPixels[1] + 36);
   const operators = page.node
     .Contents()
     .asArray()
@@ -212,16 +220,11 @@ test("tilted outline rotates image and OCR together and retains reviewed page ro
       ).toString(),
     )
     .join("");
-  const transform = operators.indexOf("0.9800665778412416 0.198669330795061");
-  assert.ok(transform >= 0, "expected straightening transform");
-  assert.ok(
-    transform < operators.indexOf(" Do"),
-    "the transform must precede both image and OCR drawing",
-  );
+  assert.match(operators, /1 0 0 1 18 18 cm/);
   assert.match(
     operators,
-    /1 0 0 1 0 0 cm\n\/EmbeddedPdfPage/,
-    "saved OCR uses the unchanged full-source canvas",
+    /1 0 0 1 18 18 cm[\s\S]*?\/EmbeddedPdfPage/,
+    "saved OCR uses the rectified crop canvas",
   );
   assert.equal(hash(bytes), originalHash);
   const loading = getDocument({

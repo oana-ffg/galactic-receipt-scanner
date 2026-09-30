@@ -7,8 +7,7 @@ const localPython = resolve(
   ".local",
   "receipt-ppocr-runtime",
   "cpu-venv",
-  "Scripts",
-  "python.exe",
+  windows ? "Scripts/python.exe" : "bin/python",
 );
 const candidates = windows
   ? [
@@ -18,6 +17,7 @@ const candidates = windows
       ["python3", []],
     ]
   : [
+      ...(existsSync(localPython) ? [[localPython, []]] : []),
       ["python3", []],
       ["python", []],
     ];

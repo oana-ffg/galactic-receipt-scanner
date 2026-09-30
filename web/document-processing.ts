@@ -12,6 +12,7 @@ import type {
 } from "./documents";
 import type { Capture } from "./types";
 import { scanCrop } from "./receipt-crop";
+import { receiptRectification } from "./receipt-rectification";
 
 export class OcrPendingError extends Error {}
 
@@ -73,19 +74,35 @@ export async function generateDocumentPdf(
     if (capture.sha256 !== page.sha256)
       throw Error("Source hash changed; inspect the original.");
     const bitmap = await createImageBitmap(blob);
-    const pixels = [bitmap.width, bitmap.height];
+    const pixels: [number, number] = [bitmap.width, bitmap.height];
     bitmap.close();
     const crop = scanCrop(capture, pixels);
+    const quad = capture.manual_outline?.quad ?? capture.metadata.quality?.quad;
+    const rectification = receiptRectification(pixels, quad);
+    const outputPixels = rectification?.outputPixels ?? [
+      crop[2] - crop[0],
+      crop[3] - crop[1],
+    ];
     const matchesRegion = (value: PdfOcr) => {
       const region = value.source?.region;
       return (
-        value.source?.pixels?.[0] === pixels[0] &&
-        value.source.pixels[1] === pixels[1] &&
+        value.source?.geometryVersion === 1 &&
+        value.source.sourcePixels?.[0] === pixels[0] &&
+        value.source.sourcePixels[1] === pixels[1] &&
+        JSON.stringify(value.source.rectification ?? null) ===
+          JSON.stringify(rectification) &&
+        value.source?.pixels?.[0] === outputPixels[0] &&
+        value.source.pixels[1] === outputPixels[1] &&
+        Array.isArray(value.source.sourceCrop) &&
+        value.source.sourceCrop.length === 4 &&
+        value.source.sourceCrop.every(
+          (coordinate, index) => coordinate === crop[index],
+        ) &&
         region &&
-        region.left <= crop[0] &&
-        region.top <= crop[1] &&
-        region.left + region.width >= crop[2] &&
-        region.top + region.height >= crop[3]
+        region.left === 0 &&
+        region.top === 0 &&
+        region.width === outputPixels[0] &&
+        region.height === outputPixels[1]
       );
     };
     let ocr: PdfOcr | null = null;

@@ -5,6 +5,7 @@ import { messageOf } from "./errors";
 import type { DocumentView } from "./documents";
 import { ocrConfidence, ocrTranscript } from "./ocr-confidence";
 import { scanCrop } from "./receipt-crop";
+import { receiptRectification } from "./receipt-rectification";
 import type { Capture } from "./types";
 
 export interface ReviewOcr {
@@ -75,13 +76,40 @@ export async function readReviewOcr(doc: DocumentView, signal?: AbortSignal) {
             `Saved OCR on page ${index + 1} has no engine or transcript.`,
           );
         const region = value.source.region;
-        const crop = scanCrop(detail, value.source.pixels);
+        const pixels = detail.metadata.sourcePixels as
+          [number, number] | undefined;
+        const quad =
+          detail.manual_outline?.quad ?? detail.metadata.quality?.quad;
+        const rectification = pixels
+          ? receiptRectification(pixels, quad)
+          : null;
+        const sourceCrop = pixels ? scanCrop(detail, pixels) : null;
+        const expectedPixels =
+          rectification?.outputPixels ??
+          (sourceCrop
+            ? [sourceCrop[2] - sourceCrop[0], sourceCrop[3] - sourceCrop[1]]
+            : undefined);
         const sameRegion = Boolean(
-          region &&
-          region.left <= crop[0] &&
-          region.top <= crop[1] &&
-          region.left + region.width >= crop[2] &&
-          region.top + region.height >= crop[3] &&
+          value.source.geometryVersion === 1 &&
+          Array.isArray(value.source.sourcePixels) &&
+          value.source.sourcePixels.length === 2 &&
+          value.source.sourcePixels[0] === pixels?.[0] &&
+          value.source.sourcePixels[1] === pixels?.[1] &&
+          Array.isArray(value.source.sourceCrop) &&
+          value.source.sourceCrop.length === 4 &&
+          value.source.sourceCrop.every(
+            (coordinate: number, index: number) =>
+              coordinate === sourceCrop?.[index],
+          ) &&
+          JSON.stringify(value.source.rectification ?? null) ===
+            JSON.stringify(rectification) &&
+          expectedPixels &&
+          value.source.pixels[0] === expectedPixels[0] &&
+          value.source.pixels[1] === expectedPixels[1] &&
+          region?.left === 0 &&
+          region?.top === 0 &&
+          region?.width === expectedPixels[0] &&
+          region?.height === expectedPixels[1] &&
           (value.source.rotation ?? 0) === page.rotation,
         );
         // Prefer OCR covering the scan crop; within either class newest wins.

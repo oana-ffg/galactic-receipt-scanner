@@ -3,6 +3,10 @@ import { ocrOverlay, type OcrBox, type PositionedOcr } from "./ocr-overlay";
 import type { ReviewOcr, ReviewOcrSource } from "./review-ocr";
 import type { Capture } from "./types";
 import { scanCrop } from "./receipt-crop";
+import {
+  receiptRectification,
+  rectifyReceiptCanvas,
+} from "./receipt-rectification";
 import { messageOf } from "./errors";
 import { formatOcrConfidence } from "./ocr-confidence";
 
@@ -247,7 +251,7 @@ export function documentPreview(
       renderedOverlay = undefined;
       status.textContent = `Loading scan ${pageIndex + 1} of ${doc.pages.length}…`;
       image = new Image();
-      image.onload = () => {
+      image.onload = async () => {
         if (current !== generation || !image) return;
         try {
           const width = image.naturalWidth,
@@ -255,6 +259,11 @@ export function documentPreview(
           if (!capture) throw Error("Original capture metadata is missing.");
           const crop =
             source.value === "crop" ? scanCrop(capture, [width, height]) : null;
+          const quad =
+            capture.manual_outline?.quad ?? capture.metadata.quality?.quad;
+          const rectification = crop
+            ? receiptRectification([width, height], quad)
+            : null;
           const [left, top, right, bottom] = crop ?? [0, 0, width, height];
           if (
             left < 0 ||
@@ -267,23 +276,49 @@ export function documentPreview(
             throw Error(
               "Scan crop is outside the original. Choose Full original.",
             );
-          const w = right - left,
-            h = bottom - top,
+          const input = document.createElement("canvas");
+          input.width = width;
+          input.height = height;
+          input.getContext("2d")!.drawImage(image, 0, 0);
+          const rectified = rectification
+            ? await rectifyReceiptCanvas(input, rectification)
+            : null;
+          input.width = input.height = 0;
+          if (current !== generation || !image) {
+            if (rectified) rectified.width = rectified.height = 0;
+            return;
+          }
+          const sourcePixels = rectification
+            ? rectification.outputPixels
+            : [right - left, bottom - top];
+          const w = sourcePixels[0],
+            h = sourcePixels[1],
             rotated = page.rotation === 90 || page.rotation === 270;
           canvas.width = rotated ? h : w;
           canvas.height = rotated ? w : h;
           const ctx = canvas.getContext("2d")!;
           ctx.translate(canvas.width / 2, canvas.height / 2);
           ctx.rotate((page.rotation * Math.PI) / 180);
-          ctx.drawImage(image, left, top, w, h, -w / 2, -h / 2, w, h);
+          ctx.drawImage(
+            (rectified ?? image) as CanvasImageSource,
+            rectification ? 0 : left,
+            rectification ? 0 : top,
+            w,
+            h,
+            -w / 2,
+            -h / 2,
+            w,
+            h,
+          );
+          if (rectified) rectified.width = rectified.height = 0;
           canvas.setAttribute(
             "aria-label",
             `${crop ? "Cropped scan" : "Original scan"} ${pageIndex + 1} of ${doc.pages.length}`,
           );
           canvas.hidden = false;
           displayed = {
-            crop: [left, top, right, bottom],
-            pixels: [width, height],
+            crop: crop ? [0, 0, w, h] : [0, 0, width, height],
+            pixels: crop ? [w, h] : [width, height],
           };
           updateOverlay();
           status.textContent = `Scan ${pageIndex + 1} of ${doc.pages.length} · ${crop ? "display crop" : "full original; no crop applied"}`;

@@ -1,5 +1,9 @@
 import { detectedReceiptCrop } from "./receipt-crop.ts";
-import { receiptStraightening } from "./receipt-straightening.ts";
+import {
+  RECEIPT_GEOMETRY_VERSION,
+  receiptRectification,
+  sameReceiptRectification,
+} from "./receipt-rectification.ts";
 import {
   cropPdfImage,
   pdfImageSize,
@@ -15,7 +19,6 @@ import {
   rectangle,
   clip,
   endPath,
-  concatTransformationMatrix,
 } from "pdf-lib";
 /** Saved search-layer contract shared by PP-OCR and historical OCR artifacts. */
 export interface PdfOcr {
@@ -23,7 +26,12 @@ export interface PdfOcr {
     captureId: string;
     sha256: string;
     pixels: number[];
+    sourcePixels?: [number, number];
+    sourceCrop?: [number, number, number, number];
     rotation?: 0 | 90 | 180 | 270;
+    geometryVersion?: number;
+    rectification?:
+      import("./receipt-rectification.ts").ReceiptRectification | null;
     region?: { left: number; top: number; width: number; height: number };
   };
   text_only_pdf_layers: { base64: string; sha256: string }[];
@@ -74,13 +82,9 @@ export async function addReceiptPage(
     Math.ceil(right),
     Math.ceil(bottom),
   ];
-  const straightening = receiptStraightening(pixels, crop, quad);
-  const outputWidth = straightening
-    ? straightening.bounds[2] - straightening.bounds[0]
-    : right - left;
-  const outputHeight = straightening
-    ? straightening.bounds[3] - straightening.bounds[1]
-    : bottom - top;
+  const rectification = receiptRectification(pixels, quad);
+  const outputWidth = rectification?.outputPixels[0] ?? right - left;
+  const outputHeight = rectification?.outputPixels[1] ?? bottom - top;
   const scale = Math.min(1, 559 / outputWidth),
     width = outputWidth * scale,
     height = outputHeight * scale;
@@ -90,8 +94,16 @@ export async function addReceiptPage(
     );
   const cropWidth = imageCrop[2] - imageCrop[0];
   const cropHeight = imageCrop[3] - imageCrop[1];
-  const [embeddedWidth, embeddedHeight] = pdfImageSize(cropWidth, cropHeight);
-  const embeddedBytes = await cropImage(imageBytes, type, imageCrop);
+  const [embeddedWidth, embeddedHeight] = pdfImageSize(
+    rectification?.outputPixels[0] ?? cropWidth,
+    rectification?.outputPixels[1] ?? cropHeight,
+  );
+  const embeddedBytes = await cropImage(
+    imageBytes,
+    type,
+    imageCrop,
+    rectification,
+  );
   const image =
     type === "image/png"
       ? await pdf.embedPng(embeddedBytes)
@@ -107,48 +119,16 @@ export async function addReceiptPage(
     clip(),
     endPath(),
   );
-  if (straightening) {
-    const { cosine, sine, bounds } = straightening;
-    sheet.pushOperators(
-      concatTransformationMatrix(
-        scale * cosine,
-        scale * sine,
-        -scale * sine,
-        scale * cosine,
-        18 - bounds[0] * scale,
-        18 - bounds[1] * scale,
-      ),
-    );
-  }
-  sheet.drawImage(
-    image,
-    straightening
+  sheet.drawImage(image, { x: 18, y: 18, width, height });
+  const textPosition =
+    !rectification && ocr?.source.geometryVersion !== RECEIPT_GEOMETRY_VERSION
       ? {
-          x: imageCrop[0],
-          y: pixels[1] - imageCrop[3],
-          width: cropWidth,
-          height: cropHeight,
+          x: 18 - left * scale,
+          y: 18 - (pixels[1] - bottom) * scale,
+          width: pixels[0] * scale,
+          height: pixels[1] * scale,
         }
-      : {
-          x: 18 - (left - imageCrop[0]) * scale,
-          y: 18 - (imageCrop[3] - bottom) * scale,
-          width: cropWidth * scale,
-          height: cropHeight * scale,
-        },
-  );
-  const textPosition = straightening
-    ? {
-        x: 0,
-        y: 0,
-        width: pixels[0],
-        height: pixels[1],
-      }
-    : {
-        x: 18 - left * scale,
-        y: 18 - (pixels[1] - bottom) * scale,
-        width: pixels[0] * scale,
-        height: pixels[1] * scale,
-      };
+      : { x: 18, y: 18, width, height };
   for (const layer of (ocr?.text_only_pdf_layers ?? []).slice(0, 1)) {
     const bytes = Uint8Array.from(atob(layer.base64), (c) => c.charCodeAt(0));
     const hash = Array.from(
@@ -161,13 +141,32 @@ export async function addReceiptPage(
     if (source.getPageCount() !== 1)
       throw Error("Expected one OCR text layer page.");
     const media = source.getPage(0).getSize();
-    // Saved text layers use the full original canvas, even for cropped OCR.
+    const currentGeometry =
+      ocr?.source.geometryVersion === RECEIPT_GEOMETRY_VERSION;
+    const expectedPixels =
+      rectification?.outputPixels ??
+      (currentGeometry ? [cropWidth, cropHeight] : pixels);
     if (
-      ocr?.source.pixels[0] !== pixels[0] ||
-      ocr.source.pixels[1] !== pixels[1] ||
-      Math.abs(media.width / media.height - pixels[0] / pixels[1]) > 0.001
+      ocr?.source.pixels[0] !== expectedPixels[0] ||
+      ocr.source.pixels[1] !== expectedPixels[1] ||
+      (currentGeometry &&
+        (!Array.isArray(ocr.source.sourceCrop) ||
+          ocr.source.sourceCrop.length !== 4 ||
+          ocr.source.sourceCrop.some(
+            (value, index) => value !== imageCrop[index],
+          ))) ||
+      (currentGeometry &&
+        (!ocr.source.sourcePixels ||
+          ocr.source.sourcePixels[0] !== pixels[0] ||
+          ocr.source.sourcePixels[1] !== pixels[1])) ||
+      Math.abs(
+        media.width / media.height - expectedPixels[0] / expectedPixels[1],
+      ) > 0.001 ||
+      (rectification && !currentGeometry) ||
+      (currentGeometry &&
+        !sameReceiptRectification(ocr?.source.rectification, rectification))
     )
-      throw Error("OCR text layer canvas does not match the original image.");
+      throw Error("OCR text layer does not match the saved receipt geometry.");
     const [embedded] = await pdf.embedPages([source.getPage(0)]);
     sheet.drawPage(embedded, textPosition);
   }

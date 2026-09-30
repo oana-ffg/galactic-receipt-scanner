@@ -5,6 +5,8 @@ import { newDocument, type DocumentView } from "../web/documents";
 import type { Capture } from "../web/types";
 import type { Extraction } from "../web/extraction";
 import { matchesReviewFilters, type SavedReading } from "../web/review-values";
+import { receiptRectification } from "../web/receipt-rectification";
+import { detectedReceiptCrop } from "../web/receipt-crop";
 
 const extraction: Extraction = {
   type: "receipt",
@@ -110,6 +112,11 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     ...captures[0],
     id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000004",
   };
+  const rectification = receiptRectification(
+    [800, 2000],
+    captures[0].metadata.quality?.quad,
+  );
+  expect(rectification).not.toBeNull();
   captures.push(secondPage);
   docs[0].pages.push({ ...docs[0].pages[0], captureId: secondPage.id });
   const attempts = new Map<string, SavedReading[]>(
@@ -171,9 +178,21 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
     source: {
       captureId: secondPage.id,
       sha256: "synthetic",
-      pixels: [800, 2000],
-      region: { left: 0, top: 0, width: 800, height: 2000 },
-      coordinates: "original image pixels; top-left origin",
+      pixels: rectification!.outputPixels,
+      sourcePixels: [800, 2000],
+      sourceCrop: detectedReceiptCrop(
+        [800, 2000],
+        captures[0].metadata.quality?.quad,
+      )!,
+      geometryVersion: 1,
+      rectification,
+      region: {
+        left: 0,
+        top: 0,
+        width: rectification!.outputPixels[0],
+        height: rectification!.outputPixels[1],
+      },
+      coordinates: "rectified receipt pixels; top-left origin",
     },
     provenance: { engine: "PP-OCRv6" },
     confidence: 64.25,
@@ -467,10 +486,13 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   await expect(
     page.getByRole("region", { name: "Receipt preview", exact: true }),
   ).toContainText("Page OCR confidence: 64.3% (mean of lines)");
-  await expect(overlay).toHaveAttribute("viewBox", "0 0 656 1616");
+  await expect(overlay).toHaveAttribute(
+    "viewBox",
+    `0 0 ${rectification!.outputPixels[0]} ${rectification!.outputPixels[1]}`,
+  );
   await expect(overlay.locator("text")).toHaveText(["X8-01-2026", "UNSCORED"]);
-  await expect(overlay.locator("rect").first()).toHaveAttribute("x", "8");
-  await expect(overlay.locator("rect").first()).toHaveAttribute("y", "8");
+  await expect(overlay.locator("rect").first()).toHaveAttribute("x", "80");
+  await expect(overlay.locator("rect").first()).toHaveAttribute("y", "200");
   await expect(overlay.locator("g.ocr-uncertain")).toHaveCount(2);
   await expect(overlay.locator("title").last()).toContainText(
     "OCR confidence: Unavailable",
@@ -693,7 +715,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
       };
     });
   expect(imageLayout).toEqual({
-    pixels: [656, 1616],
+    pixels: rectification!.outputPixels,
     fitWidth: true,
     scrolls: true,
   });

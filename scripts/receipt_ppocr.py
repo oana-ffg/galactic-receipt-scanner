@@ -56,11 +56,10 @@ def original_point(x, y, width, height, rotation):
     return x, y
 
 
-def artifact(source, image_size, crop, rotation, result, provenance):
-    """Map rotated crop OCR to the immutable original and its full-canvas PDF layer."""
+def artifact(source, image_size, rotation, result, provenance):
+    """Map rotated rectified OCR to the canonical receipt canvas and searchable PDF layer."""
     import pymupdf
-    left, top, right, bottom = crop
-    width, height = right-left, bottom-top
+    width, height = image_size
     rotated_size = (height, width) if rotation in (90, 270) else (width, height)
     text_pdf = pymupdf.open()
     page = text_pdf.new_page(width=rotated_size[0], height=rotated_size[1])
@@ -77,14 +76,14 @@ def artifact(source, image_size, crop, rotation, result, provenance):
         page.insert_text((x0, y1-(y1-y0)*0.15), text, fontsize=max(0.1, size),
                          fontname='ocr', render_mode=3)
         mapped = [original_point(x, y, width, height, rotation) for x, y in points]
-        box = dict(x0=min(x for x,y in mapped)+left, y0=min(y for x,y in mapped)+top,
-                   x1=max(x for x,y in mapped)+left, y1=max(y for x,y in mapped)+top)
+        box = dict(x0=min(x for x,y in mapped), y0=min(y for x,y in mapped),
+                   x1=max(x for x,y in mapped), y1=max(y for x,y in mapped))
         lines.append(dict(text=text, confidence=float(score)*100, box=box, words=[],
-                          polygon=[[x+left,y+top] for x,y in mapped]))
+                          polygon=mapped))
     full = pymupdf.open()
     target = full.new_page(width=image_size[0], height=image_size[1])
     if lines:
-        target.show_pdf_page(pymupdf.Rect(*crop), text_pdf, 0, rotate=rotation)
+        target.show_pdf_page(pymupdf.Rect(0, 0, width, height), text_pdf, 0, rotate=rotation)
     # A blank OCR result is preserved as empty search text, never fabricated content.
     full.subset_fonts()
     pdf_bytes = full.tobytes(garbage=4, deflate=True)
@@ -92,8 +91,11 @@ def artifact(source, image_size, crop, rotation, result, provenance):
     text_pdf.close()
     return dict(schemaVersion=2, verified=False, text='\n'.join(line['text'] for line in lines),
         language=['da', 'en'], source=dict(captureId=source['capture_id'], sha256=source['sha256'],
-        pixels=list(image_size), coordinates='original image pixels; top-left origin',
-        region=dict(left=left,top=top,width=width,height=height), rotation=rotation),
+        pixels=list(image_size), sourcePixels=source['sourcePixels'],
+        sourceCrop=source['crop'],
+        coordinates='rectified receipt pixels; top-left origin',
+        region=dict(left=0,top=0,width=width,height=height), rotation=rotation,
+        geometryVersion=1, rectification=source.get('geometry')),
         provenance=provenance, confidence=sum(line['confidence'] for line in lines)/max(1,len(lines)),
         lines=lines, text_only_pdf_layers=[dict(base64=base64.b64encode(pdf_bytes).decode(),
         sha256=hashlib.sha256(pdf_bytes).hexdigest())], uncertainties=[line for line in lines if line['confidence']<85],
@@ -154,7 +156,26 @@ def main():
             any(type(v) is not int for v in crop) or not
             (0<=crop[0]<crop[2]<=pixels[0] and 0<=crop[1]<crop[3]<=pixels[1])):
             raise ClientError('Invalid source crop or rotation.')
-        selected = image.crop(crop).rotate(-rotation,expand=True)
+        geometry = source.get('geometry')
+        if geometry:
+            if (geometry.get('version') != 1 or geometry.get('sourcePixels') != list(pixels)
+                    or len(geometry.get('quad', [])) != 4):
+                raise ClientError('Invalid saved perspective geometry.')
+            import cv2
+            points = np.float32(geometry['quad'])
+            out_width, out_height = geometry['outputPixels']
+            margin = geometry['marginPixels']
+            target = np.float32([[margin, margin], [out_width-1-margin, margin],
+                                 [out_width-1-margin, out_height-1-margin],
+                                 [margin, out_height-1-margin]])
+            matrix = cv2.getPerspectiveTransform(points, target)
+            warped = cv2.warpPerspective(np.asarray(image), matrix, (out_width, out_height),
+                flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            image = Image.fromarray(warped)
+        else:
+            image = image.crop(crop)
+        rectified_size = image.size
+        selected = image.rotate(-rotation,expand=True)
         started = time.monotonic()
         results = list(engine.predict(np.asarray(selected)[:,:,::-1].copy()))
     if len(results)!=1:
@@ -165,7 +186,7 @@ def main():
     provenance = dict(engine='PP-OCRv6',models=hashes,device=device,
         paddleVersion=paddle.__version__,paddleocrVersion=importlib.metadata.version('paddleocr'),
         elapsedSeconds=time.monotonic()-started,createdAt=datetime.now(timezone.utc).isoformat())
-    value = artifact(source,pixels,crop,rotation,result,provenance)
+    value = artifact(source,rectified_size,rotation,result,provenance)
     write_new_file(Path(args.output),json.dumps(value,ensure_ascii=False).encode('utf-8'))
 
 

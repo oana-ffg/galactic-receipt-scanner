@@ -67,30 +67,6 @@ class SavedPPArtifacts:
     engine = "PP-OCRv6"
 
 
-def matches_ocr_region(value, crop):
-    if crop is AUTO_CROP:
-        return True
-    source = value.get("source") or {}
-    if crop is None:
-        pixels = source.get("pixels")
-        if not isinstance(pixels, list) or len(pixels) != 2 or any(type(v) is not int or v <= 0 for v in pixels):
-            return False
-        crop = [0, 0, *pixels]
-    region = source.get("region")
-    pixels = source.get("pixels")
-    return (isinstance(region, dict)
-            and isinstance(pixels, list) and len(pixels) == 2
-            and all(type(v) is int and v > 0 for v in pixels)
-            and all(type(region.get(key)) is int for key in ('left', 'top', 'width', 'height'))
-            and region['left'] >= 0 and region['top'] >= 0
-            and region['width'] > 0 and region['height'] > 0
-            and region['left'] + region['width'] <= pixels[0]
-            and region['top'] + region['height'] <= pixels[1]
-            and region['left'] <= crop[0] and region['top'] <= crop[1]
-            and region['left'] + region['width'] >= crop[2]
-            and region['top'] + region['height'] >= crop[3])
-
-
 def scanner_error_detail(response):
     """Return the scanner Worker's own error message, never a proxy page or payload."""
     content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -262,11 +238,24 @@ def matches_ocr(value, capture_id, source_sha):
                     for layer in value["text_only_pdf_layers"]))
 
 
-def matches_prepared_ocr(value, capture_id, source_sha, crop, backend, rotation):
-    if not matches_ocr(value, capture_id, source_sha) or not matches_ocr_region(value, crop):
+def matches_prepared_ocr(value, capture_id, source_sha, layout, backend, rotation):
+    if not matches_ocr(value, capture_id, source_sha):
         return False
     engine = value["provenance"]["engine"]
-    return backend is not None and engine == backend.engine and value["source"].get("rotation") == rotation
+    source = value["source"]
+    expected = (layout.get("rectification") or {}).get("outputPixels")
+    if expected is None:
+        crop = layout["crop"]
+        expected = [crop[2] - crop[0], crop[3] - crop[1]]
+    region = source.get("region") or {}
+    return (backend is not None and engine == backend.engine
+            and source.get("geometryVersion") == 1
+            and source.get("sourcePixels") == layout.get("pixels")
+            and source.get("sourceCrop") == layout.get("crop")
+            and source.get("rectification") == layout.get("rectification")
+            and source.get("rotation") == rotation
+            and source.get("pixels") == expected
+            and region == {"left": 0, "top": 0, "width": expected[0], "height": expected[1]})
 
 
 class ScannerClient:
@@ -456,6 +445,10 @@ class ScannerClient:
 
     def source_region(self, source, directory):
         """Resolve default OCR bounds through the shared detector geometry, without OCR."""
+        return self.source_layout(source, directory)["crop"]
+
+    def source_layout(self, source, directory):
+        """Resolve crop and versioned perspective geometry through the shared JS implementation."""
         stem = Path(directory) / ("source-layout-" + os.urandom(8).hex())
         manifest, output = stem.with_suffix(".source.json"), stem.with_suffix(".json")
         write_new_file(manifest, json.dumps(source).encode("utf-8"))
@@ -463,7 +456,7 @@ class ScannerClient:
                                 capture_output=True, timeout=60)
         if result.returncode:
             raise ClientError("Could not resolve source dimensions and detected OCR region.")
-        return json.loads(output.read_text(encoding="utf-8"))["crop"]
+        return json.loads(output.read_text(encoding="utf-8"))
 
     def saved_ocr(self, capture_id, directory, *, crop=AUTO_CROP, rotation=0):
         """Read source/layout-pinned saved PP without image retrieval or model startup."""
@@ -488,9 +481,17 @@ class ScannerClient:
                 value = json.loads(Path(pinned["path"]).read_text(encoding="utf-8"))
             except (ValueError, UnicodeError):
                 continue
-            if not matches_prepared_ocr(value, capture_id, sha, AUTO_CROP, self.ocr_backend, rotation):
+            if not matches_ocr(value, capture_id, sha):
                 continue
-            geometry = dict(pixels=value["source"].get("pixels"), quad=quad)
+            source = value["source"]
+            rectification = source.get("rectification") or {}
+            metadata_pixels = (meta.get("metadata") or {}).get("sourcePixels")
+            source_pixels = (metadata_pixels or source.get("sourcePixels")
+                             or rectification.get("sourcePixels") or source.get("pixels"))
+            if (source.get("sourcePixels") is not None and metadata_pixels is not None
+                    and source.get("sourcePixels") != metadata_pixels):
+                continue
+            geometry = dict(pixels=source_pixels, quad=quad)
             result = subprocess.run([self.node, "scripts/receipt_layout.mjs"], input=json.dumps(geometry),
                                     text=True, encoding="utf-8", capture_output=True, timeout=30)
             if result.returncode:
@@ -498,12 +499,16 @@ class ScannerClient:
             layout = json.loads(result.stdout)
             if crop is not AUTO_CROP and crop != layout["crop"]:
                 raise ClientError("OCR crop must equal the saved scan crop.")
-            if matches_ocr_region(value, layout["crop"]):
+            if matches_prepared_ocr(
+                    value, capture_id, sha, layout, self.ocr_backend, rotation):
                 return dict(capture_id=capture_id, sha256=sha, crop=layout["crop"], pixels=layout["pixels"],
                             rotation=rotation, ocr_path=pinned["path"], ocr_sha256=digest)
         # A missing artifact needs a precise source/layout request for the OCR job.
         source = self.original(capture_id, root / "originals", metadata=meta)
-        source["crop"] = self.source_region(source, root)
+        layout = self.source_layout(source, root)
+        source["sourcePixels"] = layout["pixels"]
+        source["crop"] = layout["crop"]
+        source["geometry"] = layout.get("rectification")
         if crop is not AUTO_CROP and crop != source["crop"]:
             raise ClientError("OCR crop must equal the saved scan crop.")
         source["rotation"] = rotation
@@ -518,10 +523,13 @@ class ScannerClient:
         meta = self.get("/api/captures/" + capture_id)
         artifact_directory(root)
         scan_crop = self.source_region(original, root)
+        layout = self.source_layout(original, root)
         if crop is not AUTO_CROP and crop != scan_crop:
             raise ClientError("OCR crop must equal the saved scan crop.")
         crop = scan_crop
+        original["sourcePixels"] = layout["pixels"]
         original["crop"] = crop
+        original["geometry"] = layout.get("rectification")
         if rotation not in (0, 90, 180, 270):
             raise ClientError("Invalid OCR rotation.")
         original["rotation"] = rotation
@@ -537,7 +545,7 @@ class ScannerClient:
                 value = json.loads(destination.read_text())
             except (ValueError, UnicodeError):
                 continue
-            if matches_prepared_ocr(value, capture_id, original["sha256"], crop, self.ocr_backend, rotation):
+            if matches_prepared_ocr(value, capture_id, original["sha256"], layout, self.ocr_backend, rotation):
                 return {**original, "ocr_path": str(destination.absolute()), "ocr_sha256": sha}
         if not allow_inference or not hasattr(self.ocr_backend, "run"):
             raise OCRRequired(self.origin, original)
@@ -547,7 +555,7 @@ class ScannerClient:
         write_new_file(manifest, json.dumps(original).encode())
         self.ocr_backend.run(manifest, output)
         data = output.read_bytes()
-        if not matches_prepared_ocr(json.loads(data), capture_id, original["sha256"], crop, self.ocr_backend, rotation):
+        if not matches_prepared_ocr(json.loads(data), capture_id, original["sha256"], layout, self.ocr_backend, rotation):
             raise ClientError("Generated OCR does not match the verified source.")
         if len(data) > 1024 * 1024:
             raise ClientError("OCR artifact exceeds 1 MB; preserve the local result for review.")

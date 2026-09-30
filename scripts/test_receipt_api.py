@@ -268,6 +268,11 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         self.client = ScannerClient({"origin": "https://scanner.example.test", "sites_token": "synthetic-sites", "processing_token": "rsc_" + "s" * 43})
         self.client.source_region = Mock(return_value=[0,0,100,200])
+        self.client.source_layout = Mock(side_effect=lambda source, _directory: {
+            "pixels": [100, 200],
+            "crop": source.get("crop", self.client.source_region.return_value),
+            "rectification": None,
+        })
         self.client.ocr_backend = Mock(engine="PP-OCRv6")
         self.id = "00000000-0000-4000-8000-000000000001"
         self.body = b"\xff\xd8\xffsynthetic"
@@ -581,7 +586,7 @@ class ClientTests(unittest.TestCase):
 
 
     def ocr_fixture(self):
-        return {"text": "Synthetic shop 12,34", "source": {"captureId": self.id, "sha256": self.sha, "pixels": [100,200], "region": dict(left=0,top=0,width=100,height=200), "rotation": 0},
+        return {"text": "Synthetic shop 12,34", "source": {"captureId": self.id, "sha256": self.sha, "pixels": [100,200], "sourcePixels": [100,200], "sourceCrop": [0,0,100,200], "geometryVersion": 1, "rectification": None, "region": dict(left=0,top=0,width=100,height=200), "rotation": 0},
                 "provenance": {"engine": "PP-OCRv6"},
                 "text_only_pdf_layers": [{"base64": "c3ludGhldGlj", "sha256": "f" * 64}]}
 
@@ -605,12 +610,72 @@ class ClientTests(unittest.TestCase):
         self.client.get = Mock(return_value={**self.meta, 'artifacts': [dict(kind='ocr', sha256=sha)]})
         self.client.request = Mock(return_value=body)
         self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha))
-        geometry = Mock(returncode=0, stdout=json.dumps(dict(pixels=[100, 200], crop=[1, 2, 90, 180])))
+        geometry = Mock(returncode=0, stdout=json.dumps(dict(pixels=[100, 200], crop=[0, 0, 100, 200], rectification=None)))
         with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run', return_value=geometry):
             with self.assertRaisesRegex(ClientError, 'saved scan crop'):
                 self.client.saved_ocr(self.id, directory, crop=[2, 2, 90, 180])
             self.assertEqual(self.client.saved_ocr(self.id, directory)['ocr_sha256'], sha)
         self.client.ocr_backend.run.assert_not_called()
+
+    def test_saved_ocr_reconstructs_original_dimensions_from_rectification(self):
+        rectification = dict(version=1, sourcePixels=[100, 200], outputPixels=[80, 160],
+                             marginPixels=4, quad=[[10, 20], [90, 20], [90, 180], [10, 180]])
+        value = self.ocr_fixture()
+        value['source'].update(pixels=[80, 160], sourcePixels=[100, 200], sourceCrop=[0, 10, 100, 190], rectification=rectification,
+                               region=dict(left=0, top=0, width=80, height=160))
+        body = json.dumps(value).encode()
+        sha = hashlib.sha256(body).hexdigest()
+        self.client.get = Mock(return_value={**self.meta, 'manual_outline': None,
+            'metadata': {'quality': {'quad': [[.1, .1], [.9, .1], [.9, .9], [.1, .9]]}},
+            'artifacts': [dict(kind='ocr', sha256=sha)]})
+        self.client.request = Mock(return_value=body)
+        self.client.original = Mock(side_effect=AssertionError('Matching saved OCR must not fetch pixels'))
+        layout = dict(pixels=[100, 200], crop=[0, 10, 100, 190], rectification=rectification)
+        with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run',
+                return_value=Mock(returncode=0, stdout=json.dumps(layout))) as run:
+            result = self.client.saved_ocr(self.id, directory)
+        self.assertEqual(result['ocr_sha256'], sha)
+        self.assertEqual(json.loads(run.call_args.kwargs['input'])['pixels'], [100, 200])
+
+    def test_saved_ocr_reuses_cropped_artifact_when_rectification_is_unavailable(self):
+        value = self.ocr_fixture()
+        value['source'].update(pixels=[820, 340], sourcePixels=[1000, 1600], sourceCrop=[90, 630, 910, 970],
+                               region=dict(left=0, top=0, width=820, height=340))
+        body = json.dumps(value).encode()
+        sha = hashlib.sha256(body).hexdigest()
+        quad = [[.1, .4], [.9, .4], [.4, .6], [.3, .6]]
+        meta = {**self.meta, 'manual_outline': None,
+                'metadata': {'sourcePixels': [1000, 1600], 'quality': {'quad': quad}},
+                'artifacts': [dict(kind='ocr', sha256=sha)]}
+        self.client.get = Mock(return_value=meta)
+        self.client.request = Mock(return_value=body)
+        layout = dict(pixels=[1000, 1600], crop=[90, 630, 910, 970], rectification=None)
+        with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run',
+                return_value=Mock(returncode=0, stdout=json.dumps(layout))) as run:
+            result = self.client.saved_ocr(self.id, directory)
+        self.assertEqual(result['ocr_sha256'], sha)
+        self.assertEqual(json.loads(run.call_args.kwargs['input'])['pixels'], [1000, 1600])
+
+    def test_saved_ocr_rejects_same_size_shifted_fallback_crop(self):
+        value = self.ocr_fixture()
+        value['source'].update(pixels=[820, 340], sourcePixels=[1000, 1600],
+                               sourceCrop=[90, 630, 910, 970],
+                               region=dict(left=0, top=0, width=820, height=340))
+        body = json.dumps(value).encode()
+        sha = hashlib.sha256(body).hexdigest()
+        quad = [[.1, .4], [.9, .4], [.4, .6], [.3, .6]]
+        meta = {**self.meta, 'manual_outline': None,
+                'metadata': {'sourcePixels': [1000, 1600], 'quality': {'quad': quad}},
+                'artifacts': [dict(kind='ocr', sha256=sha)]}
+        self.client.get = Mock(return_value=meta)
+        self.client.request = Mock(return_value=body)
+        self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})
+        layout = dict(pixels=[1000, 1600], crop=[90, 646, 910, 986], rectification=None)
+        with tempfile.TemporaryDirectory() as directory, patch('receipt_api.subprocess.run',
+                return_value=Mock(returncode=0, stdout=json.dumps(layout))):
+            self.client.source_layout = Mock(return_value=layout)
+            with self.assertRaises(OCRRequired):
+                self.client.saved_ocr(self.id, directory)
 
     def test_prepare_reuses_only_source_matched_ocr_and_skips_malformed_candidates(self):
         good = json.dumps(self.ocr_fixture()).encode()
@@ -657,9 +722,13 @@ class ClientTests(unittest.TestCase):
 
     def test_prepare_reruns_ocr_when_old_region_misses_part_of_scan_crop(self):
         old = self.ocr_fixture()
+        old["source"].pop("geometryVersion")
+        old["source"].pop("rectification")
         old["source"]["region"] = dict(left=20, top=20, width=60, height=150)
         new = self.ocr_fixture()
-        new["source"]["region"] = dict(left=10, top=20, width=70, height=150)
+        new["source"]["pixels"] = [70, 150]
+        new["source"]["sourceCrop"] = [10, 20, 80, 170]
+        new["source"]["region"] = dict(left=0, top=0, width=70, height=150)
         old_bytes, new_bytes = json.dumps(old).encode(), json.dumps(new).encode()
         old_sha, new_sha = hashlib.sha256(old_bytes).hexdigest(), hashlib.sha256(new_bytes).hexdigest()
         self.client.original = Mock(return_value={"capture_id": self.id, "path": "/synthetic/source.jpg", "sha256": self.sha})

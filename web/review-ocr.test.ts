@@ -56,6 +56,10 @@ it("keeps the newest source-matched transcript from each OCR engine", async () =
             ? { left: 10, top: 20, width: 80, height: 160 }
             : { left: 0, top: 0, width: 100, height: 200 },
           pixels: [100, 200],
+          sourcePixels: [100, 200],
+          sourceCrop: a.currentCrop ? [0, 10, 100, 210] : [0, 0, 100, 200],
+          geometryVersion: 1,
+          rectification: null,
         },
         provenance: { engine: a.engine },
         text: a.text,

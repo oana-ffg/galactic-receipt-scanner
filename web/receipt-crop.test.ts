@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import { detectedReceiptCrop } from "./receipt-crop";
 import { addReceiptPage } from "./receipt-pdf";
+import { receiptRectification } from "./receipt-rectification";
+import sharp from "sharp";
 
 describe("saved detector outlines in document layouts", () => {
   it("retains a paper margin and clamps it to the source", () => {
@@ -92,6 +94,86 @@ describe("saved detector outlines in document layouts", () => {
   });
 });
 
+it("rejects searchable OCR pinned to a different perspective outline", async () => {
+  const image = new Uint8Array(
+    await sharp({
+      create: { width: 300, height: 500, channels: 3, background: "white" },
+    })
+      .png()
+      .toBuffer(),
+  );
+  const first = receiptRectification(
+    [300, 500],
+    [
+      [0.1, 0.1],
+      [0.9, 0.1],
+      [0.8, 0.9],
+      [0.2, 0.9],
+    ],
+  )!;
+  const second = receiptRectification(
+    [300, 500],
+    [
+      [0.2, 0.1],
+      [0.8, 0.1],
+      [0.9, 0.9],
+      [0.1, 0.9],
+    ],
+  )!;
+  expect(second.outputPixels).toEqual(first.outputPixels);
+  const layer = await PDFDocument.create();
+  layer.addPage(first.outputPixels);
+  const layerBytes = await layer.save();
+  const artifact = {
+    source: {
+      pixels: first.outputPixels,
+      sourcePixels: [300, 500],
+      sourceCrop: [27, 40, 273, 460],
+      geometryVersion: 1,
+      rectification: first,
+    },
+    text_only_pdf_layers: [
+      {
+        base64: Buffer.from(layerBytes).toString("base64"),
+        sha256: Buffer.from(
+          await crypto.subtle.digest(
+            "SHA-256",
+            layerBytes as Uint8Array<ArrayBuffer>,
+          ),
+        ).toString("hex"),
+      },
+    ],
+  } as never;
+  await expect(
+    addReceiptPage(
+      await PDFDocument.create(),
+      image,
+      "image/png",
+      0,
+      [27, 40, 273, 460],
+      artifact,
+      [
+        [0.2, 0.1],
+        [0.8, 0.1],
+        [0.9, 0.9],
+        [0.1, 0.9],
+      ],
+      false,
+      async (_bytes, _type, _crop, geometry) =>
+        sharp({
+          create: {
+            width: Math.max(1, Math.round(geometry!.outputPixels[0] / 2)),
+            height: Math.max(1, Math.round(geometry!.outputPixels[1] / 2)),
+            channels: 3,
+            background: "white",
+          },
+        })
+          .png()
+          .toBuffer(),
+    ),
+  ).rejects.toThrow("saved receipt geometry");
+});
+
 it("accepts the full-source OCR canvas and rejects a crop-sized canvas", async () => {
   const image = Uint8Array.from(
     Buffer.from(
@@ -144,7 +226,7 @@ it("accepts the full-source OCR canvas and rejects a crop-sized canvas", async (
       false,
       async () => image,
     ),
-  ).rejects.toThrow("canvas");
+  ).rejects.toThrow("saved receipt geometry");
   await expect(
     addReceiptPage(
       await PDFDocument.create(),

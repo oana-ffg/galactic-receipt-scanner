@@ -1,5 +1,6 @@
 // Resolve the same detector geometry as PDF/OCR without downloading image pixels.
 import { detectedReceiptCrop } from "../web/receipt-crop.ts";
+import { receiptRectification } from "../web/receipt-rectification.ts";
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
 const { pixels, quad, crop } = JSON.parse(input);
@@ -25,4 +26,10 @@ if (
   bounds[3] <= bounds[1]
 )
   throw Error("Invalid source crop.");
-console.log(JSON.stringify({ pixels, crop: bounds }));
+console.log(
+  JSON.stringify({
+    pixels,
+    crop: bounds,
+    rectification: receiptRectification(pixels, quad),
+  }),
+);
