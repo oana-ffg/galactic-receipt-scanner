@@ -1221,6 +1221,22 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("Sol", json.dumps(result))
         self.assertTrue(self.send("release")["released"])
 
+    def test_frozen_draft_preserves_source_outline_used_for_reviewed_preview(self):
+        self.claimed()
+        quad = [[0.2, 0.1], [0.9, 0.2], [0.8, 0.9], [0.1, 0.8]]
+        original = self.fake.original
+        self.fake.original = lambda cid, directory: {**original(cid, directory), "quad": quad}
+        calls = []
+        image_pdf = self.fake.image_pdf
+        def record(pages, directory):
+            calls.append(pages)
+            return image_pdf(pages, directory)
+        self.fake.image_pdf = record
+        self.send("previews", capture_ids=[DID])
+        self.send("draft", extraction=extraction())
+        self.assertEqual(calls[-1][0]["quad"], quad)
+        self.assertEqual(calls[-1][0]["quad"], calls[0][0]["quad"])
+
     def test_no_outline_uses_full_scan_crop_without_a_document_crop(self):
         self.claimed()
         original_image_pdf = self.fake.image_pdf

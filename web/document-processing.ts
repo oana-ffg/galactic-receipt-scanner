@@ -139,7 +139,7 @@ export async function generateDocumentPdf(
       page.rotation,
       crop,
       ocr ?? undefined,
-      undefined,
+      capture.manual_outline?.quad ?? capture.metadata.quality?.quad,
       !ocr,
     );
   }

@@ -702,10 +702,11 @@ class ClientTests(unittest.TestCase):
 
     def test_pdf_reused_sources_create_output_directory_without_preparing_again(self):
         page = dict(captureId=self.id, sha256=self.sha, rotation=0)
+        quad = [[0.2, 0.1], [0.9, 0.2], [0.8, 0.9], [0.1, 0.8]]
         self.client.get = Mock(return_value={"document": dict(id=self.id, revision=3,
             filename="2026-01-01_synthetic.pdf", pages=[page])})
         self.client.prepare = Mock(side_effect=AssertionError("Reuse prepared sources"))
-        self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha))
+        self.client.original = Mock(return_value=dict(capture_id=self.id, sha256=self.sha, quad=quad))
         data = b"%PDF-synthetic-test-only"
         sha = hashlib.sha256(data).hexdigest()
         self.client.request = Mock(return_value=json.dumps(dict(sha256=sha, revision=3)).encode())
@@ -718,7 +719,8 @@ class ClientTests(unittest.TestCase):
                 ocr_sha256=hashlib.sha256(ocr.read_bytes()).hexdigest(), crop=[0,0,100,200], rotation=0)}
             def generate(args, **kwargs):
                 manifest = json.loads(Path(args[-2]).read_text())
-                self.assertEqual(manifest["pages"], [{**page, "crop": [0,0,100,200], "path": str(source), "ocr_path": str(ocr)}])
+                self.assertEqual(manifest["pages"], [{**page, "crop": [0,0,100,200], "quad": quad,
+                                                    "path": str(source), "ocr_path": str(ocr)}])
                 Path(args[-1]).write_bytes(data)
                 return Mock(returncode=0, stdout=json.dumps(dict(sha256=sha, pages=1,
                     layouts=[{**page, "pixels": [10, 20], "crop": [0,0,100,200]}])))

@@ -675,6 +675,7 @@ class Worker:
             if cid in self.state["prepared"]:
                 self.state["prepared"][cid]["path"] = self.state["sources"][cid]["path"]
         pages = [{**p, "path": self.state["sources"][p["captureId"]]["path"],
+                  "quad": self.state["sources"][p["captureId"]].get("quad"),
                   "crop": layouts[p["captureId"]]["crop"]} for p in target["pages"]]
         pixel_pdf = self.client.image_pdf(pages, self.work / "draft")
         verify(pixel_pdf["pages"] == len(pages) and pixel_pdf["layouts"] == [layouts[cid] for cid in retained],

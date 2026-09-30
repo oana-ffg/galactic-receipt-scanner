@@ -579,7 +579,8 @@ class ScannerClient:
             elif (source.get("crop") != crop or source.get("rotation") != page["rotation"]
                   or hashlib.sha256(Path(source["ocr_path"]).read_bytes()).hexdigest() != source["ocr_sha256"]):
                 raise ClientError("Prepared OCR differs from the frozen source/layout.")
-            pages.append({**page, "crop": crop, "path": source["path"], "ocr_path": source["ocr_path"]})
+            pages.append({**page, "crop": crop, "quad": original.get("quad"),
+                          "path": source["path"], "ocr_path": source["ocr_path"]})
         artifact_directory(root)
         run = root / (document_id + "-" + str(document["revision"]) + "-" + os.urandom(8).hex())
         manifest, output = run.with_suffix(".pages.json"), run.with_suffix(".pdf")

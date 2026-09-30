@@ -10,6 +10,8 @@ import {
 } from "pdf-lib";
 import { addReceiptPage } from "../web/receipt-pdf.ts";
 import { cropPdfImage } from "./pdf_image.mjs";
+import { detectedReceiptCrop } from "../web/receipt-crop.ts";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const width = 160;
@@ -156,4 +158,78 @@ test("a codec returning the uncropped image fails instead of embedding the desk"
     ),
     /crop dimensions differ/,
   );
+});
+
+test("tilted outline rotates image and OCR together and retains reviewed page rotation", async () => {
+  const bytes = await source("png");
+  const angle = 0.2;
+  const quad = [
+    [-25, -65],
+    [25, -65],
+    [25, 65],
+    [-25, 65],
+  ].map(([x, y]) => [
+    (80 + Math.cos(angle) * x - Math.sin(angle) * y) / width,
+    (120 + Math.sin(angle) * x + Math.cos(angle) * y) / height,
+  ]);
+  const bounds = detectedReceiptCrop([width, height], quad);
+  const text = await PDFDocument.create();
+  text
+    .addPage([width, height])
+    .drawText("SYNTHETIC", { x: 60, y: 130, size: 8 });
+  const textBytes = await text.save();
+  const originalHash = hash(bytes);
+  const pdf = await PDFDocument.create();
+  await addReceiptPage(
+    pdf,
+    bytes,
+    "image/png",
+    270,
+    bounds,
+    {
+      source: { pixels: [width, height] },
+      text_only_pdf_layers: [
+        {
+          base64: Buffer.from(textBytes).toString("base64"),
+          sha256: hash(textBytes),
+        },
+      ],
+    },
+    quad,
+    false,
+    cropPdfImage,
+  );
+  const page = (await PDFDocument.load(await pdf.save())).getPage(0);
+  assert.equal(page.getRotation().angle, 270);
+  assert.ok(Math.abs(page.getWidth() - 89.2) < 0.001);
+  assert.ok(Math.abs(page.getHeight() - 169.2) < 0.001);
+  const operators = page.node
+    .Contents()
+    .asArray()
+    .map((ref) =>
+      Buffer.from(
+        decodePDFRawStream(page.doc.context.lookup(ref)).decode(),
+      ).toString(),
+    )
+    .join("");
+  const transform = operators.indexOf("0.9800665778412416 0.198669330795061");
+  assert.ok(transform >= 0, "expected straightening transform");
+  assert.ok(
+    transform < operators.indexOf(" Do"),
+    "the transform must precede both image and OCR drawing",
+  );
+  assert.match(
+    operators,
+    /1 0 0 1 0 0 cm\n\/EmbeddedPdfPage/,
+    "saved OCR uses the unchanged full-source canvas",
+  );
+  assert.equal(hash(bytes), originalHash);
+  const loading = getDocument({
+    data: await pdf.save(),
+    useSystemFonts: true,
+  });
+  const searchable = await loading.promise;
+  const content = await (await searchable.getPage(1)).getTextContent();
+  assert.ok(content.items.some((item) => item.str === "SYNTHETIC"));
+  await loading.destroy();
 });

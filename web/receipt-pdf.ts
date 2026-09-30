@@ -1,4 +1,5 @@
 import { detectedReceiptCrop } from "./receipt-crop.ts";
+import { receiptStraightening } from "./receipt-straightening.ts";
 import {
   cropPdfImage,
   pdfImageSize,
@@ -14,6 +15,7 @@ import {
   rectangle,
   clip,
   endPath,
+  concatTransformationMatrix,
 } from "pdf-lib";
 /** Saved search-layer contract shared by PP-OCR and historical OCR artifacts. */
 export interface PdfOcr {
@@ -72,9 +74,16 @@ export async function addReceiptPage(
     Math.ceil(right),
     Math.ceil(bottom),
   ];
-  const scale = Math.min(1, 559 / (right - left)),
-    width = (right - left) * scale,
-    height = (bottom - top) * scale;
+  const straightening = receiptStraightening(pixels, crop, quad);
+  const outputWidth = straightening
+    ? straightening.bounds[2] - straightening.bounds[0]
+    : right - left;
+  const outputHeight = straightening
+    ? straightening.bounds[3] - straightening.bounds[1]
+    : bottom - top;
+  const scale = Math.min(1, 559 / outputWidth),
+    width = outputWidth * scale,
+    height = outputHeight * scale;
   if (height + 36 > 14400)
     throw Error(
       "Receipt is too long for a standard PDF page; prepare a reviewed split layout.",
@@ -98,18 +107,48 @@ export async function addReceiptPage(
     clip(),
     endPath(),
   );
-  sheet.drawImage(image, {
-    x: 18 - (left - imageCrop[0]) * scale,
-    y: 18 - (imageCrop[3] - bottom) * scale,
-    width: cropWidth * scale,
-    height: cropHeight * scale,
-  });
-  const textPosition = {
-    x: 18 - left * scale,
-    y: 18 - (pixels[1] - bottom) * scale,
-    width: pixels[0] * scale,
-    height: pixels[1] * scale,
-  };
+  if (straightening) {
+    const { cosine, sine, bounds } = straightening;
+    sheet.pushOperators(
+      concatTransformationMatrix(
+        scale * cosine,
+        scale * sine,
+        -scale * sine,
+        scale * cosine,
+        18 - bounds[0] * scale,
+        18 - bounds[1] * scale,
+      ),
+    );
+  }
+  sheet.drawImage(
+    image,
+    straightening
+      ? {
+          x: imageCrop[0],
+          y: pixels[1] - imageCrop[3],
+          width: cropWidth,
+          height: cropHeight,
+        }
+      : {
+          x: 18 - (left - imageCrop[0]) * scale,
+          y: 18 - (imageCrop[3] - bottom) * scale,
+          width: cropWidth * scale,
+          height: cropHeight * scale,
+        },
+  );
+  const textPosition = straightening
+    ? {
+        x: 0,
+        y: 0,
+        width: pixels[0],
+        height: pixels[1],
+      }
+    : {
+        x: 18 - left * scale,
+        y: 18 - (pixels[1] - bottom) * scale,
+        width: pixels[0] * scale,
+        height: pixels[1] * scale,
+      };
   for (const layer of (ocr?.text_only_pdf_layers ?? []).slice(0, 1)) {
     const bytes = Uint8Array.from(atob(layer.base64), (c) => c.charCodeAt(0));
     const hash = Array.from(
