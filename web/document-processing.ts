@@ -5,18 +5,18 @@ import { api } from "./api";
 import { readOriginal } from "./original";
 import { sha256 } from "./checksum";
 import { messageOf } from "./errors";
-import type {
-  DocumentCatalog,
-  DocumentView,
-  ReceiptDocument,
-} from "./documents";
+import type { DocumentView, ReceiptDocument } from "./documents";
 import type { Capture } from "./types";
 import { scanCrop } from "./receipt-crop";
 import { receiptRectification } from "./receipt-rectification";
 
 export class OcrPendingError extends Error {}
 
-export const readDocuments = () => api<DocumentCatalog>("/api/documents");
+/** Saved documents whose merge or duplicate relationship points at `id`. */
+export const readDocumentAliases = (id: string) =>
+  api<{ documents: ReceiptDocument[] }>(
+    `/api/documents?aliasesOf=${encodeURIComponent(id)}`,
+  );
 export interface DocumentSummary {
   id: string;
   revision: number;
@@ -106,11 +106,8 @@ export async function generateDocumentPdf(
       );
     };
     let ocr: PdfOcr | null = null;
-    const detail = await api<{
-      artifacts: { kind: string; sha256: string }[];
-    }>(`/api/captures/${page.captureId}`);
     let artifactFailure = "";
-    for (const artifact of detail.artifacts.filter((a) => a.kind === "ocr")) {
+    for (const artifact of capture.artifacts.filter((a) => a.kind === "ocr")) {
       try {
         const response = await fetch(
           `/api/files/${page.captureId}/ocr?version=${artifact.sha256}`,

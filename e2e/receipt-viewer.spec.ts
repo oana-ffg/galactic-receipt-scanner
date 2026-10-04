@@ -66,12 +66,16 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   }
   const pdfBytes = Buffer.from(await pdf.save());
   const pdfHash = createHash("sha256").update(pdfBytes).digest("hex");
+  // Originals are checksum-verified before display, so serve matching bytes.
+  const original =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="2000"><rect width="800" height="2000" fill="white"/><text x="80" y="160" font-size="32">SYNTHETIC RECEIPT</text></svg>';
+  const originalHash = createHash("sha256").update(original).digest("hex");
   const captures = Array.from(
     { length: 4 },
     (_, i) =>
       ({
         id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(i).padStart(12, "0")}`,
-        sha256: "synthetic",
+        sha256: originalHash,
         created_at: "2026-09-14T10:00:00Z",
         is_current: true,
         metadata: {
@@ -177,7 +181,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
   const ocrText = JSON.stringify({
     source: {
       captureId: secondPage.id,
-      sha256: "synthetic",
+      sha256: originalHash,
       pixels: rectification!.outputPixels,
       sourcePixels: [800, 2000],
       sourceCrop: detectedReceiptCrop(
@@ -295,10 +299,7 @@ test("filters model confidence, compares readings, cancels edits and accepts a s
         }),
   );
   await page.route("**/api/files/*/raw", (route) =>
-    route.fulfill({
-      contentType: "image/svg+xml",
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="2000"><rect width="800" height="2000" fill="white"/><text x="80" y="160" font-size="32">SYNTHETIC RECEIPT</text></svg>',
-    }),
+    route.fulfill({ contentType: "image/svg+xml", body: original }),
   );
   await page.route("**/api/processing/human-review", (route) => {
     writes++;

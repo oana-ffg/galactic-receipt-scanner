@@ -1,3 +1,4 @@
+import { readdir } from "node:fs/promises";
 import worker, { authorize } from "./index";
 import { beforeAll, afterAll, expect, it, vi } from "vitest";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
@@ -155,6 +156,31 @@ it("allows owner navigation from external links only to app pages", async () => 
       path,
     ).toBe(403);
   }
+});
+
+it("caches only public application code and keeps pages, data and misses no-store", async () => {
+  const bundle = (await readdir("dist/client/assets")).find((file) =>
+    /^index-[\w-]{8}\.js$/.test(file),
+  );
+  expect(bundle).toBeTruthy();
+  const policy = async (path: string) => {
+    const response = await request(path);
+    await response.arrayBuffer();
+    return [response.status, response.headers.get("cache-control")];
+  };
+  expect(await policy(`/assets/${bundle}`)).toEqual([
+    200,
+    "private, max-age=31536000, immutable",
+  ]);
+  expect(await policy("/vendor/opencv.js")).toEqual([200, "private, no-cache"]);
+  for (const path of ["/", "/review", "/api/me", "/assets/missing-AAAAAAAA.js"])
+    expect((await policy(path))[1], path).toBe("private, no-store, max-age=0");
+  const vendor = await request("/vendor/opencv.js");
+  await vendor.arrayBuffer();
+  const revalidated = await request("/vendor/opencv.js", "GET", undefined, {
+    "If-None-Match": vendor.headers.get("etag")!,
+  });
+  expect(revalidated.status).toBe(304);
 });
 
 it("preserves source bytes through retries and conflicts; accepts originals without waiting for derivatives", async () => {

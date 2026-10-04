@@ -22,7 +22,15 @@ import {
   COMPLETENESS_TASK,
   loadCompletenessAudits,
 } from "./completeness-state";
-import { bodyJson, HttpError, json, requireThat, UUID } from "./http";
+import {
+  bodyJson,
+  chunks,
+  HttpError,
+  inOrder,
+  json,
+  requireThat,
+  UUID,
+} from "./http";
 import { currentTake } from "./capture-selection";
 import {
   hashJson,
@@ -4491,20 +4499,29 @@ export async function paymentMatchesRoute(
       }),
     ),
   ];
-  const captures = await loadSelectedCaptures(pinIds);
+  const byPins = <T>(sql: (slots: string) => string) =>
+    Promise.all(
+      chunks(pinIds, 99).map((chunk) =>
+        env.DB.prepare(sql(chunk.map(() => "?").join(",")))
+          .bind(...chunk)
+          .all<T>(),
+      ),
+    ).then((pages) => pages.flatMap((page) => page.results));
+  const [captures, owners, heads] = await inOrder([
+    loadSelectedCaptures(pinIds),
+    byPins<{ capture_id: string; document_id: string }>(
+      (slots) =>
+        `SELECT capture_id,document_id FROM document_pages WHERE capture_id IN (${slots})`,
+    ),
+    byPins<Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">>(
+      (slots) =>
+        `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads WHERE capture_id IN (${slots})`,
+    ),
+  ]);
   const captureById = new Map(captures.map((capture) => [capture.id, capture]));
-  const assigned = new Map<string, string>();
-  for (let offset = 0; offset < pinIds.length; offset += 99) {
-    const chunk = pinIds.slice(offset, offset + 99);
-    const owners = await env.DB.prepare(
-      `SELECT capture_id,document_id FROM document_pages
-       WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
-    )
-      .bind(...chunk)
-      .all<{ capture_id: string; document_id: string }>();
-    for (const owner of owners.results)
-      assigned.set(owner.capture_id, owner.document_id);
-  }
+  const assigned = new Map(
+    owners.map((owner) => [owner.capture_id, owner.document_id]),
+  );
   const saved = await storedDocumentsByIds(env, [
     ...new Set([...assigned.values(), ...pinIds]),
   ]);
@@ -4534,20 +4551,7 @@ export async function paymentMatchesRoute(
       document.pages.map((page) => [page.captureId, page] as const),
     ),
   );
-  const headsByPage = new Map<
-    string,
-    Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">
-  >();
-  for (let offset = 0; offset < pinIds.length; offset += 99) {
-    const chunk = pinIds.slice(offset, offset + 99);
-    const heads = await env.DB.prepare(
-      `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads
-       WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
-    )
-      .bind(...chunk)
-      .all<Pick<PageHead, "capture_id" | "source_sha256" | "ocr_sha256">>();
-    for (const head of heads.results) headsByPage.set(head.capture_id, head);
-  }
+  const headsByPage = new Map(heads.map((head) => [head.capture_id, head]));
   const resolvePins = (value: unknown) => {
     if (!Array.isArray(value) || !value.length) return null;
     const pins = value as { capture_id?: string; ocr_sha256?: string }[];

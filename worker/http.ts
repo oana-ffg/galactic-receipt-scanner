@@ -85,3 +85,24 @@ export async function bodyJson(
     throw new HttpError(400, "Invalid JSON.");
   }
 }
+/** Split bound-parameter lists so each D1 statement stays under its variable limit. */
+export function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += size)
+    result.push(values.slice(offset, offset + size));
+  return result;
+}
+/**
+ * Await concurrent operations, reporting the first failure in declaration order
+ * so diagnostics name the same stage a sequential read would have reported.
+ */
+export async function inOrder<T extends readonly unknown[] | []>(
+  operations: T,
+): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
+  const results = await Promise.allSettled(operations);
+  for (const result of results)
+    if (result.status === "rejected") throw result.reason;
+  return results.map(
+    (result) => (result as PromiseFulfilledResult<unknown>).value,
+  ) as { -readonly [K in keyof T]: Awaited<T[K]> };
+}

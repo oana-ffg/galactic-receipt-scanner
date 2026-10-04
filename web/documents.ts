@@ -168,7 +168,9 @@ export interface DocumentCatalog {
   captures: Capture[];
 }
 
-export function newDocument(capture: Capture): ReceiptDocument {
+export function newDocument(
+  capture: Pick<Capture, "id" | "sha256">,
+): ReceiptDocument {
   return {
     id: capture.id,
     revision: 0,

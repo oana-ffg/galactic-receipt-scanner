@@ -1,5 +1,5 @@
 import { messageOf } from "./errors";
-import { readOriginal } from "./original";
+import { originalBlob, readOriginal } from "./original";
 import { edgeOverlay } from "./paper-overlay";
 import type { Capture } from "./types";
 import { Vision } from "./vision";
@@ -79,17 +79,26 @@ export class CapturePreviews {
       stage.append(image, edgeOverlay(capture));
       original.append(
         label,
-        imageZoomButton(stage, "Zoom original photo", () =>
-          inspectImage({
-            title: "Inspect saved original",
-            alt: "Full-resolution saved original receipt",
-            image: `/api/files/${capture.id}/raw`,
-            capture,
-            download: {
-              source: `/api/files/${capture.id}/raw`,
-              label: "Download original",
-            },
-          }),
+        imageZoomButton(
+          stage,
+          "Zoom original photo",
+          () =>
+            void originalBlob(capture).then(
+              (blob) =>
+                inspectImage({
+                  title: "Inspect saved original",
+                  alt: "Full-resolution saved original receipt",
+                  image: blob,
+                  capture,
+                  download: {
+                    source: `/api/files/${capture.id}/raw`,
+                    label: "Download original",
+                  },
+                }),
+              (error) => {
+                label.textContent = `Original could not load: ${messageOf(error)} Reload to retry.`;
+              },
+            ),
         ),
       );
       const output = document.createElement("figure");
