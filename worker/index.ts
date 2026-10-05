@@ -23,6 +23,8 @@ import {
   digest,
   imageType,
   bodyJson,
+  chunks,
+  inOrder,
 } from "./http";
 import { accessPage } from "./access-page";
 import { issueRoute } from "./issues";
@@ -107,9 +109,23 @@ export function authorize(
     );
   }
 }
-function secure(response: Response, imageWorker = false): Response {
+// Static files are public application code, never receipt data. Vite bundles are
+// content-hashed and immutable; unhashed vendor files (OpenCV, MediaPipe, OCR models)
+// revalidate by ETag. Pages, API responses, downloads and errors stay no-store.
+function staticCacheControl(path: string, status: number): string | null {
+  if (status !== 200 && status !== 304) return null;
+  if (/^\/assets\/[^/]+-[\w-]{8}\.\w+$/.test(path))
+    return "private, max-age=31536000, immutable";
+  if (path.startsWith("/vendor/")) return "private, no-cache";
+  return null;
+}
+function secure(
+  response: Response,
+  imageWorker = false,
+  cacheControl: string | null = null,
+): Response {
   const headers = new Headers(response.headers);
-  headers.set("Cache-Control", "private, no-store, max-age=0");
+  headers.set("Cache-Control", cacheControl ?? "private, no-store, max-age=0");
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Referrer-Policy", "no-referrer");
   headers.set("X-Frame-Options", "DENY");
@@ -370,23 +386,21 @@ async function route(
       .first<CaptureRow>();
     return row ? (publicCapture(row) as import("../web/types").Capture) : null;
   };
-  const loadSelectedCaptures = async (ids: string[]) => {
-    const result: import("../web/types").Capture[] = [];
-    for (let offset = 0; offset < ids.length; offset += 99) {
-      const chunk = ids.slice(offset, offset + 99);
-      const rows = await env.DB.prepare(
-        `${captureSelection}, ${outlineSelection} FROM captures WHERE id IN (${chunk.map(() => "?").join(",")})`,
+  const loadSelectedCaptures = async (ids: string[]) =>
+    (
+      await Promise.all(
+        chunks(ids, 99).map((chunk) =>
+          env.DB.prepare(
+            `${captureSelection}, ${outlineSelection} FROM captures WHERE id IN (${chunk.map(() => "?").join(",")})`,
+          )
+            .bind(...chunk)
+            .all<CaptureRow>(),
+        ),
       )
-        .bind(...chunk)
-        .all<CaptureRow>();
-      result.push(
-        ...(rows.results.map(
-          publicCapture,
-        ) as import("../web/types").Capture[]),
-      );
-    }
-    return result;
-  };
+    ).flatMap(
+      (rows) =>
+        rows.results.map(publicCapture) as import("../web/types").Capture[],
+    );
   await protectBlindParse(request, env);
   const paymentMatches = await paymentMatchesRoute(
     request,
@@ -454,19 +468,18 @@ async function route(
     const id = capture[1];
     requireThat(UUID.test(id), 400, "Invalid capture ID.");
     if (method === "GET") {
-      const row = await captureRow(env, id);
-      row.manual_outline = (
-        await env.DB.prepare(
-          `SELECT ${outlineSelection} FROM captures WHERE id=?`,
+      const [row, outline, versions] = await inOrder([
+        captureRow(env, id),
+        env.DB.prepare(`SELECT ${outlineSelection} FROM captures WHERE id=?`)
+          .bind(id)
+          .first<{ manual_outline: string }>(),
+        env.DB.prepare(
+          "SELECT kind,sha256,created_at FROM artifacts WHERE capture_id=? ORDER BY created_at DESC,sha256 DESC",
         )
           .bind(id)
-          .first<{ manual_outline: string }>()
-      )?.manual_outline;
-      const versions = await env.DB.prepare(
-        "SELECT kind,sha256,created_at FROM artifacts WHERE capture_id=? ORDER BY created_at DESC,sha256 DESC",
-      )
-        .bind(id)
-        .all();
+          .all(),
+      ]);
+      row.manual_outline = outline?.manual_outline;
       return json({
         ...publicCapture(row),
         bytes: row.bytes,
@@ -858,11 +871,13 @@ async function route(
     });
   }
   if (path === "/api/station" && method === "GET") {
-    const row = await stationRow(env);
+    const [row, count] = await inOrder([
+      stationRow(env),
+      atDependencyStage("D1", "receipt-count-read", () =>
+        env.DB.prepare(`SELECT (${receiptCount}) AS n`).first<{ n: number }>(),
+      ),
+    ]);
     const fresh = row.expires > Date.now() && row.updated > Date.now() - 5000;
-    const count = await atDependencyStage("D1", "receipt-count-read", () =>
-      env.DB.prepare(`SELECT (${receiptCount}) AS n`).first<{ n: number }>(),
-    );
     return json({
       camera: fresh ? row.camera : null,
       previewSession:
@@ -1200,12 +1215,15 @@ export default {
         await authorizeAgent(request, env);
       else authorize(request, env);
       timing.set("serverAuthMs", performance.now() - timing.started);
+      const path = new URL(request.url).pathname;
+      const response = await route(request, env, timing);
       return finish(
         secure(
-          await route(request, env, timing),
-          /^\/assets\/vision\.worker-[\w-]+\.js$/.test(
-            new URL(request.url).pathname,
-          ),
+          response,
+          /^\/assets\/vision\.worker-[\w-]+\.js$/.test(path),
+          path.startsWith("/api/")
+            ? null
+            : staticCacheControl(path, response.status),
         ),
       );
     } catch (error) {

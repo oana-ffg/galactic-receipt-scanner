@@ -28,8 +28,10 @@ import { matchesReviewFilters } from "../web/review-values";
 import {
   bodyJson,
   bytes,
+  chunks,
   digest,
   HttpError,
+  inOrder,
   json,
   requireThat,
   UUID,
@@ -114,18 +116,20 @@ export async function storedDocumentsByIds(
   ids: string[],
 ): Promise<Map<string, ReceiptDocument>> {
   const result = new Map<string, ReceiptDocument>();
-  for (let offset = 0; offset < ids.length; offset += 99) {
-    const chunk = ids.slice(offset, offset + 99);
-    const rows = await env.DB.prepare(
-      `SELECT h.id,v.payload FROM document_heads h
+  const pages = await Promise.all(
+    chunks(ids, 99).map((chunk) =>
+      env.DB.prepare(
+        `SELECT h.id,v.payload FROM document_heads h
        JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
        WHERE h.id IN (${chunk.map(() => "?").join(",")})`,
-    )
-      .bind(...chunk)
-      .all<{ id: string; payload: string }>();
+      )
+        .bind(...chunk)
+        .all<{ id: string; payload: string }>(),
+    ),
+  );
+  for (const rows of pages)
     for (const row of rows.results)
       result.set(row.id, storedDocumentPayload(row.payload));
-  }
   return result;
 }
 export async function storedAliasesForTargets(
@@ -133,24 +137,53 @@ export async function storedAliasesForTargets(
   targetIds: string[],
 ): Promise<ReceiptDocument[]> {
   if (!targetIds.length) return [];
-  const aliases: ReceiptDocument[] = [];
-  for (let offset = 0; offset < targetIds.length; offset += 50) {
-    const chunk = targetIds.slice(offset, offset + 50);
-    const slots = chunk.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
-      `SELECT v.payload FROM document_heads h
+  const pages = await Promise.all(
+    chunks(targetIds, 50).map((chunk) => {
+      const slots = chunk.map(() => "?").join(",");
+      return env.DB.prepare(
+        `SELECT v.payload FROM document_heads h
        CROSS JOIN document_versions v ON v.document_id=h.id AND v.revision=h.revision
        WHERE json_extract(v.payload,'$.mergedInto') IN (${slots})
           OR json_extract(v.payload,'$.duplicateOf') IN (${slots})`,
-    )
-      .bind(...chunk, ...chunk)
-      .all<{ payload: string }>();
-    aliases.push(
-      ...rows.results.map((row) => storedDocumentPayload(row.payload)),
-    );
-  }
-  return aliases;
+      )
+        .bind(...chunk, ...chunk)
+        .all<{ payload: string }>();
+    }),
+  );
+  return pages.flatMap((rows) =>
+    rows.results.map((row) => storedDocumentPayload(row.payload)),
+  );
 }
+const documentKey = (ids: string[]) => [...ids].sort().join(",");
+
+/** Submitted documents whose vendor/date can reserve a PDF filename. */
+function namedDocuments(input: unknown[]): ReceiptDocument[] {
+  return input.filter(
+    (item: unknown): item is ReceiptDocument =>
+      !!item &&
+      typeof item === "object" &&
+      (typeof (item as ReceiptDocument).vendor === "string" ||
+        (item as ReceiptDocument).vendor === null) &&
+      (typeof (item as ReceiptDocument).receiptDate === "string" ||
+        (item as ReceiptDocument).receiptDate === null),
+  );
+}
+
+/** Documents currently held by a processing lock or batch lease. */
+function processingReservations(env: Env, documentIds: string[]) {
+  const ids = JSON.stringify(documentIds);
+  return {
+    key: documentKey(documentIds),
+    ids: env.DB.prepare(
+      `SELECT document_id FROM processing_lock WHERE document_id IN (SELECT value FROM json_each(?)) AND expires>unixepoch()*1000
+          UNION SELECT r.document_id FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id IN (SELECT value FROM json_each(?)) AND b.expires>unixepoch()*1000`,
+    )
+      .bind(ids, ids)
+      .all<{ document_id: string }>()
+      .then((rows) => rows.results.map((row) => row.document_id)),
+  };
+}
+
 function samePageSources(left: unknown, right: ReceiptDocument["pages"]) {
   if (!Array.isArray(left)) return false;
   const source = (page: ReceiptDocument["pages"][number]) => ({
@@ -177,17 +210,16 @@ async function names(env: Env, documents: ReceiptDocument[]) {
         "SELECT filename,document_id FROM document_names",
       ).all<{ filename: string; document_id: string }>()
     ).results;
-  const result: { filename: string; document_id: string }[] = [];
-  for (let offset = 0; offset < bases.length; offset += 40) {
-    const chunk = bases.slice(offset, offset + 40);
-    const ranges = chunk.map(() => "(filename>=? AND filename<?)").join(" OR ");
-    const rows = await env.DB.prepare(
-      `SELECT filename,document_id FROM document_names WHERE ${ranges}`,
-    )
-      .bind(...chunk.flatMap((base) => [base, `${base}\uffff`]))
-      .all<{ filename: string; document_id: string }>();
-    result.push(...rows.results);
-  }
+  const pages = await Promise.all(
+    chunks(bases, 40).map((chunk) =>
+      env.DB.prepare(
+        `SELECT filename,document_id FROM document_names WHERE ${chunk.map(() => "(filename>=? AND filename<?)").join(" OR ")}`,
+      )
+        .bind(...chunk.flatMap((base) => [base, `${base}\uffff`]))
+        .all<{ filename: string; document_id: string }>(),
+    ),
+  );
+  const result = pages.flatMap((rows) => rows.results);
   return [...new Map(result.map((row) => [row.filename, row])).values()];
 }
 function chooseName(
@@ -410,6 +442,18 @@ export async function documentRoute(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/documents")) return null;
+  const aliasesOf =
+    request.method === "GET" && url.pathname === "/api/documents"
+      ? url.searchParams.get("aliasesOf")
+      : null;
+  if (aliasesOf !== null) {
+    // Saved documents merged into or duplicating one document, so a grouping can
+    // retarget them in the same save without reading the whole catalog.
+    requireThat(UUID.test(aliasesOf), 400, "Invalid document ID.");
+    return json({
+      documents: await storedAliasesForTargets(env, [aliasesOf]),
+    });
+  }
   const single =
     request.method === "GET"
       ? url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})$/)
@@ -476,10 +520,33 @@ export async function documentRoute(
   let captures: Capture[];
   let stored: ReceiptDocument[];
   let summaryPage: { total: number; next: string | null } | null = null;
+  // Reads that depend only on the selected documents start together as soon as
+  // those documents are known. Each preload is keyed by its document IDs; a
+  // later request for a different set falls back to a fresh read.
   let preloadedNames: Promise<Awaited<ReturnType<typeof names>>> | null = null;
-  let preloadedReviewState: ReturnType<typeof loadCompletenessAudits> | null =
+  let preloadedReviewState: {
+    key: string;
+    state: ReturnType<typeof loadCompletenessAudits>;
+  } | null = null;
+  let preloadedFileRows: { key: string; rows: Promise<FileRow[]> } | null =
     null;
-  let preloadedFileRows: Promise<FileRow[]> | null = null;
+  const preloadReviewState = (documents: ReceiptDocument[]) =>
+    (preloadedReviewState = {
+      key: documentKey(documents.map((document) => document.id)),
+      state: loadCompletenessAudits(
+        env,
+        documents,
+        profile ? measureQuery : undefined,
+      ),
+    }).state;
+  const preloadFileRows = (documentIds: string[]) =>
+    (preloadedFileRows = {
+      key: documentKey(documentIds),
+      rows: fetchFileRows(documentIds),
+    }).rows;
+  let pageOwners: { capture_id: string; document_id: string }[] = [];
+  let summaryReservations: ReturnType<typeof processingReservations> | null =
+    null;
   async function fetchFileRows(documentIds?: string[]): Promise<FileRow[]> {
     return (
       await measureQuery("pdf_records", () =>
@@ -504,13 +571,15 @@ export async function documentRoute(
       "Save 1 to 100 document changes with valid IDs.",
     );
     const ids = changes.map((item: ReceiptDocument) => item.id);
-    const prior = await storedDocumentsByIds(env, ids);
     const targets = changes.flatMap((item: ReceiptDocument) =>
       [item.duplicateOf, item.mergedInto].filter(
         (id): id is string => typeof id === "string" && UUID.test(id),
       ),
     );
-    const relations = await storedDocumentsByIds(env, targets);
+    const [prior, relations] = await inOrder([
+      storedDocumentsByIds(env, ids),
+      storedDocumentsByIds(env, targets),
+    ]);
     const reparented = changes
       .filter(
         (item: ReceiptDocument) =>
@@ -528,25 +597,47 @@ export async function documentRoute(
         ...aliases.map((alias) => [alias.id, alias] as const),
       ]).values(),
     ];
+    const requestedPages = changes.flatMap((item: ReceiptDocument) =>
+      Array.isArray(item.pages)
+        ? item.pages
+            .map((page) => page?.captureId)
+            .filter(
+              (id): id is string => typeof id === "string" && UUID.test(id),
+            )
+        : [],
+    );
     const sourceIds = [
       ...new Set([
         ...stored.flatMap((document) =>
           document.pages.map((page) => page.captureId),
         ),
-        ...changes.flatMap((item: ReceiptDocument) =>
-          Array.isArray(item.pages)
-            ? item.pages
-                .map((page) => page?.captureId)
-                .filter(
-                  (id): id is string => typeof id === "string" && UUID.test(id),
-                )
-            : [],
-        ),
+        ...requestedPages,
         ...ids,
         ...targets,
       ]),
     ];
-    captures = await loadSelectedCaptures!(sourceIds);
+    // Unsaved singletons have no vendor/date, so stored and submitted documents
+    // are every filename candidate. Page ownership is checked after validation.
+    preloadedNames = measureQuery("filename_reservations", () =>
+      names(env, [...stored, ...namedDocuments(changes)]),
+    );
+    const owners = Promise.all(
+      chunks([...new Set(requestedPages)], 99).map((chunk) =>
+        env.DB.prepare(
+          `SELECT capture_id,document_id FROM document_pages
+           WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
+        )
+          .bind(...chunk)
+          .all<{ capture_id: string; document_id: string }>(),
+      ),
+    );
+    const [selected, ownerPages] = await inOrder([
+      loadSelectedCaptures!(sourceIds),
+      owners,
+      preloadedNames,
+    ]);
+    captures = selected;
+    pageOwners = ownerPages.flatMap((rows) => rows.results);
   } else if (summaryLimit !== null && loadSelectedCaptures) {
     requireThat(
       Number.isInteger(summaryLimit) &&
@@ -645,15 +736,17 @@ export async function documentRoute(
           .all<{ id: string; payload: string }>(),
         includeVirtual
           ? env.DB.prepare(
-              `SELECT captures.id FROM captures
+              `SELECT captures.id,captures.sha256 FROM captures
          LEFT JOIN document_pages page ON page.capture_id=captures.id
          LEFT JOIN document_heads saved ON saved.id=captures.id
          WHERE captures.id>? AND page.capture_id IS NULL AND saved.id IS NULL
            AND (${currentTake}) ORDER BY captures.id LIMIT ?`,
             )
               .bind(after, summaryLimit + 1)
-              .all<{ id: string }>()
-          : Promise.resolve({ results: [] as { id: string }[] }),
+              .all<{ id: string; sha256: string }>()
+          : Promise.resolve({
+              results: [] as { id: string; sha256: string }[],
+            }),
         reviewer
           ? Promise.resolve({ total: 0 })
           : env.DB.prepare(
@@ -673,10 +766,16 @@ export async function documentRoute(
           : Promise.resolve({ total: 0 }),
       ]);
     const ordered = [
-      ...savedRows.results.map((row) => ({ ...row, virtual: false })),
+      ...savedRows.results.map((row) => ({
+        id: row.id,
+        payload: row.payload,
+        sha256: "",
+        virtual: false,
+      })),
       ...virtualRows.results.map((row) => ({
         id: row.id,
         payload: "",
+        sha256: row.sha256,
         virtual: true,
       })),
     ].sort((a, b) => a.id.localeCompare(b.id));
@@ -684,6 +783,10 @@ export async function documentRoute(
     stored = page
       .filter((row) => !row.virtual)
       .map((row) => storedDocumentPayload(row.payload));
+    const pageDocuments = [
+      ...stored,
+      ...page.filter((row) => row.virtual).map(newDocument),
+    ];
     const ids = [
       ...new Set([
         ...stored.flatMap((document) =>
@@ -692,7 +795,19 @@ export async function documentRoute(
         ...page.filter((row) => row.virtual).map((row) => row.id),
       ]),
     ];
-    captures = await loadSelectedCaptures(ids);
+    const pageIds = pageDocuments.map((document) => document.id);
+    preloadedNames = measureQuery("filename_reservations", () =>
+      names(env, stored),
+    );
+    if (!reviewer) summaryReservations = processingReservations(env, pageIds);
+    const [selected] = await inOrder([
+      loadSelectedCaptures(ids),
+      preloadedNames,
+      preloadFileRows(pageIds),
+      preloadReviewState(pageDocuments),
+      summaryReservations?.ids,
+    ]);
+    captures = selected;
     requireThat(
       captures.length === ids.length,
       503,
@@ -726,22 +841,26 @@ export async function documentRoute(
         saved.pages.some((item) => item.captureId === sourceId))
     ) {
       stored = [saved];
-      if (single) {
+      // Single-document reads also need its filename, PDF and review state.
+      const read = Boolean(single || sourceId);
+      if (read)
         preloadedNames = measureQuery("filename_reservations", () =>
           names(env, [saved]),
         );
-        preloadedFileRows = fetchFileRows([saved.id]);
-        preloadedReviewState = loadCompletenessAudits(
-          env,
-          [saved],
-          profile ? measureQuery : undefined,
-        );
-      }
-      const selected = await Promise.all(
-        saved.pages.map((item) =>
-          measureQuery("capture", () => loadCapture(item.captureId)),
+      const [selected] = await inOrder([
+        Promise.all(
+          saved.pages.map((item) =>
+            measureQuery("capture", () => loadCapture(item.captureId)),
+          ),
         ),
-      );
+        ...(read
+          ? [
+              preloadedNames,
+              preloadFileRows([saved.id]),
+              preloadReviewState([saved]),
+            ]
+          : []),
+      ]);
       requireThat(
         selected.every((item) => item !== null),
         503,
@@ -796,10 +915,9 @@ export async function documentRoute(
   let sourceDecisions = new Map<string, boolean>();
   const loadReviewState = async (selected: ReceiptDocument[]) => {
     const state =
-      preloadedReviewState &&
-      selected.length === 1 &&
-      selected[0].id === stored[0]?.id
-        ? await preloadedReviewState
+      preloadedReviewState?.key ===
+      documentKey(selected.map((document) => document.id))
+        ? await preloadedReviewState.state
         : await loadCompletenessAudits(
             env,
             selected,
@@ -809,27 +927,11 @@ export async function documentRoute(
     jevRoles = state.roles;
     sourceDecisions = state.sourceDecisions;
   };
-  const nameCandidates = scopedPost
-    ? [
-        ...docs,
-        ...(scopedPost.documents as ReceiptDocument[]).filter(
-          (item: unknown): item is ReceiptDocument =>
-            !!item &&
-            typeof item === "object" &&
-            (typeof (item as ReceiptDocument).vendor === "string" ||
-              (item as ReceiptDocument).vendor === null) &&
-            (typeof (item as ReceiptDocument).receiptDate === "string" ||
-              (item as ReceiptDocument).receiptDate === null),
-        ),
-      ]
-    : docs;
   const reservedPromise =
     namedAction?.[2] === "history"
       ? Promise.resolve([] as Awaited<ReturnType<typeof names>>)
       : (preloadedNames ??
-        measureQuery("filename_reservations", () =>
-          names(env, nameCandidates),
-        ));
+        measureQuery("filename_reservations", () => names(env, docs)));
   let reserved: Awaited<ReturnType<typeof names>> = [];
   let fileRows: FileRow[] = [];
   let filesLoaded = false;
@@ -840,10 +942,8 @@ export async function documentRoute(
       return;
     }
     fileRows =
-      preloadedFileRows &&
-      documentIds?.length === 1 &&
-      documentIds[0] === stored[0]?.id
-        ? await preloadedFileRows
+      documentIds && preloadedFileRows?.key === documentKey(documentIds)
+        ? await preloadedFileRows.rows
         : await fetchFileRows(documentIds);
     filesLoaded = true;
   };
@@ -1025,18 +1125,14 @@ export async function documentRoute(
           loadFileRows(page.slice(0, limit).map((document) => document.id)),
           loadReviewState(page.slice(0, limit)),
         ]);
-        const reserved = reviewer
-          ? { results: [] as { document_id: string }[] }
-          : await env.DB.prepare(
-              `SELECT document_id FROM processing_lock WHERE document_id IN (SELECT value FROM json_each(?)) AND expires>unixepoch()*1000
-          UNION SELECT r.document_id FROM processing_batch_documents r JOIN processing_batch_lease b ON b.batch_id=r.batch_id WHERE r.document_id IN (SELECT value FROM json_each(?)) AND b.expires>unixepoch()*1000`,
-            )
-              .bind(
-                JSON.stringify(page.slice(0, limit).map((d) => d.id)),
-                JSON.stringify(page.slice(0, limit).map((d) => d.id)),
-              )
-              .all<{ document_id: string }>();
-        const reservedIds = new Set(reserved.results.map((r) => r.document_id));
+        const pageIds = page.slice(0, limit).map((d) => d.id);
+        const reservedIds = new Set(
+          reviewer
+            ? []
+            : summaryReservations?.key === documentKey(pageIds)
+              ? await summaryReservations.ids
+              : await processingReservations(env, pageIds).ids,
+        );
         return json({
           total: reviewer ? undefined : (summaryPage?.total ?? page.length),
           next: summaryPage?.next ?? null,
@@ -1222,21 +1318,15 @@ export async function documentRoute(
     );
     if (scopedPost) {
       const changedIds = new Set(changed.map((document) => document.id));
-      const pageIds = [...explicitPages];
-      for (let offset = 0; offset < pageIds.length; offset += 99) {
-        const chunk = pageIds.slice(offset, offset + 99);
-        const owners = await env.DB.prepare(
-          `SELECT capture_id,document_id FROM document_pages
-           WHERE capture_id IN (${chunk.map(() => "?").join(",")})`,
-        )
-          .bind(...chunk)
-          .all<{ capture_id: string; document_id: string }>();
-        requireThat(
-          owners.results.every((owner) => changedIds.has(owner.document_id)),
-          409,
-          "Page belongs to another document. Transfer it in the same save.",
-        );
-      }
+      requireThat(
+        pageOwners.every(
+          (owner) =>
+            !explicitPages.has(owner.capture_id) ||
+            changedIds.has(owner.document_id),
+        ),
+        409,
+        "Page belongs to another document. Transfer it in the same save.",
+      );
     }
     const reconciled = final.filter(
       (d) =>

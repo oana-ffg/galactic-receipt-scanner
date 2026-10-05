@@ -4,7 +4,7 @@ import { processingReview, categorySetup } from "./processing-review";
 import { documentTypes, type PurchaseCategory } from "./extraction";
 import { api } from "./api";
 import {
-  readDocuments,
+  readDocumentAliases,
   readDocument,
   readDocumentSummaries,
   type DocumentSummary,
@@ -26,6 +26,7 @@ import {
 } from "./documents";
 import { messageOf, RequestError } from "./errors";
 import { inspectImage } from "./image-viewer";
+import { originalBlob, showOriginal } from "./original";
 import { captureNotes } from "./capture-notes";
 import { receiptHandoff } from "./receipt-handoff";
 
@@ -410,6 +411,8 @@ export async function mountReview(app: HTMLElement) {
   function renderDetail(original: DocumentView) {
     const doc = structuredClone(original);
     disposeDetail();
+    const cleanups: (() => void)[] = [];
+    disposeDetail = () => cleanups.splice(0).forEach((cleanup) => cleanup());
     detail.replaceChildren();
     detail.append(el("h2", doc.filename ?? "Identify this document"));
     const ownerNotes = el("section", undefined, "review-owner-notes");
@@ -517,6 +520,7 @@ export async function mountReview(app: HTMLElement) {
     doc.pages.forEach((p, index) => {
       const capture = catalog.captures.find((c) => c.id === p.captureId)!;
       const card = el("article");
+      card.dataset.capture = capture.id;
       card.append(
         el("h3", `Page ${index + 1}`),
         el(
@@ -525,22 +529,44 @@ export async function mountReview(app: HTMLElement) {
         ),
       );
       const image = el("img");
-      image.src = `/api/files/${p.captureId}/raw`;
       image.alt = `Original page ${index + 1}`;
-      image.loading = "lazy";
+      // Reserve the page's box so controls never move when the original arrives.
+      const pixels = capture.metadata.sourcePixels;
+      if (pixels?.length === 2) [image.width, image.height] = pixels;
+      cleanups.push(
+        showOriginal(
+          image,
+          capture,
+          (error) =>
+            image.replaceWith(
+              el(
+                "p",
+                `Original could not load: ${messageOf(error)} Reload to retry.`,
+              ),
+            ),
+          { lazy: true },
+        ),
+      );
       card.append(image);
       const controls = el("div", undefined, "controls");
       const zoom = el("button", "Inspect original", "secondary");
       image.style.cursor = "zoom-in";
       image.onclick = () => zoom.click();
       zoom.onclick = () =>
-        inspectImage({
-          title: `Original page ${index + 1}`,
-          alt: image.alt,
-          image: image.src,
-          capture,
-          download: { source: image.src, label: "Download original" },
-        });
+        void originalBlob(capture).then(
+          (blob) =>
+            inspectImage({
+              title: `Original page ${index + 1}`,
+              alt: image.alt,
+              image: blob,
+              capture,
+              download: {
+                source: `/api/files/${p.captureId}/raw`,
+                label: "Download original",
+              },
+            }),
+          (error) => setMessage(messageOf(error)),
+        );
       controls.append(zoom);
       const earlier = el("button", "Move earlier", "secondary");
       earlier.disabled = index === 0;
@@ -607,10 +633,10 @@ export async function mountReview(app: HTMLElement) {
       const ocrSource = reviewOcrSource(doc);
       const preview = documentPreview(doc, catalog.captures, ocrSource);
       preview.element.classList.add("receipt-source-preview");
-      disposeDetail = () => {
-        preview.destroy();
-        ocrSource.destroy();
-      };
+      cleanups.push(
+        () => preview.destroy(),
+        () => ocrSource.destroy(),
+      );
       detail.append(preview.element);
     }
     detail.append(sources);
@@ -863,11 +889,11 @@ export async function mountReview(app: HTMLElement) {
         },
         ocrSource,
       );
-      disposeDetail = () => {
-        preview.destroy();
-        review.destroy();
-        ocrSource.destroy();
-      };
+      cleanups.push(
+        () => preview.destroy(),
+        () => review.destroy(),
+        () => ocrSource.destroy(),
+      );
       workspace.append(preview.element, review.element);
       const sourceDetails = el("details");
       sourceDetails.append(
@@ -1053,15 +1079,17 @@ export async function mountReview(app: HTMLElement) {
       const button = el("button", label, "secondary");
       button.onclick = () =>
         void action(async () => {
-          const fresh = await readDocuments();
-          const source = fresh.documents.find((d) => d.id === doc.id)!;
-          const destination = fresh.documents.find(
-            (d) => d.id === target.value,
-          );
-          if (!destination || !reason.input.value.trim())
+          if (!target.value || !reason.input.value.trim())
             throw Error(
               "Choose a destination and describe the matching evidence.",
             );
+          // Read only the two documents and the source's aliases, not the catalog.
+          const [{ document: source }, { document: destination }, aliases] =
+            await Promise.all([
+              readDocument(doc.id),
+              readDocument(target.value),
+              readDocumentAliases(doc.id),
+            ]);
           source.evidence = reason.input.value;
           if (duplicate) {
             source.duplicateOf = destination.id;
@@ -1099,7 +1127,7 @@ export async function mountReview(app: HTMLElement) {
             };
             source.mergedInto = destination.id;
             const changes = [source, destination];
-            retargetAbsorbedAliases(changes, fresh.documents, destination.id);
+            retargetAbsorbedAliases(changes, aliases.documents, destination.id);
             await saveDocuments(changes);
             selected = destination.id;
           }

@@ -9,6 +9,7 @@ import {
 } from "./receipt-rectification";
 import { messageOf } from "./errors";
 import { formatOcrConfidence } from "./ocr-confidence";
+import { showOriginal } from "./original";
 
 /** Display-only crop. Originals and stored derivatives are never modified. */
 export function documentPreview(
@@ -232,12 +233,14 @@ export function documentPreview(
     const observer = new ResizeObserver(fit);
     observer.observe(viewport);
     let image: HTMLImageElement | undefined;
+    let releaseImage = () => {};
     dispose = () => {
       observer.disconnect();
       if (image) {
         image.onload = image.onerror = null;
         image.src = "";
       }
+      releaseImage();
       canvas.width = canvas.height = 0;
     };
     const render = () => {
@@ -250,6 +253,7 @@ export function documentPreview(
       renderedOverlay?.element.remove();
       renderedOverlay = undefined;
       status.textContent = `Loading scan ${pageIndex + 1} of ${doc.pages.length}…`;
+      releaseImage();
       image = new Image();
       image.onload = async () => {
         if (current !== generation || !image) return;
@@ -331,15 +335,19 @@ export function documentPreview(
         previous.disabled = pageIndex === 0;
         next.disabled = pageIndex === doc.pages.length - 1;
       };
-      image.onerror = () => {
+      const failed = (detail: string) => {
         if (current === generation) {
-          status.textContent =
-            "Scan could not load. Choose another preview source to retry.";
+          status.textContent = `Scan could not load.${detail} Choose another preview source to retry.`;
           previous.disabled = pageIndex === 0;
           next.disabled = pageIndex === doc.pages.length - 1;
         }
       };
-      image.src = `/api/files/${page.captureId}/raw`;
+      image.onerror = () => failed("");
+      releaseImage = showOriginal(
+        image,
+        { id: page.captureId, sha256: page.sha256 },
+        (error) => failed(` ${messageOf(error)}`),
+      );
     };
     previous.onclick = () => {
       pageIndex--;

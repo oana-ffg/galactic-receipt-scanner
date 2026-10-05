@@ -1,5 +1,6 @@
 import { blurDescription } from "./blur-quality";
 import { inspectImage } from "./image-viewer";
+import { originalBlob, showOriginal } from "./original";
 import { CapturePreviews } from "./capture-previews";
 import { edgeOverlay } from "./paper-overlay";
 import { api } from "./api";
@@ -22,6 +23,7 @@ export class CaptureLibrary {
   private followLatest = true;
   private state: ScanState | undefined;
   private selectionGeneration = 0;
+  private releaseImage = () => {};
   private panel: HTMLElement;
   private list: HTMLElement;
   private previousButton: HTMLButtonElement;
@@ -207,7 +209,7 @@ export class CaptureLibrary {
     stage.className = "saved-image";
     const img = document.createElement("img");
     img.alt = "Saved original receipt";
-    img.src = rawUrl(capture.id);
+    this.releaseImage();
     const svg = edgeOverlay(capture);
     stage.append(img, svg);
     const controls = document.createElement("div");
@@ -217,13 +219,22 @@ export class CaptureLibrary {
     zoom.className = "secondary";
     zoom.disabled = true;
     zoom.onclick = () =>
-      inspectImage({
-        title: "Inspect saved original",
-        alt: "Full-resolution saved original receipt",
-        image: rawUrl(capture.id),
-        capture,
-        download: { source: rawUrl(capture.id), label: "Download original" },
-      });
+      void originalBlob(capture).then(
+        (blob) =>
+          inspectImage({
+            title: "Inspect saved original",
+            alt: "Full-resolution saved original receipt",
+            image: blob,
+            capture,
+            download: {
+              source: rawUrl(capture.id),
+              label: "Download original",
+            },
+          }),
+        (error) => {
+          note.textContent = `Could not load this original: ${messageOf(error)}`;
+        },
+      );
     const edges = document.createElement("label");
     edges.className = "toggle";
     const checkbox = document.createElement("input");
@@ -262,14 +273,29 @@ export class CaptureLibrary {
       note,
       captureNotes(capture),
     );
-    try {
-      await img.decode();
-      if (generation === this.selectionGeneration) zoom.disabled = false;
-    } catch {
-      if (generation === this.selectionGeneration) {
-        stage.remove();
-        note.textContent = "Could not load this original. Reload to retry.";
-      }
-    }
+    // The capture previews below reuse these verified bytes instead of downloading
+    // the same original again.
+    await new Promise<void>((resolve) => {
+      const failed = (detail: string) => {
+        if (generation === this.selectionGeneration) {
+          stage.remove();
+          note.textContent = `Could not load this original.${detail} Reload to retry.`;
+        }
+        resolve();
+      };
+      img.onload = () => {
+        if (generation === this.selectionGeneration) zoom.disabled = false;
+        resolve();
+      };
+      img.onerror = () => failed("");
+      const release = showOriginal(img, capture, (error) =>
+        failed(` ${messageOf(error)}`),
+      );
+      // A newer selection releases this image; settle this show either way.
+      this.releaseImage = () => {
+        release();
+        resolve();
+      };
+    });
   }
 }

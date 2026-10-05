@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { test, expect } from "@playwright/test";
 import { newDocument, type DocumentView } from "../web/documents";
 import type { Capture } from "../web/types";
@@ -6,9 +7,14 @@ test("copies saved receipt details, reopens filtered documents and recovers from
   page,
   context,
 }) => {
+  // Originals are checksum-verified before display, so serve matching bytes.
+  const original = (label: string) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><rect width="400" height="800" fill="white"/><text x="20" y="80">SYNTHETIC RECEIPT ${label}</text></svg>`;
+  const hash = (body: string) =>
+    createHash("sha256").update(body).digest("hex");
   const capture = {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
-    sha256: "a".repeat(64),
+    sha256: hash(original("1")),
     created_at: "2026-09-17T10:00:00Z",
     is_current: true,
     metadata: { sourcePixels: [400, 800], quality: {} },
@@ -16,7 +22,7 @@ test("copies saved receipt details, reopens filtered documents and recovers from
   const second = {
     ...capture,
     id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000002",
-    sha256: "b".repeat(64),
+    sha256: hash(original("2")),
   };
   const doc: DocumentView = {
     ...newDocument(capture),
@@ -53,7 +59,7 @@ test("copies saved receipt details, reopens filtered documents and recovers from
   await page.route("**/api/files/*/raw", (route) =>
     route.fulfill({
       contentType: "image/svg+xml",
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><rect width="400" height="800" fill="white"/><text x="20" y="80">SYNTHETIC RECEIPT</text></svg>',
+      body: original(route.request().url().includes(second.id) ? "2" : "1"),
     }),
   );
   await page.goto("/review");
@@ -64,10 +70,11 @@ test("copies saved receipt details, reopens filtered documents and recovers from
     page.locator("#review-list button[aria-current=true]"),
   ).toHaveCount(1);
   await page.getByRole("button", { name: "Move earlier" }).nth(1).click();
-  await expect(page.locator(".review-sources img").first()).toHaveAttribute(
-    "src",
-    `/api/files/${second.id}/raw`,
+  await expect(page.locator(".review-sources article").first()).toHaveAttribute(
+    "data-capture",
+    second.id,
   );
+  await expect(page.locator(".review-sources img").first()).toBeVisible();
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.getByRole("button", { name: "Copy for Codex" }).click();
   await expect(page.getByText("Copied receipt details.")).toBeVisible();

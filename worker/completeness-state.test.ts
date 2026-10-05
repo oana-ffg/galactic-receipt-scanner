@@ -55,17 +55,19 @@ async function assessedPurchase() {
             return this;
           },
           async all() {
+            // Decisions select through a jev_assessments subquery; match them first.
             return {
-              results: sql.includes("FROM jev_assessments")
-                ? [assessment]
-                : sql.includes("FROM jev_document_heads")
-                  ? [head]
-                  : sql.includes("FROM jev_page_heads")
-                    ? pageHeads
-                    : sql.includes("FROM source_review_decisions") &&
-                        JSON.parse(assessment.payload).response.answers
-                          .completeness.choice === "no"
-                      ? [{ assessment_id: assessment.id, decision: "fine" }]
+              results: sql.includes("FROM source_review_decisions")
+                ? JSON.parse(assessment.payload).response.answers.completeness
+                    .choice === "no"
+                  ? [{ assessment_id: assessment.id, decision: "fine" }]
+                  : []
+                : sql.includes("FROM jev_assessments")
+                  ? [assessment]
+                  : sql.includes("FROM jev_document_heads")
+                    ? [head]
+                    : sql.includes("FROM jev_page_heads")
+                      ? pageHeads
                       : [],
             };
           },

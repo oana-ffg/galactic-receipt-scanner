@@ -161,6 +161,91 @@ test("source intervention can be marked fine and reopened from review", async ({
   await expect(page.locator("#review-list .review-item")).toHaveCount(1);
 });
 
+test("groups pages into a destination and retargets aliases without reading the catalog", async ({
+  page,
+}) => {
+  const request = isolatedRequest;
+  const image = await readFile("e2e/fixtures/generated/danish.png");
+  const sha256 = createHash("sha256").update(image).digest("hex");
+  const [source, destination, duplicate] = [
+    randomUUID(),
+    randomUUID(),
+    randomUUID(),
+  ];
+  const headers = { Origin: origin, "X-Scanner-Request": "1" };
+  for (const id of [source, destination, duplicate])
+    expect(
+      (
+        await request.post(`/api/captures/${id}`, {
+          data: image,
+          headers: {
+            ...headers,
+            "X-Capture-Status": "accepted",
+            "X-Capture-Metadata": JSON.stringify({
+              sourcePixels: [941, 1672],
+              quality: { ok: true, receiptPixels: [941, 1672] },
+            }),
+          },
+        })
+      ).ok(),
+    ).toBe(true);
+  const target = newDocument({ id: destination, sha256 });
+  target.vendor = "Synthetic destination";
+  const alias = {
+    ...newDocument({ id: duplicate, sha256 }),
+    duplicateOf: source,
+    evidence: "Synthetic duplicate scan",
+  };
+  expect(
+    (
+      await request.post("/api/documents", {
+        data: Buffer.from(
+          JSON.stringify({
+            documents: [newDocument({ id: source, sha256 }), target, alias],
+          }),
+        ),
+        headers: { ...headers, "Content-Type": "application/json" },
+      })
+    ).ok(),
+  ).toBe(true);
+  const catalogReads: string[] = [];
+  page.on("request", (sent) => {
+    const url = new URL(sent.url());
+    if (url.pathname === "/api/documents" && !url.search)
+      catalogReads.push(sent.method());
+  });
+  await page.goto(`/review?document=${source}`);
+  await page.getByText("Group pages or mark a duplicate").click();
+  await page
+    .getByLabel(
+      "Find destination by vendor, date, reference, text or document ID",
+    )
+    .fill(destination);
+  await page
+    .getByLabel("Destination document")
+    .selectOption({
+      label: `Synthetic destination · ${destination.slice(0, 8)}`,
+    });
+  await page
+    .getByLabel("Evidence for the relationship")
+    .fill("Synthetic matching reference");
+  await page
+    .getByRole("button", { name: "Group pages into destination" })
+    .click();
+  await expect(
+    page.getByText("Relationship saved; every source is retained."),
+  ).toBeVisible();
+  const read = async (id: string) =>
+    (await (await request.get(`/api/documents/${id}`)).json()).document;
+  expect(
+    (await read(destination)).pages.map((item: any) => item.captureId),
+  ).toEqual([destination, source]);
+  expect((await read(source)).mergedInto).toBe(destination);
+  expect((await read(duplicate)).duplicateOf).toBe(destination);
+  // Saves POST to /api/documents; nothing reads the whole catalog.
+  expect(catalogReads.every((method) => method === "POST")).toBe(true);
+});
+
 test("review saves non-adjacent pages, produces a named multi-page PDF and keeps uncertainty visible", async ({
   page,
 }) => {

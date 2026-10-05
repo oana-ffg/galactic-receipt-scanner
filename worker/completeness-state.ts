@@ -5,6 +5,7 @@ import {
   type DocumentView,
 } from "../web/documents";
 import { legacyHeadMatches, pageFingerprint } from "./jev-head-identity";
+import { chunks } from "./http";
 
 export const COMPLETENESS_TASK = "receipt-completeness-v1";
 
@@ -50,17 +51,16 @@ export async function loadCompletenessAudits(
     query: (placeholders: string) => string,
     ids: string[],
   ): Promise<T[]> => {
-    const rows: T[] = [];
-    for (let offset = 0; offset < ids.length; offset += 90) {
-      const chunk = ids.slice(offset, offset + 90);
-      const result = await runQuery(name, () =>
-        env.DB.prepare(query(chunk.map(() => "?").join(",")))
-          .bind(...chunk)
-          .all<T>(),
-      );
-      rows.push(...result.results);
-    }
-    return rows;
+    const pages = await Promise.all(
+      chunks(ids, 90).map((chunk) =>
+        runQuery(name, () =>
+          env.DB.prepare(query(chunk.map(() => "?").join(",")))
+            .bind(...chunk)
+            .all<T>(),
+        ),
+      ),
+    );
+    return pages.flatMap((page) => page.results);
   };
   const scoped = documents.length <= 100;
   const documentIds = [...new Set(documents.map((document) => document.id))];
@@ -71,46 +71,64 @@ export async function loadCompletenessAudits(
       ),
     ),
   ];
-  const [assessmentRows, headRows, pageHeadRows] = await Promise.all([
-    scoped
-      ? selectChunks<AssessmentRow>(
-          "jev_assessments",
-          (ids) =>
-            `SELECT id,subject_id,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
-          documentIds,
-        )
-      : runQuery("jev_assessments", () =>
-          env.DB.prepare(
-            "SELECT id,subject_id,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
+  type DecisionRow = { assessment_id: string; decision: string };
+  // Decisions are keyed by assessment. Read those for every completeness assessment
+  // of these documents with the other review state instead of in a later round trip.
+  const [assessmentRows, headRows, pageHeadRows, decisionRows] =
+    await Promise.all([
+      scoped
+        ? selectChunks<AssessmentRow>(
+            "jev_assessments",
+            (ids) =>
+              `SELECT id,subject_id,payload,created_at FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids}) ORDER BY created_at DESC,id DESC`,
+            documentIds,
           )
-            .bind(COMPLETENESS_TASK)
-            .all<AssessmentRow>(),
-        ).then((row) => row.results),
-    scoped
-      ? selectChunks<HeadRow>(
-          "jev_document_heads",
-          (ids) =>
-            `SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads WHERE document_id IN (${ids})`,
-          documentIds,
-        )
-      : runQuery("jev_document_heads", () =>
-          env.DB.prepare(
-            "SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads",
-          ).all<HeadRow>(),
-        ).then((row) => row.results),
-    scoped
-      ? selectChunks<PageHeadRow>(
-          "jev_page_heads",
-          (ids) =>
-            `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads WHERE capture_id IN (${ids})`,
-          pageIds,
-        )
-      : runQuery("jev_page_heads", () =>
-          env.DB.prepare(
-            "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
-          ).all<PageHeadRow>(),
-        ).then((row) => row.results),
-  ]);
+        : runQuery("jev_assessments", () =>
+            env.DB.prepare(
+              "SELECT id,subject_id,payload,created_at FROM jev_assessments WHERE task=? ORDER BY created_at DESC,id DESC",
+            )
+              .bind(COMPLETENESS_TASK)
+              .all<AssessmentRow>(),
+          ).then((row) => row.results),
+      scoped
+        ? selectChunks<HeadRow>(
+            "jev_document_heads",
+            (ids) =>
+              `SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads WHERE document_id IN (${ids})`,
+            documentIds,
+          )
+        : runQuery("jev_document_heads", () =>
+            env.DB.prepare(
+              "SELECT document_id,document_revision,page_fingerprint,role FROM jev_document_heads",
+            ).all<HeadRow>(),
+          ).then((row) => row.results),
+      scoped
+        ? selectChunks<PageHeadRow>(
+            "jev_page_heads",
+            (ids) =>
+              `SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads WHERE capture_id IN (${ids})`,
+            pageIds,
+          )
+        : runQuery("jev_page_heads", () =>
+            env.DB.prepare(
+              "SELECT capture_id,source_sha256,ocr_sha256 FROM jev_page_heads",
+            ).all<PageHeadRow>(),
+          ).then((row) => row.results),
+      scoped
+        ? selectChunks<DecisionRow>(
+            "source_review_decisions",
+            (ids) =>
+              `SELECT assessment_id,decision FROM source_review_decisions WHERE assessment_id IN (SELECT id FROM jev_assessments WHERE task='${COMPLETENESS_TASK}' AND subject_id IN (${ids})) ORDER BY rowid DESC`,
+            documentIds,
+          )
+        : runQuery("source_review_decisions", () =>
+            env.DB.prepare(
+              "SELECT assessment_id,decision FROM source_review_decisions WHERE assessment_id IN (SELECT id FROM jev_assessments WHERE task=?) ORDER BY rowid DESC",
+            )
+              .bind(COMPLETENESS_TASK)
+              .all<DecisionRow>(),
+          ).then((row) => row.results),
+    ]);
   const current = new Map(documents.map((document) => [document.id, document]));
   const headById = new Map(headRows.map((head) => [head.document_id, head]));
   const pageHeadById = new Map(
@@ -131,26 +149,28 @@ export async function loadCompletenessAudits(
       : [];
   });
   const savedVersions = new Map<string, string>();
-  for (let offset = 0; offset < legacyCandidates.length; offset += 45) {
-    const chunk = legacyCandidates.slice(offset, offset + 45);
-    const rows = await runQuery("jev_legacy_versions", () =>
-      env.DB.prepare(
-        `WITH wanted(document_id,revision) AS (VALUES ${chunk.map(() => "(?,?)").join(",")})
+  const legacyPages = await Promise.all(
+    chunks(legacyCandidates, 45).map((chunk) =>
+      runQuery("jev_legacy_versions", () =>
+        env.DB.prepare(
+          `WITH wanted(document_id,revision) AS (VALUES ${chunk.map(() => "(?,?)").join(",")})
          SELECT v.document_id,v.payload FROM document_versions v
          JOIN wanted w ON v.document_id=w.document_id AND v.revision=w.revision`,
-      )
-        .bind(
-          ...chunk.flatMap((head) => [
-            head.document_id,
-            head.document_revision,
-          ]),
         )
-        .all<{ document_id: string; payload: string }>(),
-    );
+          .bind(
+            ...chunk.flatMap((head) => [
+              head.document_id,
+              head.document_revision,
+            ]),
+          )
+          .all<{ document_id: string; payload: string }>(),
+      ),
+    ),
+  );
+  for (const rows of legacyPages)
     rows.results.forEach((row) =>
       savedVersions.set(row.document_id, row.payload),
     );
-  }
   const validHeads = new Map<string, HeadRow>();
   const roles = new Map<string, string>();
   for (const document of documents) {
@@ -215,20 +235,14 @@ export async function loadCompletenessAudits(
     });
   }
   const sourceDecisions = new Map<string, boolean>();
-  const assessmentIds = [
-    ...new Set([...result.values()].map((audit) => audit.assessmentId)),
-  ];
-  const decisions = await selectChunks<{
-    assessment_id: string;
-    decision: string;
-  }>(
-    "source_review_decisions",
-    (ids) =>
-      `SELECT assessment_id,decision FROM source_review_decisions WHERE assessment_id IN (${ids}) ORDER BY rowid DESC`,
-    assessmentIds,
+  const assessmentIds = new Set(
+    [...result.values()].map((audit) => audit.assessmentId),
   );
-  for (const row of decisions)
-    if (!sourceDecisions.has(row.assessment_id))
+  for (const row of decisionRows)
+    if (
+      assessmentIds.has(row.assessment_id) &&
+      !sourceDecisions.has(row.assessment_id)
+    )
       sourceDecisions.set(row.assessment_id, row.decision === "fine");
   return { audits: result, roles, sourceDecisions };
 }

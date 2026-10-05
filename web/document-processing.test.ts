@@ -40,15 +40,20 @@ beforeEach(() => {
     "createImageBitmap",
     vi.fn().mockResolvedValue({ width: 100, height: 200, close() {} }),
   );
-  mocks.original.mockResolvedValue({
+  mocks.original.mockResolvedValue(original([]));
+});
+// Capture detail carries its saved artifact versions with the verified original.
+function original(artifacts: { kind: string; sha256: string }[]) {
+  return {
     capture: {
       id,
       sha256: sourceHash,
       metadata: { sourcePixels: [100, 200], quality: { quad: null } },
+      artifacts,
     },
     blob: new Blob(["synthetic pixels"], { type: "image/png" }),
-  });
-});
+  };
+}
 afterEach(() => vi.unstubAllGlobals());
 async function stored(
   value: ReturnType<typeof savedOcr> | null,
@@ -60,9 +65,11 @@ async function stored(
     "fetch",
     vi.fn().mockResolvedValue(new Response(tampered ? "{}" : bytes)),
   );
-  mocks.api.mockImplementation(async (_path, options) => {
-    if (!options)
-      return { artifacts: value ? [{ kind: "ocr", sha256: hash }] : [] };
+  mocks.original.mockResolvedValue(
+    original(value ? [{ kind: "ocr", sha256: hash }] : []),
+  );
+  mocks.api.mockImplementation(async (path, options) => {
+    if (!options) throw Error(`Unexpected read ${path}`);
     return {
       sha256: await sha256(await options.body.arrayBuffer()),
       revision: doc.revision,
@@ -136,12 +143,12 @@ it.each(["unreadable", "malformed", "checksum"])(
     const goodHash = await sha256(goodBytes);
     const badHash =
       failure === "checksum" ? "c".repeat(64) : await sha256(badBytes);
-    mocks.api.mockResolvedValueOnce({
-      artifacts: [
+    mocks.original.mockResolvedValueOnce(
+      original([
         { kind: "ocr", sha256: badHash },
         { kind: "ocr", sha256: goodHash },
-      ],
-    });
+      ]),
+    );
     vi.stubGlobal(
       "fetch",
       vi

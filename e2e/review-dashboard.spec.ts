@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { test, expect } from "@playwright/test";
 
 test("shows saved edges, paginates, remembers audio and stores a private screenshot", async ({
@@ -7,6 +8,9 @@ test("shows saved edges, paginates, remembers audio and stores a private screens
   const failures: string[] = [];
   page.on("pageerror", (error) => failures.push(error.message));
   const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  // Originals are checksum-verified before display, so serve matching bytes.
+  const original =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><rect width="800" height="1000" fill="#111"/><rect x="80" y="100" width="640" height="800" fill="white"/><text x="130" y="400" font-size="32">SYNTHETIC RECEIPT</text></svg>';
   const first = {
     id,
     receipt_id: id,
@@ -16,7 +20,7 @@ test("shows saved edges, paginates, remembers audio and stores a private screens
     current_capture_id: id,
     created_at: "2026-09-12T10:00:00Z",
     status: "accepted",
-    sha256: "synthetic",
+    sha256: createHash("sha256").update(original).digest("hex"),
     ocr_status: "awaiting Work",
     outputs: { image: false, pdf: false },
     metadata: {
@@ -50,10 +54,7 @@ test("shows saved edges, paginates, remembers audio and stores a private screens
     });
   });
   await page.route(`**/api/files/${id}/raw`, (route) =>
-    route.fulfill({
-      contentType: "image/svg+xml",
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><rect width="800" height="1000" fill="#111"/><rect x="80" y="100" width="640" height="800" fill="white"/><text x="130" y="400" font-size="32">SYNTHETIC RECEIPT</text></svg>',
-    }),
+    route.fulfill({ contentType: "image/svg+xml", body: original }),
   );
   await page.goto("/");
   await expect(page.locator("#captures .capture-row")).toHaveCount(10);

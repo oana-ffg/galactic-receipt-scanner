@@ -22,7 +22,11 @@ original mutation/deletion endpoint is granted. See PROCESSING_ACCESS.md for pro
 revocation and required real-gateway verification. This credential is an owner-level
 receipt-data secret, even though its operation scope is narrower than browser access.
 
-All API responses and downloads use no-store, attachment downloads and nosniff. Mutations
+All API responses and downloads use no-store, attachment downloads and nosniff. Only
+public application code is cached by the browser, privately: content-hashed bundles as
+immutable, and vendor libraries/models revalidated by ETag through owner authorization.
+A page reuses checksum-verified originals it has already loaded from a small in-memory
+set; receipt bytes are never written to the browser's HTTP cache. Mutations
 from browser sessions require an exact same-origin request and a custom header. Machine
 requests require their bearer credential; supplied foreign Origins and cross-site browser
 requests are denied. No CORS access is granted.

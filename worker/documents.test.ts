@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { runtime, origin, ownerHeaders } from "../scripts/test-runtime.mjs";
-import { newDocument } from "../web/documents";
+import { newDocument, retargetAbsorbedAliases } from "../web/documents";
 import { documentRoute } from "./documents";
 import { pageFingerprint } from "./jev-head-identity";
 import type { Quality } from "../web/types";
@@ -751,6 +751,35 @@ it("rejects a merge that would leave an incoming alias pointing to another alias
   first.mergedInto = retained.id;
   first.evidence = "Synthetic merge";
   expect((await save([first, retained])).status).toBe(400);
+});
+it("lists a document's saved aliases so a grouping can retarget them without the catalog", async () => {
+  const first = newDocument(await capture());
+  const retained = newDocument(await capture());
+  const alias = newDocument(await capture());
+  alias.duplicateOf = first.id;
+  alias.evidence = "Synthetic duplicate scan";
+  expect((await save([first, retained, alias])).status).toBe(200);
+  const aliases = (await (
+    await request(`/api/documents?aliasesOf=${first.id}`)
+  ).json()) as { documents: any[] };
+  expect(aliases.documents.map((document) => document.id)).toEqual([alias.id]);
+  expect(
+    (await (await request(`/api/documents?aliasesOf=${retained.id}`)).json())
+      .documents,
+  ).toEqual([]);
+  expect((await request("/api/documents?aliasesOf=invalid")).status).toBe(400);
+  first.revision = retained.revision = 1;
+  retained.pages.push(...first.pages);
+  first.pages = [];
+  first.mergedInto = retained.id;
+  first.evidence = "Synthetic merge";
+  const changes = [first, retained];
+  retargetAbsorbedAliases(changes, aliases.documents, retained.id);
+  expect((await save(changes)).status).toBe(200);
+  expect(
+    (await (await request(`/api/documents/${alias.id}`)).json()).document
+      .duplicateOf,
+  ).toBe(retained.id);
 });
 it("pins visual approval to a stored PDF hash and requires review after regeneration", async () => {
   const d = newDocument(await capture());
