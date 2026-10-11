@@ -10,6 +10,7 @@ export const serverStages = [
   "serverObjectMs",
   "serverInsertMs",
   "serverRetryReadMs",
+  "serverRecoveryConflictMs",
   "serverReadbackMs",
   "serverAckMs",
   "serverTotalMs",

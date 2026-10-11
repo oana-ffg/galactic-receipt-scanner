@@ -606,6 +606,24 @@ async function route(
               .first<CaptureRow>(),
           ),
         ));
+      if (!row && restored) {
+        const conflictingTake = await timing.measure(
+          "serverRecoveryConflictMs",
+          () =>
+            atDependencyStage("D1", "capture-recovery-conflict-read", () =>
+              env.DB.prepare(
+                "SELECT id FROM captures WHERE receipt_id=? AND take_number=?",
+              )
+                .bind(receiptId, restored.take_number)
+                .first<{ id: string }>(),
+            ),
+        );
+        requireThat(
+          !conflictingTake,
+          409,
+          "Recovery take number already belongs to another capture. Originals unchanged.",
+        );
+      }
       requireThat(row, 503, "Capture metadata was not confirmed.");
       requireThat(
         row.sha256 === sha && row.retake_of === retakeOf,
