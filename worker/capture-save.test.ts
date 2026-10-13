@@ -195,6 +195,57 @@ it("restores acknowledged timestamps and retake order without promoting an older
   });
 });
 
+it("reports a recovered take-number collision as a permanent conflict while preserving both originals", async () => {
+  const parent = crypto.randomUUID(),
+    lost = crypto.randomUUID(),
+    replacement = crypto.randomUUID();
+  await send(upload(parent));
+  const ack = await (
+    await send(upload(lost, source, { "X-Retake-Of": parent }))
+  ).json();
+  const db = await mf.getD1Database("DB");
+  // Simulate restoring older metadata in this isolated test database. A new
+  // take then claims the acknowledged number while the phone retains its copy.
+  await db.prepare("DELETE FROM captures WHERE id=?").bind(lost).run();
+  const otherSource = new Uint8Array([255, 216, 255, 8, 7, 6]);
+  const replacementAck = await (
+    await send(upload(replacement, otherSource, { "X-Retake-Of": parent }))
+  ).json();
+  expect(replacementAck.take_number).toBe(ack.take_number);
+  const before = await db
+    .prepare("SELECT * FROM captures WHERE id=?")
+    .bind(replacement)
+    .first();
+  const response = await send(
+    upload(lost, source, {
+      "X-Retake-Of": parent,
+      "X-Capture-Recovery": JSON.stringify(ack),
+    }),
+  );
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({
+    detail:
+      "Recovery take number already belongs to another capture. Originals unchanged.",
+  });
+  expect(
+    await db
+      .prepare("SELECT * FROM captures WHERE id=?")
+      .bind(replacement)
+      .first(),
+  ).toEqual(before);
+  expect(
+    await db.prepare("SELECT id FROM captures WHERE id=?").bind(lost).first(),
+  ).toBeNull();
+  const bucket = await mf.getR2Bucket("BUCKET");
+  for (const [id, data] of [
+    [lost, source],
+    [replacement, otherSource],
+  ] as const) {
+    const object = await bucket.get(`raw/${id}/${await digest(data)}`);
+    expect(new Uint8Array(await object!.arrayBuffer())).toEqual(data);
+  }
+});
+
 it("preserves immutable conflict bytes separately without changing the canonical source or multiplying identical retries", async () => {
   const id = crypto.randomUUID();
   await send(upload(id));
