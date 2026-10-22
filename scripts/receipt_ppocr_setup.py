@@ -5,7 +5,6 @@ import base64
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,9 +15,14 @@ import venv
 
 from receipt_api import ClientError, ScannerClient, artifact_directory, credentials, diagnostic_text, write_new_file
 
+from receipt_runtime_versions import (
+    NODE_REQUIREMENT, PILLOW_PATCH, UnsafePillowError,
+    require_pillow_version, require_supported_node,
+)
+
 REPO = Path(__file__).resolve().parent.parent
 PACKAGES = ['paddlepaddle==3.3.1', 'paddleocr==3.7.0', 'paddlex[ocr]==3.7.2',
-            'PyMuPDF==1.26.7', 'Pillow==12.3.0', 'tzdata>=2025.2,<2027']
+            'PyMuPDF==1.26.7', f'Pillow=={PILLOW_PATCH}', 'tzdata>=2025.2,<2027']
 MODELS = {
     'det': '144d0621e059566e5086e228829171591c144c2deb07b2dad4962214fbabfcf7',
     'rec': '4eecc1c6a4623765042e6fc15446da0da110b7d875b6b72b2d351d2b2dbd4da6',
@@ -97,14 +101,24 @@ def discover(config=None, profile=None):
 
 def check_node(node, root):
     result = subprocess.run([str(node), '--version'], capture_output=True, text=True, timeout=30)
-    version = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)\s*', result.stdout)
-    if result.returncode or not version or tuple(map(int, version.groups())) < (22, 18, 0):
-        raise ClientError('Install Node 22.18+ for the shared TypeScript crop geometry, then rerun setup.')
+    if result.returncode:
+        raise ClientError(NODE_REQUIREMENT)
+    require_supported_node(result.stdout)
     if not (REPO / 'node_modules' / 'pdf-lib').exists():
         npm = shutil.which('npm.cmd' if os.name == 'nt' else 'npm')
         if not npm:
             raise ClientError('npm is unavailable; install the project dependencies with npm ci, then rerun.')
         run_logged([npm, 'ci', '--no-audit', '--no-fund'], root, 'install-node')
+
+
+def check_pillow(python):
+    result = subprocess.run([str(python), '-I', '-c', 'import PIL; print(PIL.__version__)'],
+                            capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise UnsafePillowError(
+            'The prepared OCR interpreter cannot load Pillow. Upgrade Pillow to '
+            f'{PILLOW_PATCH}, or rerun setup with --cpu to repair the managed CPU runtime.')
+    require_pillow_version(result.stdout)
 
 
 def check_renderer(renderer):
@@ -137,10 +151,15 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
     if profile and not force_cpu:
         try:
             client.configure_ppocr(Path(profile).resolve())
+            check_pillow(client.ocr_backend.python)
             check_node(client.node, root)
             check_layout(client, root)
             client.ocr_backend.preflight()
             return str(Path(profile).resolve())
+        except UnsafePillowError:
+            # A supplied profile belongs to its owner; do not switch GPU/CPU modes
+            # or mutate that interpreter as an implicit security repair.
+            raise
         except (ClientError, OSError, subprocess.SubprocessError) as error:
             print(json.dumps({'event': 'prepared_runtime_unavailable', 'error_type': type(error).__name__,
                               'error': diagnostic_text(str(error)), 'next': 'install isolated CPU runtime'}),
@@ -149,6 +168,7 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
     if prepared.exists():
         try:
             client.configure_ppocr(prepared)
+            check_pillow(client.ocr_backend.python)
             check_node(client.node, root)
             check_layout(client, root)
             client.ocr_backend.preflight()
@@ -170,7 +190,7 @@ def ensure_profile(config, profile=None, *, force_cpu=False, node=None):
     install_models(root / 'models')
     node_path = node or shutil.which('node')
     if not node_path:
-        raise ClientError('Install Node 22.18+ for the shared receipt crop geometry, then rerun setup.')
+        raise ClientError(NODE_REQUIREMENT)
     node_path = str(Path(node_path).resolve(strict=True))
     check_node(node_path, root)
     value = dict(origin=client.origin, repository=str(REPO), client_config=str(Path(config).resolve()),

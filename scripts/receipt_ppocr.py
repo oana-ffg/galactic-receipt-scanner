@@ -12,6 +12,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from receipt_api import ClientError, write_new_file, artifact_directory
+from receipt_runtime_versions import require_pillow_version
 
 
 class PPBackend:
@@ -110,6 +111,10 @@ def main():
     parser.add_argument('--source')
     parser.add_argument('--output')
     args = parser.parse_args()
+    # Check the actual interpreter on every invocation, including preflight.
+    # This runs before models load or any receipt bytes are opened.
+    from PIL import __version__ as pillow_version
+    require_pillow_version(pillow_version)
     settings = json.loads(Path(args.profile).read_text(encoding='utf-8'))['ppocr']
     models = Path(settings['models'])
     if not models.is_absolute() or models.is_symlink() or models.is_junction():

@@ -44,7 +44,7 @@ class PPSetupTests(unittest.TestCase):
                 patch.object(setup, 'credentials', return_value={}), \
                 patch.object(setup, 'ScannerClient', return_value=client), \
                 patch.object(setup, 'run_logged'), patch.object(setup, 'install_models'), \
-                patch.object(setup, 'check_node'), patch.object(setup, 'check_layout'):
+                patch.object(setup, 'check_node'), patch.object(setup, 'check_pillow'), patch.object(setup, 'check_layout'):
             profile = setup.ensure_profile(str(config), node=str(node))
             descriptor = setup.publish_host_descriptor(profile, str(worker_python))
 
@@ -80,7 +80,7 @@ class PPSetupTests(unittest.TestCase):
                 patch.object(setup, 'credentials', return_value={}), \
                 patch.object(setup, 'ScannerClient', return_value=client), \
                 patch.object(setup, 'run_logged'), patch.object(setup, 'install_models'), \
-                patch.object(setup, 'check_node'), patch.object(setup, 'check_layout'), \
+                patch.object(setup, 'check_node'), patch.object(setup, 'check_pillow'), patch.object(setup, 'check_layout'), \
                 redirect_stdout(output):
             setup.ensure_profile(str(config), str(gpu_profile), node=str(self.executable('node')))
 
