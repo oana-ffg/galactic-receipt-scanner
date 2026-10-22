@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 
 from receipt_api import ClientError, ScannerClient, artifact_directory, credentials, write_new_file
+from receipt_runtime_versions import NODE_REQUIREMENT
 from receipt_ppocr_setup import check_layout, check_node, check_renderer, publish_host_descriptor
 
 REPO = Path(__file__).resolve().parent.parent
@@ -18,7 +19,7 @@ def ensure_consumer_profile(config, *, node=None, renderer=None):
     artifact_directory(root)
     node_value = node or shutil.which('node.exe' if os.name == 'nt' else 'node')
     if not node_value:
-        raise ClientError('Install Node 22.18+ for the saved-PP receipt worker.')
+        raise ClientError(NODE_REQUIREMENT)
     node_path = str(Path(node_value).resolve(strict=True))
     check_node(node_path, root)
     renderer_value = renderer or shutil.which('pdftoppm.exe' if os.name == 'nt' else 'pdftoppm')

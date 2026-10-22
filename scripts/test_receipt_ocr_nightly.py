@@ -264,7 +264,7 @@ class NightlyTests(unittest.TestCase):
 
     def test_unsupported_node_is_rejected_before_publishing_a_profile(self):
         with patch('receipt_ppocr_setup.subprocess.run', return_value=Mock(returncode=0, stdout='v20.19.0\n')):
-            with self.assertRaisesRegex(ClientError, 'Node 22.18'):
+            with self.assertRaisesRegex(ClientError, 'patched Node'):
                 check_node('node', Path('.'))
 
     def test_pinned_model_checksums_are_complete_sha256(self):
