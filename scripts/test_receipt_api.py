@@ -694,6 +694,31 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(result["ocr_sha256"], hashlib.sha256(good).hexdigest())
             run.assert_not_called()
 
+    def test_prepare_reuses_inspected_original_without_another_download_or_write(self):
+        ocr = json.dumps(self.ocr_fixture()).encode()
+        sha = hashlib.sha256(ocr).hexdigest()
+        self.client.get = Mock(return_value={**self.meta, 'artifacts': [dict(kind='ocr', sha256=sha)]})
+        self.client.request = Mock(side_effect=lambda path: self.body if '/raw?' in path else ocr)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.client.original(self.id, root / 'originals')
+            result = self.client.prepare(self.id, root / 'ocr', allow_inference=False,
+                                         originals_directory=root / 'originals')
+            self.assertTrue(result['cached'])
+            self.assertEqual(result['path'], source['path'])
+            self.assertEqual(len(list(root.rglob('*.jpg'))), 1)
+            raw_requests = [item for item in self.client.request.call_args_list if '/raw?' in item.args[0]]
+            self.assertEqual(len(raw_requests), 1)
+            self.client.ocr_backend.run.assert_not_called()
+            # Reuse must verify the stored bytes, never hide a corrupted original
+            # by downloading a replacement or creating another cache entry.
+            Path(source['path']).write_bytes(b'corrupted synthetic original')
+            calls = self.client.request.call_count
+            with self.assertRaisesRegex(ClientError, 'Original hash/size verification failed'):
+                self.client.prepare(self.id, root / 'ocr', allow_inference=False,
+                                    originals_directory=root / 'originals')
+            self.assertEqual(self.client.request.call_count, calls)
+
     def test_prepare_generates_uploads_and_returns_the_verified_pinned_path(self):
         data = json.dumps(self.ocr_fixture()).encode()
         sha = hashlib.sha256(data).hexdigest()

@@ -197,7 +197,8 @@ def prepare_requirement(client, value, root):
     scan_crop = client.source_region(original, root / 'required')
     if value['crop'] != scan_crop:
         raise ClientError('Requested OCR crop differs from the saved scan crop.')
-    prepared = client.prepare(cid, root / 'required', crop=scan_crop, rotation=value['rotation'])
+    prepared = client.prepare(cid, root / 'required', crop=scan_crop, rotation=value['rotation'],
+                              originals_directory=root / 'originals')
     if prepared['sha256'] != value['source_sha256']:
         raise ClientError('Prepared OCR source does not match the Luna request.')
     return dict(capture_id=cid, ocr_sha256=prepared['ocr_sha256'], verified=True)

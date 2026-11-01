@@ -485,6 +485,9 @@ function mountDashboard(): void {
   }
   let fallbackRequestedAt = -Infinity;
   let fallbackRequestPending = false;
+  let cameraAvailable = false;
+  let pollPending = false;
+  let pollTimer: ReturnType<typeof setTimeout>;
   function denyAccess(problem: RequestError): void {
     if (accessDenied) return;
     accessDenied = true;
@@ -512,7 +515,9 @@ function mountDashboard(): void {
     }
   }
   async function poll() {
-    if (accessDenied) return;
+    if (accessDenied || pollPending) return;
+    clearTimeout(pollTimer);
+    pollPending = true;
     try {
       const result = await api<{
         state: ScanState | null;
@@ -522,6 +527,7 @@ function mountDashboard(): void {
         fresh: boolean;
       }>("/api/station", { signal: AbortSignal.timeout(4000) });
       if (accessDenied) return;
+      cameraAvailable = Boolean(result.camera);
       stateOrder.setCamera(result.camera);
       void direct.sync(result.camera, result.previewSession);
       if (
@@ -548,12 +554,33 @@ function mountDashboard(): void {
       )
         denyAccess(problem);
       else if (!direct.fresh) disconnected(messageOf(problem));
+    } finally {
+      pollPending = false;
+      if (!accessDenied)
+        pollTimer = setTimeout(
+          () => void poll(),
+          cameraAvailable && document.visibilityState === "visible"
+            ? 700
+            : 3000,
+        );
     }
-    if (!accessDenied) setTimeout(() => void poll(), 700);
   }
   void poll();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void poll();
+  });
   async function preview() {
     if (accessDenied) return;
+    // No phone means no preview to retrieve. Hidden dashboards must not renew
+    // fallback demand or keep downloading and decoding frames nobody can see.
+    if (!cameraAvailable || document.visibilityState !== "visible") {
+      live.hidden = true;
+      element("feed").hidden = true;
+      previewOverlay?.setMedia(null);
+      element("empty-preview").hidden = false;
+      setTimeout(() => void preview(), 1000);
+      return;
+    }
     const started = performance.now();
     if (!videoFresh()) {
       live.hidden = true;

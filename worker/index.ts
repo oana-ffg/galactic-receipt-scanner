@@ -856,7 +856,16 @@ async function route(
   if (file && method === "GET") {
     const [, id, kind] = file;
     requireThat(UUID.test(id), 400, "Invalid capture ID.");
-    const row = await captureRow(env, id);
+    // Downloads need immutable storage identity, not library counts, notes or
+    // retake selection. Keep this lookup independent of the capture catalog size.
+    const row = await atDependencyStage("D1", "capture-row-read", () =>
+      env.DB.prepare(
+        "SELECT raw_key,content_type,sha256 FROM captures WHERE id=?",
+      )
+        .bind(id)
+        .first<Pick<CaptureRow, "raw_key" | "content_type" | "sha256">>(),
+    );
+    requireThat(row, 404, "Capture not found.");
     const version = url.searchParams.get("version");
     requireThat(
       version === null || /^[0-9a-f]{64}$/.test(version),

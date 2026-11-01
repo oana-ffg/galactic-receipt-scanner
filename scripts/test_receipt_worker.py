@@ -179,9 +179,10 @@ class FakeScanner:
         return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                     pages=len(pages), layouts=layouts, searchable=False)
 
-    def prepare(self, cid, directory, *, crop=None, rotation=0, allow_inference=True):
+    def prepare(self, cid, directory, *, crop=None, rotation=0, allow_inference=True, originals_directory=None):
         self.prepare_allow_inference.append(allow_inference)
-        result = self.original(cid, directory)
+        result = self.original(cid, originals_directory if originals_directory is not None else directory)
+        Path(directory).mkdir(parents=True, exist_ok=True)
         ocr = Path(directory) / (cid + ".json")
         ocr.write_text(json.dumps({"text": "Synthetic text", "lines": [], "text_only_pdf_layers": [{"base64": "must-not-escape"}]}))
         return {**result, "ocr_path": str(ocr), "crop": crop, "rotation": rotation,
@@ -637,11 +638,17 @@ class WorkerTests(unittest.TestCase):
         self.send("claim", viewer_checked=True)
         result = self.worker.handle(dict(op="context"))
         self.assertIn("observe", result["input_error"])
+
         self.assertFalse(any(path.startswith("/api/processing/context?") for method, path in self.fake.calls))
         self.send("previews", capture_ids=[DID])
         self.send("observe", observation=dict(capture_id=DID, type="payment-slip", vendor="Synthetic",
             receipt_date="2026-01-01", currency="DKK", total_minor=1250, card_last_four="1234"))
         self.send("context")
+
+    def test_preparation_shares_the_inspected_original_cache(self):
+        self.prepared()
+        self.assertEqual(self.worker.state['sources'][DID]['path'],
+                         self.worker.state['prepared'][DID]['path'])
 
     def test_neighbor_values_cannot_replace_claimed_payment_slip(self):
         self.claimed()

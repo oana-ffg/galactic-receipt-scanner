@@ -514,12 +514,15 @@ class ScannerClient:
         source["rotation"] = rotation
         raise OCRRequired(self.origin, source)
 
-    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0, allow_inference=True):
+    def prepare(self, capture_id, directory=".local/receipt-api", *, crop=AUTO_CROP, rotation=0, allow_inference=True,
+                originals_directory=None):
         """Verify an original and reuse or run prepared PP OCR, returning references."""
         if self.ocr_backend is None or self.ocr_backend.engine != "PP-OCRv6":
             raise ClientError("Configure PP-OCRv6 before processing; Tesseract is not a fallback.")
         root = Path(directory)
-        original = self.original(capture_id, root / "originals")
+        # Callers that already inspected the pixels can share that cache. original()
+        # still verifies fresh metadata, byte length and SHA-256 on every reuse.
+        original = self.original(capture_id, originals_directory if originals_directory is not None else root / "originals")
         meta = self.get("/api/captures/" + capture_id)
         artifact_directory(root)
         scan_crop = self.source_region(original, root)

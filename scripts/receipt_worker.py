@@ -1621,7 +1621,8 @@ class Worker:
                     retained = {layout["captureId"]: layout for layout in self.state["draft"]["layouts"]}
                     require(cid in retained, "Prepare only pages retained in the frozen Luna draft.")
                     source = self.client.prepare(cid, self.work / "ocr", crop=retained[cid]["crop"],
-                                                 rotation=retained[cid]["rotation"], allow_inference=False)
+                                                 rotation=retained[cid]["rotation"], allow_inference=False,
+                                                 originals_directory=self.work / "originals")
                     verify(source["sha256"] == self.state["capture_hashes"][cid], "OCR original differs from the claimed source hash.")
                     source["crop"] = retained[cid]["crop"]
                     self.state["prepared"][cid] = source

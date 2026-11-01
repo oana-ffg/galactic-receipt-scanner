@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 
-test("dashboard stops polling after owner access is denied", async ({ page }) => {
+test("dashboard stops polling after owner access is denied", async ({
+  page,
+}) => {
   let stationRequests = 0;
   await page.route(/\/api\/station(?:\/preview)?$/, async (route) => {
     stationRequests++;
@@ -46,7 +48,20 @@ test("late preview decode cannot redraw after access is denied", async ({
   const stationHeld = new Promise<void>((resolve) => {
     releaseStation = resolve;
   });
+  let stationRequests = 0;
   await page.route(/\/api\/station$/, async (route) => {
+    if (++stationRequests === 1) {
+      await route.fulfill({
+        json: {
+          camera: "00000000-0000-4000-8000-000000000001",
+          state: null,
+          previewSession: null,
+          count: 0,
+          fresh: true,
+        },
+      });
+      return;
+    }
     await stationHeld;
     await route.fulfill({
       status: 401,

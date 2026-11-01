@@ -136,7 +136,8 @@ class NightlyTests(unittest.TestCase):
         self.client.prepare.return_value = dict(sha256=value['source_sha256'], ocr_sha256='b' * 64)
         self.assertTrue(prepare_requirement(self.client, value, self.root)['verified'])
         self.assertTrue((self.root / 'required').is_dir())
-        self.client.prepare.assert_called_once_with(value['capture_id'], self.root / 'required', crop=value['crop'], rotation=90)
+        self.client.prepare.assert_called_once_with(value['capture_id'], self.root / 'required', crop=value['crop'], rotation=90,
+                                                   originals_directory=self.root / 'originals')
         self.client.prepare.reset_mock()
         self.client.original.return_value = dict(sha256='c' * 64)
         with self.assertRaisesRegex(ClientError, 'source hash changed'):
